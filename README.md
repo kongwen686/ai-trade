@@ -391,6 +391,18 @@ python3 run_backtest.py "data/spot/monthly/klines/*/4h/*.zip" \
 - `btc_compounding_risk_off`
   - 更偏复利与回撤控制，主动压低暴露和并发
 
+当前建议的使用顺序：
+
+1. `btc_core_trading`
+   - 当前是主推荐模板
+   - 在 `BTCUSDT 4h / 2025` 的样本外验证里最稳，收益和回撤比最好
+2. `btc_cycle_trend`
+   - 更适合强趋势年份
+   - 在 `2024` 样本内表现强，但在 `2025` 样本外明显转弱
+3. `btc_compounding_risk_off`
+   - 当前版本先作为观察模板
+   - 回撤控制思路合理，但现阶段收益端还不成立
+
 ### 当前默认入场逻辑
 
 - 综合分数大于等于阈值
