@@ -1,129 +1,169 @@
-# Binance Signal Scanner
+# AI Trade
 
-一个基于 Binance 官方 Spot API 设计的本地交易信号 APP 原型。
+[![Python](https://img.shields.io/badge/python-3.11%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
+[![License](https://img.shields.io/github/license/kongwen686/ai-trade)](./LICENSE)
+[![Repo](https://img.shields.io/badge/repo-public-1f8f57)](https://github.com/kongwen686/ai-trade)
 
-它的目标不是“自动下单”，而是先把高流动性币种里更值得关注的入场候选筛出来，再把原因拆给你看。
+本项目是一个面向 Binance Spot 市场的本地交易信号与回测工作台。
 
-## 这个版本如何利用你提到的三个仓库
+它不负责自动下单，而是把这几件事放进同一套工具里：
 
-- `binance-spot-api-docs`
-  - 用来确认 Spot 市场接口能力：`/api/v3/exchangeInfo`、`/api/v3/klines`、`/api/v3/ticker/24hr`、WebSocket Kline Streams。
-- `binance-connector-python`
-  - 我参考了它的 `exchange_info / klines / ticker24hr` 接口组织方式，当前代码保留同样的网关方法命名，后续可以无缝切回官方 SDK。
-- `binance-public-data`
-  - 代码里内置了 Binance 公共 K 线归档 ZIP 的读取器，后续可以直接接历史归档做回测或离线筛选。
+- 实时扫描高流动性币种
+- 计算技术指标并打分
+- 接入 X/Twitter 舆情与指定情报账号
+- 用 Binance 历史 K 线做策略回测
+- 在 Web 界面里直接配置密钥、情报源和策略参数
 
-## 当前实现
+如果你想要的是一个“可研究、可筛选、可验证”的本地信号系统，而不是黑盒喊单机器人，这个项目就是为这个方向写的。
 
-- 只扫描 `USDT` 计价的 Spot 交易对，可通过页面参数修改
-- 用 24h 成交额和成交笔数做第一层流动性过滤
-- 对候选币种拉 K 线并计算：
+## 功能概览
+
+- 实时扫描
+  - Binance Spot 交易对筛选
+  - 支持计价币、周期、候选池、成交额、成交笔数过滤
+- 技术指标
   - RSI(14)
   - EMA(20/50)
   - MACD(12, 26, 9)
   - KDJ(9, 3, 3)
-  - 最近一根量能放大
+  - 量能放大
   - 主动买盘占比
-- 支持一个可插拔的“社区热度”适配层
-  - 支持 X/Twitter 实时舆情抓取
-  - 若存在 `data/community_scores.csv`，会和实时源一起并入综合评分
-  - 若未配置任何社区源，则自动忽略该维度并重算权重
-- 提供两个入口：
-  - Web 页面：`/`
-  - JSON API：`/api/scan`
-- 提供两套历史回测入口：
-  - Web 页面：`/backtest`
-  - JSON API：`/api/backtest`
-  - CLI：`run_backtest.py`
+- 社区与情报
+  - X/Twitter 实时舆情
+  - 指定账号情报模式：`off` / `blend` / `only`
+  - 本地 CSV 社区分数
+  - 社媒查询别名
+- 历史回测
+  - Binance public-data ZIP 读取
+  - 单币种回测
+  - 多币种横截面组合回测
+  - 止损 / 止盈 / 最大持仓 bars
+  - 手续费 / maker-taker / Binance 账户真实 commission
+  - 固定滑点 / 动态滑点
+  - 资金曲线 / 最大回撤 / Profit Factor
+- 运行配置
+  - Web 页面直接配置 Binance key、X token、情报账号和策略默认值
+  - 保存后自动应用到扫描页和回测页
 
-## 为什么能做，但要说明一个边界
+## Web 入口
 
-Binance 官方这三个仓库足够支撑：
+启动后默认地址：
 
-- 实时市场扫描
-- 历史数据回放
-- Python 程序化接入
+- 实时扫描：`http://127.0.0.1:8000/`
+- 历史回测：`http://127.0.0.1:8000/backtest`
+- 运行配置：`http://127.0.0.1:8000/settings`
+- 扫描 API：`http://127.0.0.1:8000/api/scan`
+- 回测 API：`http://127.0.0.1:8000/api/backtest`
 
-但它们**不包含真实的社区热度数据**。所以“社区热度”必须来自额外来源，例如：
+## 快速开始
 
-- X / Twitter
-- 你自己的研究 CSV
-- Reddit / Telegram / News 数据聚合服务
-- 第三方情绪 API
-
-这个项目已经把接口留好了，不会把核心策略和外部情绪数据耦死。
-
-## 运行
+### 1. 运行 Web 应用
 
 ```bash
 python3 run.py
 ```
 
-打开 `http://127.0.0.1:8000`
+然后打开：
 
-回测页：
+```text
+http://127.0.0.1:8000/settings
+```
 
-- `http://127.0.0.1:8000/backtest`
+建议第一次先在 `/settings` 完成这几步：
 
-运行配置页：
+1. 配置 `Binance API Key / Secret`，如果你需要账户真实手续费
+2. 配置 `X Bearer Token`，如果你需要实时舆情
+3. 填写 `Tracked Accounts`，如果你想跟踪特定 Twitter 情报账号
+4. 设置扫描默认参数和回测默认参数
 
-- `http://127.0.0.1:8000/settings`
+### 2. 运行回测 CLI
 
-## 在界面里直接配置密钥、情报源和策略
+```bash
+python3 run_backtest.py "data/spot/monthly/klines/*/4h/*.zip" \
+  --score-threshold 72 \
+  --portfolio-top-n 2
+```
 
-现在可以直接在 `/settings` 页面里维护这几类运行参数：
+## 为什么这个项目有用
+
+很多交易工具只做其中一部分：
+
+- 要么只看图
+- 要么只看情绪
+- 要么只做回测
+- 要么只是一层 API 封装
+
+这个项目把“筛选、解释、回测、配置”放在了一起：
+
+- 扫描页负责找当前值得看的标的
+- 回测页负责验证这套规则过去是否有效
+- 设置页负责把数据源、密钥和策略变成可直接组合的运行时参数
+
+它更像一个研究型终端，而不是一个下单脚本。
+
+## 运行配置页
+
+`/settings` 现在已经支持直接配置：
 
 - Binance API Key / Secret / RecvWindow
-- X / Twitter Bearer Token
-- Twitter 情报监控账号列表
-- 情报模式
-  - `off`
-  - `blend`
-  - `only`
+- X/Twitter Bearer Token
+- Twitter 情报账号列表
+- 情报模式与权重
 - 实时扫描默认参数
-- 历史回测默认策略参数
+- 历史回测默认参数
 
-保存后：
+保存机制：
 
-- `/` 会直接使用新的扫描默认值
-- `/backtest` 会直接使用新的回测默认值
-- 配置会写入本地 `data/runtime_config.json`
+- 表单通过 `POST /settings` 提交
+- 不会把密钥放进 URL
+- 会持久化到本地 `data/runtime_config.json`
+- 保存后 `/` 和 `/backtest` 会自动使用新的默认值
 
-说明：
+安全边界：
 
-- 密钥通过 `POST /settings` 提交，不会出现在 URL 查询参数里
-- 当前 `data/runtime_config.json` 是本地明文存储，适合个人本机使用
-- 如果你后面要做多用户部署，建议把它切到数据库或专门的加密密钥存储
+- `data/runtime_config.json` 当前是本地明文存储
+- 适合个人单机使用
+- 如果要做多用户部署，建议切换到数据库或专用密钥存储
 
-## 接入 X / Twitter
+## 信号维度
 
-先准备一个 X Developer App 的 Bearer Token。你可以继续用环境变量，也可以直接在 `/settings` 页面里填写：
+当前综合评分主要由这些维度构成：
+
+- 趋势结构
+- 动量状态
+- 时机确认
+- 成交量放大
+- 流动性质量
+- 市场强弱
+- 社区热度
+
+这套评分不是“绝对预测涨跌”，而是为了回答一个更实际的问题：
+
+> 在当前这一批高流动性币种里，哪几个更像值得进一步观察或准备入场的候选。
+
+## 社区热度与 Twitter 情报
+
+### X / Twitter
+
+支持 X Developer Bearer Token。
+
+可直接通过 `/settings` 填写，或者继续用环境变量：
 
 ```bash
-export X_BEARER_TOKEN="你的 Bearer Token"
+export X_BEARER_TOKEN="your-bearer-token"
 python3 run.py
 ```
 
-可选环境变量：
+支持模式：
 
-```bash
-export COMMUNITY_PROVIDER="auto"
-export X_RECENT_WINDOW_HOURS="24"
-export X_RECENT_MAX_RESULTS="25"
-export X_LANGUAGE="en"
-```
+- `off`
+  - 只看普通全市场舆情
+- `blend`
+  - 普通舆情 + 指定账号情报按权重混合
+- `only`
+  - 只看指定账号内容
 
-默认策略：
-
-- `COMMUNITY_PROVIDER=auto`
-  - 有 `X_BEARER_TOKEN` 就启用 X
-  - 有 `data/community_scores.csv` 就同时并入 CSV
-- `COMMUNITY_PROVIDER=x`
-  - 只使用 X / Twitter
-- `COMMUNITY_PROVIDER=csv`
-  - 只使用本地 CSV
-
-如果你希望把某些账号作为“情报源”单独观察，可以在 `/settings` 里填 `Tracked Accounts`，一行一个，例如：
+示例账号：
 
 ```text
 lookonchain
@@ -131,44 +171,15 @@ wu_blockchain
 TheBlock__
 ```
 
-对应模式：
+### CSV 社区分数
 
-- `off`
-  - 只看全市场普通舆情
-- `blend`
-  - 把全市场舆情和指定账号情报按权重混合
-- `only`
-  - 只看指定账号发出的内容
-
-## 可选：接入 Binance 账户手续费
-
-如果你想让回测直接读取你当前账户或交易对的实际 commission，先配置：
-
-```bash
-export BINANCE_API_KEY="你的 API Key"
-export BINANCE_API_SECRET="你的 API Secret"
-export BINANCE_RECV_WINDOW_MS="5000"
-```
-
-当前实现说明：
-
-- 只支持 HMAC API key / secret 这一路签名
-- 当前还不支持 RSA / Ed25519 key
-- `fee_source=account` 会读取当前账户的 `commissionRates`
-- `fee_source=symbol` 会读取 `/api/v3/account/commission?symbol=...`
-- `symbol` 级费率当前按 `discounted standard + special + tax` 口径估算
-  - 这里的折扣只作用在 `standardCommission`
-  - 这是基于 Binance 文档字段结构做的工程化推断
-
-## 可选：社区热度 CSV
-
-复制示例文件：
+如果你有自己的研究结论，可以直接使用本地 CSV：
 
 ```bash
 cp data/community_scores.example.csv data/community_scores.csv
 ```
 
-字段格式：
+格式：
 
 ```csv
 symbol,score,mentions,sentiment,source
@@ -176,11 +187,9 @@ BTCUSDT,82,1240,0.78,manual-research
 ETHUSDT,76,890,0.72,manual-research
 ```
 
-其中 `score` 建议使用 `0-100`。
+### 社媒查询别名
 
-## 可选：社媒查询别名
-
-有些 ticker 本身有歧义，例如 `LINK`、`ONE`、`GAS`。这时建议提供别名查询：
+对于 `LINK`、`ONE`、`GAS` 这类易歧义 ticker，可以配置查询别名：
 
 ```bash
 cp data/social_aliases.example.csv data/social_aliases.csv
@@ -194,154 +203,162 @@ LINKUSDT,($LINK OR #LINK OR Chainlink OR #Chainlink) lang:en -is:retweet
 ONEUSDT,($ONE OR #HarmonyONE OR "Harmony One") lang:en -is:retweet
 ```
 
-如果 `data/social_aliases.csv` 存在，系统会优先使用你定义的查询。
+## 历史回测
 
-## 用 Binance 公共 K 线做回测
+历史回测基于 Binance `binance-public-data` 格式的 K 线 ZIP。
 
-先下载 `binance-public-data` 的 ZIP，例如：
+### 下载示例数据
 
 ```bash
 curl -L "https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/4h/BTCUSDT-4h-2025-01.zip" -o BTCUSDT-4h-2025-01.zip
 curl -L "https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/4h/BTCUSDT-4h-2025-02.zip" -o BTCUSDT-4h-2025-02.zip
 ```
 
-然后运行：
+### 单币种回测
 
 ```bash
-python3 run_backtest.py "BTCUSDT-4h-2025-*.zip" --score-threshold 70 --holding-periods 3,6,12
+python3 run_backtest.py "BTCUSDT-4h-2025-*.zip" \
+  --score-threshold 70 \
+  --holding-periods 3,6,12
 ```
 
-如果你更想直接在页面里调参数，可以打开：
-
-```text
-http://127.0.0.1:8000/backtest?archives=BTCUSDT-4h-2025-*.zip&score_threshold=70&holding_periods=3,6,12
-```
-
-页面版支持和 CLI 基本一致的核心参数，包括：
-
-- `lookback_bars`
-- `score_threshold`
-- `holding_periods`
-- `cooldown_bars`
-- `stop_loss_pct`
-- `take_profit_pct`
-- `max_holding_bars`
-- `fee_bps`
-- `fee_model`
-- `fee_source`
-- `maker_fee_bps`
-- `taker_fee_bps`
-- `entry_fee_role`
-- `exit_fee_role`
-- `fee_discount_pct`
-- `no_binance_discount`
-- `slippage_bps`
-- `slippage_model`
-- `min_slippage_bps`
-- `max_slippage_bps`
-- `slippage_window_bars`
-- `capital_fraction_pct`
-- `max_portfolio_exposure_pct`
-- `max_concurrent_positions`
-- `min_volume_ratio`
-- `min_buy_pressure`
-- `min_rsi`
-- `max_rsi`
-- `no_kdj_confirmation`
-- `portfolio_top_n`
-
-如果你想做多币种横截面组合回测，例如每个时间点只拿分数最高的 2 个币种：
-
-```bash
-python3 run_backtest.py "data/spot/monthly/klines/*/4h/*.zip" --score-threshold 70 --holding-periods 3,6,12 --portfolio-top-n 2
-```
-
-输出会给你：
-
-- 信号数量
-- 3 / 6 / 12 根 K 线后的平均收益、中位数收益、胜率
-- 最近几次触发信号的时间、分数和远期收益
-- 如果启用 `--portfolio-top-n`
-  - 同一时间点 top N 币种的等权组合收益
-  - 组合批次的胜率和平均收益
-- 每笔真实交易的结果
-  - 入场后按止损、止盈或时间出场
-  - 平均收益、胜率、Profit Factor、平均持仓 bars、平均最大回撤
-  - 资金曲线终值和最大回撤
-
-说明：
-
-- 回测默认**不混入实时 X/Twitter 舆情**，因为那样对历史不严谨
-- 当前版本适合先验证 `4h`、`1d` 这类中高周期
-- 如果你把同一币种同一周期的多个月 ZIP 一起传入，程序会自动合并并去重
-- 如果你传入多个币种同一周期的 ZIP，并启用 `--portfolio-top-n`，程序会额外输出横截面组合回测结果
-
-当前默认的入场规则是：
-
-- 综合分数大于等于 `--score-threshold`
-- `close > EMA20 > EMA50`
-- `RSI` 位于允许区间
-- 最近一根 K 线量能放大达到 `--min-volume-ratio`
-- 主动买盘占比达到 `--min-buy-pressure`
-- `MACD` 位于多头动能区
-- 默认要求 `KDJ` 也确认，若不需要可加 `--no-kdj-confirmation`
-
-默认的出场规则是：
-
-- `--stop-loss-pct 4`
-- `--take-profit-pct 9`
-- `--max-holding-bars 12`
-- 默认还会计入执行成本：
-  - `--fee-bps 10`
-  - `--fee-model flat`
-  - `--fee-source manual`
-  - `--slippage-bps 5`
-  - 若要按流动性动态调节滑点，可用 `--slippage-model dynamic`
-- 如果你想手工把回测成本改成 maker/taker 结构，而不是单一费率：
-  - `--fee-model maker_taker`
-  - `--maker-fee-bps`
-  - `--taker-fee-bps`
-  - `--entry-fee-role maker|taker`
-  - `--exit-fee-role maker|taker`
-  - `--fee-discount-pct`
-- 如果你想直接读取 Binance 当前账户或交易对 commission：
-  - `--fee-source account`
-  - `--fee-source symbol`
-  - `--no-binance-discount`
-  - 需要先设置 `BINANCE_API_KEY` 和 `BINANCE_API_SECRET`
-- 资金曲线默认每次使用 `100%` 资金，可用 `--capital-fraction-pct` 调低，例如只出 `50%`
-- 组合层还支持：
-  - `--max-portfolio-exposure-pct`
-  - `--max-concurrent-positions`
-
-例如：
+### 多币种组合回测
 
 ```bash
 python3 run_backtest.py "data/spot/monthly/klines/*/4h/*.zip" \
-  --score-threshold 72 \
-  --min-volume-ratio 1.15 \
-  --min-buy-pressure 0.55 \
-  --stop-loss-pct 4 \
-  --take-profit-pct 10 \
-  --max-holding-bars 12 \
-  --fee-source symbol \
-  --entry-fee-role taker \
-  --exit-fee-role maker \
-  --slippage-bps 5 \
-  --slippage-model dynamic \
-  --capital-fraction-pct 75 \
-  --max-portfolio-exposure-pct 100 \
-  --max-concurrent-positions 3 \
+  --score-threshold 70 \
+  --holding-periods 3,6,12 \
   --portfolio-top-n 2
 ```
 
-页面版回测也已经支持同样的手续费参数，并会在结果卡片里显示本轮使用的成本假设。
+### 当前默认入场逻辑
 
-如果你把默认 `fee_source` 设成 `account` 或 `symbol`，页面会尝试调用 Binance 账户接口读取真实手续费；如果 key 无效、权限不足或 IP 白名单不匹配，页面会直接显示错误文案，而不是返回 500。
+- 综合分数大于等于阈值
+- `close > EMA20 > EMA50`
+- `RSI` 在允许区间
+- 最近一根量能放大达到阈值
+- 主动买盘占比达到阈值
+- `MACD` 位于多头动能区
+- 默认要求 `KDJ` 进一步确认
 
-## 下一步建议
+### 当前默认出场逻辑
 
-- 接入 Binance WebSocket Kline Stream，做准实时刷新
-- 引入止损位、波动率过滤、结构位突破等风险控制
-- 把组合回测继续扩成带仓位约束、手续费、滑点和完整资金管理的策略回测
-- 接 Binance 账户资产和持仓快照，让回测能以你当前账户结构做更贴近实盘的资金分配
+- `stop loss`
+- `take profit`
+- `max holding bars`
+
+### 执行成本支持
+
+- `fee_source=manual`
+- `fee_source=account`
+- `fee_source=symbol`
+- `fee_model=flat`
+- `fee_model=maker_taker`
+- `slippage_model=fixed`
+- `slippage_model=dynamic`
+- `capital_fraction_pct`
+- `max_portfolio_exposure_pct`
+- `max_concurrent_positions`
+
+说明：
+
+- 历史回测默认不混入实时 X/Twitter 舆情，这样结果更严谨
+- 如果默认手续费源设成 `account` 或 `symbol`，页面会尝试读取 Binance 真实手续费
+- 如果 key 无效、权限不足或 IP 白名单不匹配，页面会返回可读错误，而不是直接 500
+
+## Binance 账户手续费
+
+如果你希望回测读取真实账户或交易对 commission，可配置：
+
+```bash
+export BINANCE_API_KEY="your-api-key"
+export BINANCE_API_SECRET="your-api-secret"
+export BINANCE_RECV_WINDOW_MS="5000"
+```
+
+当前实现范围：
+
+- 支持 HMAC API key / secret
+- 当前不支持 RSA / Ed25519
+- `fee_source=account` 读取账户级 `commissionRates`
+- `fee_source=symbol` 读取交易对级 `/api/v3/account/commission`
+- `symbol` 级费率按 `discounted standard + special + tax` 口径估算
+
+## 这个项目如何利用 Binance 的开源仓库
+
+项目的设计参考了你提到的三个 Binance 仓库：
+
+- `binance-spot-api-docs`
+  - 用来确认 Spot REST 接口能力和字段结构
+- `binance-public-data`
+  - 用来读取历史 K 线 ZIP 并驱动回测
+- `binance-connector-python`
+  - 用来参考 Python 接入层的接口组织方式
+
+它们足够支撑：
+
+- 实时市场扫描
+- 历史数据回放
+- Python 程序化接入
+
+但它们本身不包含“社区热度”或“社交情绪”数据，所以这部分被设计成了可插拔数据源。
+
+## 项目结构
+
+```text
+.
+├── data/                     # 社区分数与社媒别名示例
+├── src/trade_signal_app/     # 核心应用代码
+├── static/                   # Web 样式
+├── tests/                    # 单元测试
+├── run.py                    # Web 服务入口
+├── run_backtest.py           # 回测 CLI 入口
+├── PROJECT_PROGRESS.md       # 当前进度与后续跟进文档
+└── README.md
+```
+
+## 验证
+
+```bash
+PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'
+PYTHONPATH=src python3 -m compileall src run.py run_backtest.py
+```
+
+当前版本在本地已经完成：
+
+- Web 页面冒烟验证
+- 扫描接口验证
+- 回测接口验证
+- 运行配置持久化验证
+
+## 路线图
+
+- 接入 Binance WebSocket，支持更接近实时的刷新
+- 增加更完整的参数预设与策略模板
+- 给回测页补更完整的图形化结果和导出能力
+- 接入更多情报源，例如新闻、Telegram、Reddit
+- 评估将本地明文配置升级为加密存储
+
+## 项目状态
+
+当前项目处于“可运行的本地研究工具”阶段：
+
+- 已具备核心功能
+- 已适合个人研究与参数验证
+- 还没有做成可直接实盘托管的交易系统
+
+更细的交付进度见：
+
+- [PROJECT_PROGRESS.md](./PROJECT_PROGRESS.md)
+
+## 开源说明
+
+- License: MIT
+- 欢迎提交 issue 和 PR
+- 适合做研究、学习和二次开发
+
+## 免责声明
+
+本项目仅用于研究、学习和策略验证，不构成投资建议。
+
+加密资产交易风险较高，任何信号、回测结果或情绪指标都不应被视为收益保证。请自行评估风险，并对自己的资金决策负责。
