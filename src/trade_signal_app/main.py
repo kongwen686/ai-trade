@@ -4,6 +4,8 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import csv
+import io
 import json
 from urllib.parse import parse_qs, urlparse
 
@@ -17,6 +19,7 @@ from .backtest import (
     run_portfolio_backtest,
 )
 from .config import BASE_DIR, SETTINGS
+from .presets import apply_backtest_preset, list_backtest_presets
 from .runtime_config import BacktestDefaults, RuntimeConfig, ScanDefaults
 from .strategy import EntryRuleConfig, ExecutionConfig, ExitRuleConfig
 from .ui import format_backtest_report, format_portfolio_report, format_signal_row
@@ -68,7 +71,8 @@ def _scan_params_from_config(config: RuntimeConfig) -> dict[str, object]:
 
 def _backtest_params_from_config(config: RuntimeConfig) -> dict[str, object]:
     defaults = config.backtest_defaults
-    return {
+    params = {
+        "preset": defaults.preset,
         "archives": defaults.archives,
         "lookback_bars": defaults.lookback_bars,
         "score_threshold": defaults.score_threshold,
@@ -101,6 +105,7 @@ def _backtest_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "max_rsi": defaults.max_rsi,
         "no_kdj_confirmation": defaults.no_kdj_confirmation,
     }
+    return apply_backtest_preset(params, defaults.preset)
 
 
 def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
@@ -112,6 +117,10 @@ def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "x_recent_window_hours": config.x_recent_window_hours,
         "x_recent_max_results": config.x_recent_max_results,
         "x_language": config.x_language,
+        "reddit_api_base_url": config.reddit_api_base_url,
+        "reddit_recent_window_hours": config.reddit_recent_window_hours,
+        "reddit_max_results": config.reddit_max_results,
+        "reddit_user_agent": config.reddit_user_agent,
         "x_account_mode": config.x_account_mode,
         "x_account_weight_pct": config.x_account_weight_pct,
         "x_tracked_accounts": config.x_tracked_accounts,
@@ -130,12 +139,34 @@ def _settings_status_from_config(config: RuntimeConfig) -> dict[str, object]:
         "binance_auth_label": "API key + secret 已配置" if config.binance_api_key and config.binance_api_secret else "未配置",
         "x_auth_configured": bool(config.x_bearer_token),
         "tracked_account_count": len(config.x_tracked_accounts),
+        "storage_mode": APP_STATE.storage_mode_label(),
     }
 
 
 def _settings_context() -> tuple[dict[str, object], dict[str, object]]:
     runtime_config, _ = APP_STATE.snapshot()
     return _settings_params_from_config(runtime_config), _settings_status_from_config(runtime_config)
+
+
+def _export_runtime_config_template(*, include_secrets: bool) -> dict[str, object]:
+    runtime_config, _ = APP_STATE.snapshot()
+    return runtime_config.to_template_payload(include_secrets=include_secrets)
+
+
+def _import_runtime_config_template(form: dict[str, list[str]]) -> RuntimeConfig:
+    raw_template = _get_first(form, "config_template", "").strip()
+    if not raw_template:
+        raise ValueError("请先粘贴配置模板 JSON。")
+
+    try:
+        payload = json.loads(raw_template)
+    except json.JSONDecodeError as exc:
+        raise ValueError("配置模板不是合法 JSON。") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("配置模板根节点必须是 JSON 对象。")
+
+    current_config, _ = APP_STATE.snapshot()
+    return RuntimeConfig.from_template_payload(payload, SETTINGS, current_config=current_config)
 
 
 def _scan_payload(query: dict[str, list[str]]) -> tuple[dict[str, object], dict[str, object]]:
@@ -187,44 +218,47 @@ def _split_archives(value: str) -> list[str]:
 
 def _backtest_payload(query: dict[str, list[str]]) -> tuple[dict[str, object], dict[str, object], str | None]:
     runtime_config, scanner = APP_STATE.snapshot()
-    defaults = runtime_config.backtest_defaults
+    defaults = _backtest_params_from_config(runtime_config)
+    preset_id = _get_first(query, "preset", str(defaults["preset"]))
+    base_params = apply_backtest_preset(dict(defaults), preset_id)
     params = {
-        "archives": _get_first(query, "archives", defaults.archives),
-        "lookback_bars": int(_get_first(query, "lookback_bars", str(defaults.lookback_bars))),
-        "score_threshold": float(_get_first(query, "score_threshold", str(defaults.score_threshold))),
-        "holding_periods": _get_first(query, "holding_periods", defaults.holding_periods),
-        "portfolio_top_n": int(_get_first(query, "portfolio_top_n", str(defaults.portfolio_top_n))),
-        "cooldown_bars": int(_get_first(query, "cooldown_bars", str(defaults.cooldown_bars))),
-        "stop_loss_pct": float(_get_first(query, "stop_loss_pct", str(defaults.stop_loss_pct))),
-        "take_profit_pct": float(_get_first(query, "take_profit_pct", str(defaults.take_profit_pct))),
-        "max_holding_bars": int(_get_first(query, "max_holding_bars", str(defaults.max_holding_bars))),
-        "fee_bps": float(_get_first(query, "fee_bps", str(defaults.fee_bps))),
-        "fee_model": _get_first(query, "fee_model", defaults.fee_model),
-        "fee_source": _get_first(query, "fee_source", defaults.fee_source),
-        "maker_fee_bps": float(_get_first(query, "maker_fee_bps", str(defaults.maker_fee_bps))),
-        "taker_fee_bps": float(_get_first(query, "taker_fee_bps", str(defaults.taker_fee_bps))),
-        "entry_fee_role": _get_first(query, "entry_fee_role", defaults.entry_fee_role),
-        "exit_fee_role": _get_first(query, "exit_fee_role", defaults.exit_fee_role),
-        "fee_discount_pct": float(_get_first(query, "fee_discount_pct", str(defaults.fee_discount_pct))),
+        "preset": preset_id,
+        "archives": _get_first(query, "archives", str(base_params["archives"])),
+        "lookback_bars": int(_get_first(query, "lookback_bars", str(base_params["lookback_bars"]))),
+        "score_threshold": float(_get_first(query, "score_threshold", str(base_params["score_threshold"]))),
+        "holding_periods": _get_first(query, "holding_periods", str(base_params["holding_periods"])),
+        "portfolio_top_n": int(_get_first(query, "portfolio_top_n", str(base_params["portfolio_top_n"]))),
+        "cooldown_bars": int(_get_first(query, "cooldown_bars", str(base_params["cooldown_bars"]))),
+        "stop_loss_pct": float(_get_first(query, "stop_loss_pct", str(base_params["stop_loss_pct"]))),
+        "take_profit_pct": float(_get_first(query, "take_profit_pct", str(base_params["take_profit_pct"]))),
+        "max_holding_bars": int(_get_first(query, "max_holding_bars", str(base_params["max_holding_bars"]))),
+        "fee_bps": float(_get_first(query, "fee_bps", str(base_params["fee_bps"]))),
+        "fee_model": _get_first(query, "fee_model", str(base_params["fee_model"])),
+        "fee_source": _get_first(query, "fee_source", str(base_params["fee_source"])),
+        "maker_fee_bps": float(_get_first(query, "maker_fee_bps", str(base_params["maker_fee_bps"]))),
+        "taker_fee_bps": float(_get_first(query, "taker_fee_bps", str(base_params["taker_fee_bps"]))),
+        "entry_fee_role": _get_first(query, "entry_fee_role", str(base_params["entry_fee_role"])),
+        "exit_fee_role": _get_first(query, "exit_fee_role", str(base_params["exit_fee_role"])),
+        "fee_discount_pct": float(_get_first(query, "fee_discount_pct", str(base_params["fee_discount_pct"]))),
         "no_binance_discount": _parse_bool_flag(query, "no_binance_discount"),
-        "slippage_bps": float(_get_first(query, "slippage_bps", str(defaults.slippage_bps))),
-        "slippage_model": _get_first(query, "slippage_model", defaults.slippage_model),
-        "min_slippage_bps": float(_get_first(query, "min_slippage_bps", str(defaults.min_slippage_bps))),
-        "max_slippage_bps": float(_get_first(query, "max_slippage_bps", str(defaults.max_slippage_bps))),
-        "slippage_window_bars": int(_get_first(query, "slippage_window_bars", str(defaults.slippage_window_bars))),
-        "capital_fraction_pct": float(_get_first(query, "capital_fraction_pct", str(defaults.capital_fraction_pct))),
-        "max_portfolio_exposure_pct": float(_get_first(query, "max_portfolio_exposure_pct", str(defaults.max_portfolio_exposure_pct))),
-        "max_concurrent_positions": int(_get_first(query, "max_concurrent_positions", str(defaults.max_concurrent_positions))),
-        "min_volume_ratio": float(_get_first(query, "min_volume_ratio", str(defaults.min_volume_ratio))),
-        "min_buy_pressure": float(_get_first(query, "min_buy_pressure", str(defaults.min_buy_pressure))),
-        "min_rsi": float(_get_first(query, "min_rsi", str(defaults.min_rsi))),
-        "max_rsi": float(_get_first(query, "max_rsi", str(defaults.max_rsi))),
+        "slippage_bps": float(_get_first(query, "slippage_bps", str(base_params["slippage_bps"]))),
+        "slippage_model": _get_first(query, "slippage_model", str(base_params["slippage_model"])),
+        "min_slippage_bps": float(_get_first(query, "min_slippage_bps", str(base_params["min_slippage_bps"]))),
+        "max_slippage_bps": float(_get_first(query, "max_slippage_bps", str(base_params["max_slippage_bps"]))),
+        "slippage_window_bars": int(_get_first(query, "slippage_window_bars", str(base_params["slippage_window_bars"]))),
+        "capital_fraction_pct": float(_get_first(query, "capital_fraction_pct", str(base_params["capital_fraction_pct"]))),
+        "max_portfolio_exposure_pct": float(_get_first(query, "max_portfolio_exposure_pct", str(base_params["max_portfolio_exposure_pct"]))),
+        "max_concurrent_positions": int(_get_first(query, "max_concurrent_positions", str(base_params["max_concurrent_positions"]))),
+        "min_volume_ratio": float(_get_first(query, "min_volume_ratio", str(base_params["min_volume_ratio"]))),
+        "min_buy_pressure": float(_get_first(query, "min_buy_pressure", str(base_params["min_buy_pressure"]))),
+        "min_rsi": float(_get_first(query, "min_rsi", str(base_params["min_rsi"]))),
+        "max_rsi": float(_get_first(query, "max_rsi", str(base_params["max_rsi"]))),
         "no_kdj_confirmation": _parse_bool_flag(query, "no_kdj_confirmation"),
     }
     if "no_binance_discount" not in query:
-        params["no_binance_discount"] = defaults.no_binance_discount
+        params["no_binance_discount"] = bool(base_params["no_binance_discount"])
     if "no_kdj_confirmation" not in query:
-        params["no_kdj_confirmation"] = defaults.no_kdj_confirmation
+        params["no_kdj_confirmation"] = bool(base_params["no_kdj_confirmation"])
 
     archive_patterns = _split_archives(str(params["archives"]))
     if not archive_patterns:
@@ -328,6 +362,36 @@ def _backtest_payload(query: dict[str, list[str]]) -> tuple[dict[str, object], d
     return {"series_reports": series_reports, "portfolio_reports": portfolio_reports}, params, None
 
 
+def _backtest_export_csv(payload: dict[str, object], params: dict[str, object], error: str | None) -> str:
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["section", "name", "interval", "metric", "value"])
+    writer.writerow(["meta", "backtest", "", "error", error or ""])
+    for key, value in params.items():
+        writer.writerow(["param", "backtest", "", key, value])
+
+    for report in payload["series_reports"]:
+        writer.writerow(["series", report["symbol"], report["interval"], "final_equity", report["final_equity"]])
+        writer.writerow(["series", report["symbol"], report["interval"], "max_drawdown_pct", report["max_drawdown_pct"]])
+        writer.writerow(["series", report["symbol"], report["interval"], "signal_count", report["signal_count"]])
+        trade_stat = report.get("trade_stat")
+        if trade_stat:
+            writer.writerow(["series", report["symbol"], report["interval"], "win_rate_pct", trade_stat["win_rate_pct"]])
+            writer.writerow(["series", report["symbol"], report["interval"], "profit_factor", trade_stat["profit_factor"]])
+
+    for report in payload["portfolio_reports"]:
+        name = f'portfolio_top_{report["top_n"]}'
+        writer.writerow(["portfolio", name, report["interval"], "final_equity", report["final_equity"]])
+        writer.writerow(["portfolio", name, report["interval"], "max_drawdown_pct", report["max_drawdown_pct"]])
+        writer.writerow(["portfolio", name, report["interval"], "batch_count", report["batch_count"]])
+        trade_stat = report.get("trade_stat")
+        if trade_stat:
+            writer.writerow(["portfolio", name, report["interval"], "win_rate_pct", trade_stat["win_rate_pct"]])
+            writer.writerow(["portfolio", name, report["interval"], "profit_factor", trade_stat["profit_factor"]])
+
+    return buffer.getvalue()
+
+
 def _build_runtime_config(form: dict[str, list[str]]) -> RuntimeConfig:
     current_config, _ = APP_STATE.snapshot()
     keep_binance_key = current_config.binance_api_key
@@ -360,6 +424,10 @@ def _build_runtime_config(form: dict[str, list[str]]) -> RuntimeConfig:
         x_recent_window_hours=_parse_int_value(_get_first(form, "x_recent_window_hours", str(current_config.x_recent_window_hours)), "X Window Hours"),
         x_recent_max_results=_parse_int_value(_get_first(form, "x_recent_max_results", str(current_config.x_recent_max_results)), "X Max Results"),
         x_language=_get_first(form, "x_language", current_config.x_language).strip() or current_config.x_language,
+        reddit_api_base_url=_get_first(form, "reddit_api_base_url", current_config.reddit_api_base_url).strip() or current_config.reddit_api_base_url,
+        reddit_recent_window_hours=_parse_int_value(_get_first(form, "reddit_recent_window_hours", str(current_config.reddit_recent_window_hours)), "Reddit Window Hours"),
+        reddit_max_results=_parse_int_value(_get_first(form, "reddit_max_results", str(current_config.reddit_max_results)), "Reddit Max Results"),
+        reddit_user_agent=_get_first(form, "reddit_user_agent", current_config.reddit_user_agent).strip() or current_config.reddit_user_agent,
         x_account_mode=_get_first(form, "x_account_mode", current_config.x_account_mode).strip() or current_config.x_account_mode,
         x_account_weight_pct=_parse_float_value(_get_first(form, "x_account_weight_pct", str(current_config.x_account_weight_pct)), "Account Weight"),
         x_tracked_accounts=_parse_multiline_list(_get_first(form, "x_tracked_accounts", "\n".join(current_config.x_tracked_accounts))),
@@ -371,6 +439,7 @@ def _build_runtime_config(form: dict[str, list[str]]) -> RuntimeConfig:
             min_trade_count=_parse_int_value(_get_first(form, "scan_min_trade_count", str(current_config.scan_defaults.min_trade_count)), "Min Trade Count"),
         ),
         backtest_defaults=BacktestDefaults(
+            preset=_get_first(form, "backtest_preset", current_config.backtest_defaults.preset).strip() or "custom",
             archives=_get_first(form, "backtest_archives", current_config.backtest_defaults.archives),
             lookback_bars=_parse_int_value(_get_first(form, "backtest_lookback_bars", str(current_config.backtest_defaults.lookback_bars)), "Lookback Bars"),
             score_threshold=_parse_float_value(_get_first(form, "backtest_score_threshold", str(current_config.backtest_defaults.score_threshold)), "Score Threshold"),
@@ -438,20 +507,74 @@ class RequestHandler(BaseHTTPRequestHandler):
                     series_reports=payload["series_reports"],
                     portfolio_reports=payload["portfolio_reports"],
                     error=error,
+                    presets=list_backtest_presets(),
                 )
                 self._send_text(html, content_type="text/html; charset=utf-8")
                 return
 
+            if parsed.path == "/api/backtest/presets":
+                self._send_text(
+                    json.dumps({"presets": list_backtest_presets()}, ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            if parsed.path == "/api/backtest/export":
+                payload, params, error = _backtest_payload(query)
+                export_format = _get_first(query, "format", "csv").lower()
+                if export_format == "json":
+                    self._send_text(
+                        json.dumps(
+                            _to_jsonable(
+                                {
+                                    "params": params,
+                                    "series_reports": payload["series_reports"],
+                                    "portfolio_reports": payload["portfolio_reports"],
+                                    "error": error,
+                                }
+                            ),
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                        content_type="application/json; charset=utf-8",
+                    )
+                    return
+                if export_format == "csv":
+                    self._send_text(
+                        _backtest_export_csv(payload, params, error),
+                        content_type="text/csv; charset=utf-8",
+                    )
+                    return
+                self._send_text(
+                    json.dumps({"error": "Unsupported export format."}, ensure_ascii=False),
+                    status=HTTPStatus.BAD_REQUEST,
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
             if parsed.path == "/settings":
                 params, status = _settings_context()
-                message = "运行配置已保存。" if _parse_bool_flag(query, "saved") else None
+                message = None
+                if _parse_bool_flag(query, "saved"):
+                    message = "运行配置已保存。"
+                if _parse_bool_flag(query, "imported"):
+                    message = "配置模板已导入。"
                 html = render_settings_page(
                     params=params,
                     status=status,
                     message=message,
                     error=None,
+                    import_payload_text=None,
                 )
                 self._send_text(html, content_type="text/html; charset=utf-8")
+                return
+
+            if parsed.path == "/api/settings/export":
+                payload = _export_runtime_config_template(include_secrets=_parse_bool_flag(query, "include_secrets"))
+                self._send_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
                 return
 
             if parsed.path == "/api/backtest":
@@ -497,6 +620,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._redirect("/settings?saved=1")
                 return
 
+            if parsed.path == "/settings/import":
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = self.rfile.read(length).decode("utf-8")
+                form = parse_qs(payload)
+                config = _import_runtime_config_template(form)
+                APP_STATE.update_config(config)
+                self._redirect("/settings?imported=1")
+                return
+
             self.send_error(HTTPStatus.NOT_FOUND)
         except ValueError as exc:
             params, status = _settings_context()
@@ -505,6 +637,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 status=status,
                 message=None,
                 error=str(exc),
+                import_payload_text=_get_first(form, "config_template", "") if "form" in locals() else None,
             )
             self._send_text(html, content_type="text/html; charset=utf-8", status=HTTPStatus.BAD_REQUEST)
         except Exception as exc:  # noqa: BLE001

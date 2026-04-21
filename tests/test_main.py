@@ -7,7 +7,15 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from trade_signal_app.main import _backtest_payload, _build_runtime_config, _split_archives
+from trade_signal_app.main import (
+    _backtest_payload,
+    _backtest_export_csv,
+    _build_runtime_config,
+    _export_runtime_config_template,
+    _import_runtime_config_template,
+    _split_archives,
+)
+from trade_signal_app.presets import list_backtest_presets
 from trade_signal_app.runtime_config import RuntimeConfig
 from trade_signal_app.views import render_backtest_page, render_settings_page
 
@@ -122,6 +130,7 @@ class MainTests(unittest.TestCase):
     def test_render_backtest_page_includes_extended_controls(self) -> None:
         params = {
             "archives": "data/spot/monthly/klines/*/4h/*.zip",
+            "preset": "balanced_swing",
             "lookback_bars": 240,
             "score_threshold": 70.0,
             "holding_periods": "3,6,12",
@@ -153,7 +162,13 @@ class MainTests(unittest.TestCase):
             "max_rsi": 72.0,
             "no_kdj_confirmation": False,
         }
-        html = render_backtest_page(params=params, series_reports=[], portfolio_reports=[], error=None)
+        html = render_backtest_page(
+            params=params,
+            series_reports=[],
+            portfolio_reports=[],
+            error=None,
+            presets=list_backtest_presets(),
+        )
 
         self.assertIn("Lookback Bars", html)
         self.assertIn("Cooldown Bars", html)
@@ -165,6 +180,10 @@ class MainTests(unittest.TestCase):
         self.assertIn("Fee Source", html)
         self.assertIn("Maker Fee bps", html)
         self.assertIn("Entry Fee Role", html)
+        self.assertIn("Series Equity Rank", html)
+        self.assertIn("/api/backtest/export?format=csv", html)
+        self.assertIn("Balanced Swing", html)
+        self.assertIn("/api/backtest/presets", html)
 
     def test_render_settings_page_includes_runtime_controls(self) -> None:
         html = render_settings_page(
@@ -175,6 +194,10 @@ class MainTests(unittest.TestCase):
                 "x_recent_window_hours": 24,
                 "x_recent_max_results": 25,
                 "x_language": "en",
+                "reddit_api_base_url": "https://www.reddit.com",
+                "reddit_recent_window_hours": 24,
+                "reddit_max_results": 25,
+                "reddit_user_agent": "trade-signal-app/0.2",
                 "x_account_mode": "blend",
                 "x_account_weight_pct": 35.0,
                 "x_tracked_accounts": ["lookonchain", "wu_blockchain"],
@@ -184,6 +207,7 @@ class MainTests(unittest.TestCase):
                 "scan_min_quote_volume": 10_000_000,
                 "scan_min_trade_count": 3000,
                 "backtest_archives": "data/spot/monthly/klines/*/4h/*.zip",
+                "backtest_preset": "balanced_swing",
                 "backtest_lookback_bars": 240,
                 "backtest_score_threshold": 70.0,
                 "backtest_holding_periods": "3,6,12",
@@ -220,9 +244,11 @@ class MainTests(unittest.TestCase):
                 "binance_auth_label": "API key + secret 已配置",
                 "x_auth_configured": True,
                 "tracked_account_count": 2,
+                "storage_mode": "Encrypted",
             },
             message="运行配置已保存。",
             error=None,
+            import_payload_text=None,
         )
 
         self.assertIn("Runtime Settings", html)
@@ -231,6 +257,13 @@ class MainTests(unittest.TestCase):
         self.assertIn("Tracked Accounts", html)
         self.assertIn("Backtest Defaults", html)
         self.assertIn("运行配置已保存", html)
+        self.assertIn("导出模板 JSON", html)
+        self.assertIn("导入配置模板", html)
+        self.assertIn("Reddit API Base URL", html)
+        self.assertIn("Reddit User-Agent", html)
+        self.assertIn("Default Preset", html)
+        self.assertIn("Encrypted", html)
+        self.assertIn("RUNTIME_CONFIG_PASSPHRASE", html)
 
     def test_build_runtime_config_parses_runtime_form(self) -> None:
         current = RuntimeConfig()
@@ -247,6 +280,10 @@ class MainTests(unittest.TestCase):
                     "x_recent_window_hours": ["12"],
                     "x_recent_max_results": ["20"],
                     "x_language": ["en"],
+                    "reddit_api_base_url": ["https://www.reddit.com"],
+                    "reddit_recent_window_hours": ["18"],
+                    "reddit_max_results": ["15"],
+                    "reddit_user_agent": ["trade-signal-app/test"],
                     "x_account_mode": ["blend"],
                     "x_account_weight_pct": ["40"],
                     "x_tracked_accounts": ["@lookonchain\nwu_blockchain"],
@@ -256,6 +293,7 @@ class MainTests(unittest.TestCase):
                     "scan_min_quote_volume": ["2000000"],
                     "scan_min_trade_count": ["800"],
                     "backtest_archives": ["/tmp/example.zip"],
+                    "backtest_preset": ["portfolio_rotation"],
                     "backtest_lookback_bars": ["120"],
                     "backtest_score_threshold": ["66"],
                     "backtest_holding_periods": ["3,6"],
@@ -294,10 +332,91 @@ class MainTests(unittest.TestCase):
         self.assertEqual(config.x_bearer_token, "keep-x-token")
         self.assertEqual(config.x_account_mode, "blend")
         self.assertEqual(config.x_tracked_accounts, ["@lookonchain", "wu_blockchain"])
+        self.assertEqual(config.reddit_recent_window_hours, 18)
+        self.assertEqual(config.reddit_max_results, 15)
+        self.assertEqual(config.reddit_user_agent, "trade-signal-app/test")
+        self.assertEqual(config.backtest_defaults.preset, "portfolio_rotation")
         self.assertEqual(config.scan_defaults.quote_asset, "FDUSD")
         self.assertEqual(config.backtest_defaults.fee_source, "account")
         self.assertTrue(config.backtest_defaults.no_binance_discount)
         self.assertTrue(config.backtest_defaults.no_kdj_confirmation)
+
+    def test_import_runtime_config_template_preserves_existing_secrets(self) -> None:
+        current = RuntimeConfig()
+        current.binance_api_key = "keep-key"
+        current.binance_api_secret = "keep-secret"
+        current.x_bearer_token = "keep-token"
+
+        with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(current, None)):
+            imported = _import_runtime_config_template(
+                {
+                    "config_template": [
+                        '{"kind":"runtime_config_template","version":1,"config":{"binance_api_key":"","binance_api_secret":"","x_bearer_token":"","scan_defaults":{"quote_asset":"FDUSD"}}}'
+                    ]
+                }
+            )
+
+        self.assertEqual(imported.binance_api_key, "keep-key")
+        self.assertEqual(imported.binance_api_secret, "keep-secret")
+        self.assertEqual(imported.x_bearer_token, "keep-token")
+        self.assertEqual(imported.scan_defaults.quote_asset, "FDUSD")
+
+    def test_export_runtime_config_template_redacts_secrets(self) -> None:
+        current = RuntimeConfig()
+        current.binance_api_key = "keep-key"
+        current.binance_api_secret = "keep-secret"
+        current.x_bearer_token = "keep-token"
+
+        with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(current, None)):
+            payload = _export_runtime_config_template(include_secrets=False)
+
+        self.assertEqual(payload["config"]["binance_api_key"], "")
+        self.assertEqual(payload["config"]["binance_api_secret"], "")
+        self.assertEqual(payload["config"]["x_bearer_token"], "")
+
+    def test_backtest_export_csv_contains_core_rows(self) -> None:
+        csv_text = _backtest_export_csv(
+            payload={
+                "series_reports": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "interval": "4h",
+                        "final_equity": 1.23,
+                        "max_drawdown_pct": -4.5,
+                        "signal_count": 6,
+                        "trade_stat": {"win_rate_pct": 66.7, "profit_factor": 1.8},
+                    }
+                ],
+                "portfolio_reports": [
+                    {
+                        "top_n": 2,
+                        "interval": "4h",
+                        "final_equity": 1.15,
+                        "max_drawdown_pct": -3.2,
+                        "batch_count": 4,
+                        "trade_stat": {"win_rate_pct": 75.0, "profit_factor": 2.1},
+                    }
+                ],
+            },
+            params={"lookback_bars": 240, "portfolio_top_n": 2},
+            error=None,
+        )
+
+        self.assertIn("section,name,interval,metric,value", csv_text)
+        self.assertIn("param,backtest,,lookback_bars,240", csv_text)
+        self.assertIn("series,BTCUSDT,4h,final_equity,1.23", csv_text)
+        self.assertIn("portfolio,portfolio_top_2,4h,profit_factor,2.1", csv_text)
+
+    def test_backtest_payload_applies_preset_defaults(self) -> None:
+        current = RuntimeConfig()
+        current.backtest_defaults.preset = "portfolio_rotation"
+
+        with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(current, None)):
+            _, params, _ = _backtest_payload({})
+
+        self.assertEqual(params["preset"], "portfolio_rotation")
+        self.assertEqual(params["portfolio_top_n"], 3)
+        self.assertEqual(params["capital_fraction_pct"], 60.0)
 
     def test_backtest_payload_returns_error_for_binance_fee_resolution_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

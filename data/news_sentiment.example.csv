@@ -1,0 +1,5 @@
+symbol,headline,sentiment,source,published_at,url
+BTCUSDT,US spot BTC ETF inflows extend for fifth session,0.72,newsdesk,2026-04-20T08:30:00Z,https://example.com/btc-etf-inflows
+BTCUSDT,Large exchange reserves keep falling as traders accumulate,0.61,newsdesk,2026-04-20T12:00:00Z,https://example.com/btc-reserves
+ETHUSDT,Ethereum scaling upgrade attracts renewed developer activity,0.68,blockwire,2026-04-20T09:10:00Z,https://example.com/eth-upgrade
+SOLUSDT,Solana memecoin volumes cool after recent rally,-0.24,marketpulse,2026-04-20T15:45:00Z,https://example.com/sol-cooldown

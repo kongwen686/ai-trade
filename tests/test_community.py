@@ -9,7 +9,10 @@ from trade_signal_app.community import (
     CompositeCommunityScoreProvider,
     CommunitySignal,
     CsvCommunityScoreProvider,
+    NewsCommunityScoreProvider,
     NullCommunityScoreProvider,
+    RedditCommunityScoreProvider,
+    TelegramCommunityScoreProvider,
     sanitize_account_names,
     XCommunityScoreProvider,
     build_community_provider,
@@ -158,6 +161,61 @@ class CommunityTests(unittest.TestCase):
         self.assertEqual(signal.mentions, 240)
         self.assertGreater(signal.score, 0)
 
+    def test_reddit_query_builder_uses_default_map(self) -> None:
+        provider = RedditCommunityScoreProvider(
+            alias_registry=AliasRegistry(alias_csv_path=Path("/tmp/does-not-exist.csv")),
+            base_url="https://www.reddit.com",
+            ttl_seconds=60,
+            recent_window_hours=24,
+            max_results=10,
+            user_agent="trade-signal-app/0.2",
+        )
+        query = provider.build_query("BTCUSDT")
+        self.assertIn("BTC", query)
+        self.assertIn("bitcoin", query.lower())
+
+    def test_prepare_fetches_reddit_signal(self) -> None:
+        def fake_fetcher(url: str, headers: dict[str, str] | None, timeout: int) -> object:
+            self.assertIn("/search.json?", url)
+            self.assertIsNotNone(headers)
+            return {
+                "data": {
+                    "children": [
+                        {
+                            "data": {
+                                "title": "Bitcoin bullish breakout setup",
+                                "selftext": "strong momentum and buy setup",
+                                "created_utc": 1_745_113_600,
+                            }
+                        },
+                        {
+                            "data": {
+                                "title": "Ethereum adoption keeps growing",
+                                "selftext": "",
+                                "created_utc": 1_745_113_700,
+                            }
+                        },
+                    ]
+                }
+            }
+
+        provider = RedditCommunityScoreProvider(
+            alias_registry=AliasRegistry(alias_csv_path=Path("/tmp/does-not-exist.csv")),
+            base_url="https://www.reddit.com",
+            ttl_seconds=60,
+            recent_window_hours=100000,
+            max_results=10,
+            user_agent="trade-signal-app/0.2",
+            fetcher=fake_fetcher,
+        )
+        provider.prepare(["BTCUSDT"])
+        signal = provider.get("BTCUSDT")
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal.source, "reddit")
+        self.assertEqual(signal.mentions, 2)
+        self.assertGreater(signal.score, 0)
+
     def test_sanitize_account_names_deduplicates_and_strips(self) -> None:
         self.assertEqual(
             sanitize_account_names(["@lookonchain", " lookonchain ", "@Wu_Blockchain"]),
@@ -185,11 +243,59 @@ class CommunityTests(unittest.TestCase):
         self.assertEqual(signal.source, "x+csv")
         self.assertEqual(signal.mentions, 120)
 
+    def test_news_provider_aggregates_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "news_sentiment.csv"
+            csv_path.write_text(
+                (
+                    "symbol,headline,sentiment,source,published_at,url\n"
+                    "BTCUSDT,ETF inflows stay strong,0.7,newsdesk,2026-04-20T08:30:00Z,https://example.com/1\n"
+                    "BTCUSDT,Exchange reserves keep falling,0.5,blockwire,2026-04-20T12:00:00Z,https://example.com/2\n"
+                ),
+                encoding="utf-8",
+            )
+            provider = NewsCommunityScoreProvider(csv_path=csv_path)
+            signal = provider.get("BTCUSDT")
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal.mentions, 2)
+        self.assertEqual(signal.sample_size, 2)
+        self.assertAlmostEqual(signal.sentiment or 0.0, 0.6, places=4)
+        self.assertIn("newsdesk", signal.source)
+        self.assertIn("blockwire", signal.source)
+        self.assertGreater(signal.score, 0)
+
+    def test_telegram_provider_aggregates_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "telegram_sentiment.csv"
+            csv_path.write_text(
+                (
+                    "symbol,channel,message,sentiment,published_at,url\n"
+                    "BTCUSDT,whalewatch,Large wallets keep adding BTC,0.7,2026-04-20T08:30:00Z,https://t.me/example1\n"
+                    "BTCUSDT,macroflow,Spot demand keeps improving,0.3,2026-04-20T12:00:00Z,https://t.me/example2\n"
+                ),
+                encoding="utf-8",
+            )
+            provider = TelegramCommunityScoreProvider(csv_path=csv_path)
+            signal = provider.get("BTCUSDT")
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal.mentions, 2)
+        self.assertEqual(signal.sample_size, 2)
+        self.assertAlmostEqual(signal.sentiment or 0.0, 0.5, places=4)
+        self.assertIn("whalewatch", signal.source)
+        self.assertIn("macroflow", signal.source)
+        self.assertGreater(signal.score, 0)
+
     def test_build_provider_auto_without_credentials_returns_null(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             provider = build_community_provider(
                 provider_mode="auto",
                 csv_path=Path(temp_dir) / "missing.csv",
+                news_csv_path=Path(temp_dir) / "missing-news.csv",
+                telegram_csv_path=Path(temp_dir) / "missing-telegram.csv",
                 alias_csv_path=Path(temp_dir) / "aliases.csv",
                 x_bearer_token="",
                 x_api_base_url="https://api.x.com",
@@ -198,6 +304,10 @@ class CommunityTests(unittest.TestCase):
                 x_recent_max_results=10,
                 x_language="en",
                 x_max_workers=1,
+                reddit_api_base_url="https://www.reddit.com",
+                reddit_recent_window_hours=24,
+                reddit_max_results=10,
+                reddit_user_agent="trade-signal-app/0.2",
             )
             self.assertIsInstance(provider, NullCommunityScoreProvider)
 
@@ -208,6 +318,8 @@ class CommunityTests(unittest.TestCase):
             provider = build_community_provider(
                 provider_mode="csv",
                 csv_path=csv_path,
+                news_csv_path=Path(temp_dir) / "missing-news.csv",
+                telegram_csv_path=Path(temp_dir) / "missing-telegram.csv",
                 alias_csv_path=Path(temp_dir) / "aliases.csv",
                 x_bearer_token="",
                 x_api_base_url="https://api.x.com",
@@ -216,8 +328,87 @@ class CommunityTests(unittest.TestCase):
                 x_recent_max_results=10,
                 x_language="en",
                 x_max_workers=1,
+                reddit_api_base_url="https://www.reddit.com",
+                reddit_recent_window_hours=24,
+                reddit_max_results=10,
+                reddit_user_agent="trade-signal-app/0.2",
             )
             self.assertIsInstance(provider, CsvCommunityScoreProvider)
+
+    def test_build_provider_with_news(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "news_sentiment.csv"
+            csv_path.write_text(
+                "symbol,headline,sentiment,source,published_at,url\nBTCUSDT,ETF inflows stay strong,0.7,newsdesk,2026-04-20T08:30:00Z,https://example.com/1\n",
+                encoding="utf-8",
+            )
+            provider = build_community_provider(
+                provider_mode="news",
+                csv_path=Path(temp_dir) / "missing-community.csv",
+                news_csv_path=csv_path,
+                telegram_csv_path=Path(temp_dir) / "missing-telegram.csv",
+                alias_csv_path=Path(temp_dir) / "aliases.csv",
+                x_bearer_token="",
+                x_api_base_url="https://api.x.com",
+                community_ttl_seconds=60,
+                x_recent_window_hours=24,
+                x_recent_max_results=10,
+                x_language="en",
+                x_max_workers=1,
+                reddit_api_base_url="https://www.reddit.com",
+                reddit_recent_window_hours=24,
+                reddit_max_results=10,
+                reddit_user_agent="trade-signal-app/0.2",
+            )
+            self.assertIsInstance(provider, NewsCommunityScoreProvider)
+
+    def test_build_provider_with_telegram(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "telegram_sentiment.csv"
+            csv_path.write_text(
+                "symbol,channel,message,sentiment,published_at,url\nBTCUSDT,whalewatch,Large wallets keep adding BTC,0.7,2026-04-20T08:30:00Z,https://t.me/example1\n",
+                encoding="utf-8",
+            )
+            provider = build_community_provider(
+                provider_mode="telegram",
+                csv_path=Path(temp_dir) / "missing-community.csv",
+                news_csv_path=Path(temp_dir) / "missing-news.csv",
+                telegram_csv_path=csv_path,
+                alias_csv_path=Path(temp_dir) / "aliases.csv",
+                x_bearer_token="",
+                x_api_base_url="https://api.x.com",
+                community_ttl_seconds=60,
+                x_recent_window_hours=24,
+                x_recent_max_results=10,
+                x_language="en",
+                x_max_workers=1,
+                reddit_api_base_url="https://www.reddit.com",
+                reddit_recent_window_hours=24,
+                reddit_max_results=10,
+                reddit_user_agent="trade-signal-app/0.2",
+            )
+            self.assertIsInstance(provider, TelegramCommunityScoreProvider)
+
+    def test_build_provider_with_reddit(self) -> None:
+        provider = build_community_provider(
+            provider_mode="reddit",
+            csv_path=Path("/tmp/missing-community.csv"),
+            news_csv_path=Path("/tmp/missing-news.csv"),
+            telegram_csv_path=Path("/tmp/missing-telegram.csv"),
+            alias_csv_path=Path("/tmp/aliases.csv"),
+            x_bearer_token="",
+            x_api_base_url="https://api.x.com",
+            community_ttl_seconds=60,
+            x_recent_window_hours=24,
+            x_recent_max_results=10,
+            x_language="en",
+            x_max_workers=1,
+            reddit_api_base_url="https://www.reddit.com",
+            reddit_recent_window_hours=24,
+            reddit_max_results=10,
+            reddit_user_agent="trade-signal-app/0.2",
+        )
+        self.assertIsInstance(provider, RedditCommunityScoreProvider)
 
 
 if __name__ == "__main__":

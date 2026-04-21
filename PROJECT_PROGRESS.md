@@ -36,7 +36,10 @@
 ## 2.2 社区热度与 Twitter 情报
 
 - 支持本地 CSV 社区评分源
+- 支持本地新闻情报 CSV 聚合源
+- 支持本地 Telegram 情报 CSV 聚合源
 - 支持 X/Twitter Bearer Token 实时舆情
+- 支持 Reddit 公开搜索舆情
 - 支持社媒查询别名配置
 - 支持情报账号列表
 - 支持三种 Twitter 情报模式：
@@ -49,6 +52,8 @@
 
 - `src/trade_signal_app/community.py`
 - `data/social_aliases.example.csv`
+- `data/news_sentiment.example.csv`
+- `data/telegram_sentiment.example.csv`
 
 ## 2.3 历史回测
 
@@ -62,6 +67,9 @@
   - 最大持仓 bars
 - 支持资金曲线、最大回撤、Profit Factor
 - 支持手续费、滑点、动态滑点、最大暴露、最大并发持仓
+- 回测页支持单币种 / 组合权益排名总览
+- 支持回测结果 JSON / CSV 导出
+- 支持内建回测参数预设与策略组合模板
 
 相关入口：
 
@@ -106,7 +114,10 @@
 
 - 密钥通过 `POST /settings` 提交，不出现在 URL
 - 配置保存到本地 `data/runtime_config.json`
+- 支持通过 `RUNTIME_CONFIG_PASSPHRASE` 启用加密存储
 - 保存后 `/` 与 `/backtest` 会自动使用新默认值
+- 支持导出脱敏配置模板 JSON
+- 支持导入配置模板 JSON，并在模板密钥为空时保留当前已保存密钥
 - 已将 `data/runtime_config.json` 加入 `.gitignore`
 
 核心文件：
@@ -131,6 +142,16 @@
   - `tests/test_runtime_config.py`
   - `tests/test_community.py`
   - `tests/test_binance_client.py`
+- 新增配置模板导出接口：`/api/settings/export`
+- 新增设置页模板导入能力：`POST /settings/import`
+- 回测页新增结果导出入口
+- 新增回测导出接口：`/api/backtest/export?format=csv|json`
+- 回测页新增单币种 / 组合权益排名总览
+- 新增本地新闻情报 CSV provider，可与 X / CSV 社区评分混合
+- 新增 Reddit provider 与运行配置项，可显式加入社区评分混合
+- 新增本地 Telegram 情报 CSV provider，可显式加入社区评分混合
+- 新增内建回测 preset 与模板 API：`/api/backtest/presets`
+- 新增可选加密配置存储，支持对 `runtime_config.json` 做口令保护
 
 ## 4. 验证记录
 
@@ -143,32 +164,23 @@ PYTHONPATH=src python3 -m compileall src run.py run_backtest.py
 
 结果：
 
-- 38 个测试通过
+- 53 个测试通过
 - 编译通过
 - `/settings`
 - `/`
 - `/backtest`
 - `/api/backtest`
+- `/api/backtest/export`
 
 均已做本地冒烟验证
 
 ## 5. 当前已知约束
 
-- `data/runtime_config.json` 当前是本地明文存储，只适合单机个人使用
+- 默认仍兼容本地明文 `data/runtime_config.json`；只有在设置 `RUNTIME_CONFIG_PASSPHRASE` 后才会写入加密格式
 - 未接入多用户权限体系
 - 未接入真实下单，仅用于研究、筛选和回测
 - Twitter/X 数据依赖 Bearer Token 和接口配额
 - Binance 账户手续费依赖 API Key、权限与 IP 白名单
-
-## 6. 建议的下一步
-
-优先级建议如下：
-
-1. 给运行配置页补“导出/导入配置模板”
-2. 给回测页补更完整的图表和结果导出
-3. 接入更多舆情源，例如 Telegram / 新闻 / Reddit
-4. 做参数预设与策略组合模板
-5. 评估是否引入加密配置存储
 
 ## 7. 发布状态
 

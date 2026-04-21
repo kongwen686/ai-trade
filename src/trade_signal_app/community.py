@@ -135,6 +135,228 @@ class CsvCommunityScoreProvider(CommunityScoreProvider):
 
 
 @dataclass
+class NewsCommunityScoreProvider(CommunityScoreProvider):
+    csv_path: Path
+    _cache: dict[str, CommunitySignal] | None = None
+
+    def _load(self) -> dict[str, CommunitySignal]:
+        if not self.csv_path.exists():
+            return {}
+
+        grouped: dict[str, list[dict[str, object]]] = {}
+        with self.csv_path.open("r", encoding="utf-8", newline="") as handle:
+            for row in csv.DictReader(handle):
+                symbol = (row.get("symbol") or "").strip().upper()
+                if not symbol:
+                    continue
+                grouped.setdefault(symbol, []).append(
+                    {
+                        "headline": (row.get("headline") or "").strip(),
+                        "sentiment": float(row.get("sentiment", 0) or 0),
+                        "source": (row.get("source") or "news").strip() or "news",
+                    }
+                )
+
+        signals: dict[str, CommunitySignal] = {}
+        for symbol, items in grouped.items():
+            sentiments = [float(item["sentiment"]) for item in items]
+            sources = dedupe_terms([str(item["source"]) for item in items])
+            sentiment = sum(sentiments) / len(sentiments) if sentiments else 0.0
+            mentions = len(items)
+            score = XCommunityScoreProvider.compute_score(
+                mentions=mentions * 20,
+                sentiment=sentiment,
+                sample_size=len(items),
+            )
+            signals[symbol] = CommunitySignal(
+                score=round(score, 2),
+                source="+".join(sources) if sources else "news",
+                mentions=mentions,
+                sentiment=round(sentiment, 4),
+                sample_size=len(items),
+            )
+        return signals
+
+    def get(self, symbol: str) -> CommunitySignal | None:
+        if self._cache is None:
+            self._cache = self._load()
+        return self._cache.get(symbol.upper())
+
+
+@dataclass
+class TelegramCommunityScoreProvider(CommunityScoreProvider):
+    csv_path: Path
+    _cache: dict[str, CommunitySignal] | None = None
+
+    def _load(self) -> dict[str, CommunitySignal]:
+        if not self.csv_path.exists():
+            return {}
+
+        grouped: dict[str, list[dict[str, object]]] = {}
+        with self.csv_path.open("r", encoding="utf-8", newline="") as handle:
+            for row in csv.DictReader(handle):
+                symbol = (row.get("symbol") or "").strip().upper()
+                if not symbol:
+                    continue
+                grouped.setdefault(symbol, []).append(
+                    {
+                        "channel": (row.get("channel") or "telegram").strip() or "telegram",
+                        "sentiment": float(row.get("sentiment", 0) or 0),
+                        "message": (row.get("message") or "").strip(),
+                    }
+                )
+
+        signals: dict[str, CommunitySignal] = {}
+        for symbol, items in grouped.items():
+            sentiments = [float(item["sentiment"]) for item in items]
+            channels = dedupe_terms([str(item["channel"]) for item in items])
+            sentiment = sum(sentiments) / len(sentiments) if sentiments else 0.0
+            mentions = len(items)
+            score = XCommunityScoreProvider.compute_score(
+                mentions=mentions * 18,
+                sentiment=sentiment,
+                sample_size=len(items),
+            )
+            signals[symbol] = CommunitySignal(
+                score=round(score, 2),
+                source="+".join(channels) if channels else "telegram",
+                mentions=mentions,
+                sentiment=round(sentiment, 4),
+                sample_size=len(items),
+            )
+        return signals
+
+    def get(self, symbol: str) -> CommunitySignal | None:
+        if self._cache is None:
+            self._cache = self._load()
+        return self._cache.get(symbol.upper())
+
+
+@dataclass
+class RedditCommunityScoreProvider(CommunityScoreProvider):
+    alias_registry: AliasRegistry
+    base_url: str
+    ttl_seconds: int
+    recent_window_hours: int
+    max_results: int
+    user_agent: str
+    timeout: int = 20
+    fetcher: Callable[[str, dict[str, str] | None, int], object] | None = None
+    _cache: dict[str, CachedSignal] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.fetcher is None:
+            self.fetcher = http_get_json
+
+    def prepare(self, symbols: list[str]) -> None:
+        for symbol in [item.upper() for item in symbols if not self._is_cached(item)]:
+            try:
+                signal = self._fetch_symbol(symbol)
+            except Exception:  # noqa: BLE001
+                signal = None
+            self._cache[symbol] = CachedSignal(
+                expires_at=datetime.now(timezone.utc) + timedelta(seconds=self.ttl_seconds),
+                signal=signal,
+            )
+
+    def get(self, symbol: str) -> CommunitySignal | None:
+        cached = self._cache.get(symbol.upper())
+        if cached and cached.expires_at > datetime.now(timezone.utc):
+            return cached.signal
+        try:
+            signal = self._fetch_symbol(symbol.upper())
+        except Exception:  # noqa: BLE001
+            signal = None
+        self._cache[symbol.upper()] = CachedSignal(
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=self.ttl_seconds),
+            signal=signal,
+        )
+        return signal
+
+    def _is_cached(self, symbol: str) -> bool:
+        cached = self._cache.get(symbol.upper())
+        return bool(cached and cached.expires_at > datetime.now(timezone.utc))
+
+    def build_query(self, symbol: str) -> str:
+        symbol = symbol.upper()
+        alias_query = self.alias_registry.get_query(symbol)
+        if alias_query:
+            return alias_query.replace("lang:en", "").replace("-is:retweet", "").strip()
+
+        base_asset = derive_base_asset(symbol)
+        names = DEFAULT_X_NAME_MAP.get(base_asset, [])
+        terms = [base_asset, f"${base_asset}"]
+        terms.extend(names)
+        return " OR ".join(format_reddit_term(term) for term in dedupe_terms(terms))
+
+    def _fetch_symbol(self, symbol: str) -> CommunitySignal | None:
+        params = {
+            "q": self.build_query(symbol),
+            "sort": "new",
+            "t": "day",
+            "limit": str(max(5, min(self.max_results, 100))),
+            "restrict_sr": "0",
+            "raw_json": "1",
+        }
+        url = f"{self.base_url.rstrip('/')}/search.json?{urlencode(params)}"
+        assert self.fetcher is not None
+        payload = self.fetcher(url, {"User-Agent": self.user_agent}, self.timeout)
+        posts = self._parse_posts(payload)
+        if not posts:
+            return None
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(hours=self.recent_window_hours)
+        fresh_posts = [post for post in posts if post["created_at"] >= cutoff]
+        if not fresh_posts:
+            return None
+        texts = [post["text"] for post in fresh_posts if post["text"]]
+        sentiment = XCommunityScoreProvider.score_sentiment(texts)
+        score = XCommunityScoreProvider.compute_score(
+            mentions=len(fresh_posts) * 15,
+            sentiment=sentiment,
+            sample_size=len(fresh_posts),
+        )
+        return CommunitySignal(
+            score=round(score, 2),
+            source="reddit",
+            mentions=len(fresh_posts),
+            sentiment=round(sentiment, 4),
+            sample_size=len(fresh_posts),
+        )
+
+    @staticmethod
+    def _parse_posts(payload: object) -> list[dict[str, object]]:
+        if not isinstance(payload, dict):
+            return []
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            return []
+        children = data.get("children")
+        if not isinstance(children, list):
+            return []
+        posts: list[dict[str, object]] = []
+        for child in children:
+            if not isinstance(child, dict):
+                continue
+            child_data = child.get("data")
+            if not isinstance(child_data, dict):
+                continue
+            created_utc = child_data.get("created_utc")
+            if created_utc is None:
+                continue
+            title = str(child_data.get("title", "")).strip()
+            body = str(child_data.get("selftext", "")).strip()
+            text = " ".join(item for item in [title, body] if item)
+            posts.append(
+                {
+                    "created_at": datetime.fromtimestamp(float(created_utc), tz=timezone.utc),
+                    "text": text,
+                }
+            )
+        return posts
+
+
+@dataclass
 class AliasRegistry:
     alias_csv_path: Path
     _cache: dict[str, str] | None = None
@@ -464,6 +686,12 @@ def format_x_term(term: str) -> str:
     return term
 
 
+def format_reddit_term(term: str) -> str:
+    if " " in term:
+        return f'"{term}"'
+    return term
+
+
 def sanitize_account_names(accounts: list[str]) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
@@ -489,7 +717,7 @@ def derive_base_asset(symbol: str) -> str:
 def parse_provider_mode(value: str) -> list[str]:
     normalized = (value or "auto").strip().lower()
     if normalized == "auto":
-        return ["x", "csv"]
+        return ["x", "csv", "news"]
     return [item.strip().lower() for item in normalized.split(",") if item.strip()]
 
 
@@ -497,6 +725,8 @@ def build_community_provider(
     *,
     provider_mode: str,
     csv_path: Path,
+    news_csv_path: Path,
+    telegram_csv_path: Path,
     alias_csv_path: Path,
     x_bearer_token: str,
     x_api_base_url: str,
@@ -505,6 +735,10 @@ def build_community_provider(
     x_recent_max_results: int,
     x_language: str,
     x_max_workers: int,
+    reddit_api_base_url: str,
+    reddit_recent_window_hours: int,
+    reddit_max_results: int,
+    reddit_user_agent: str,
     x_tracked_accounts: list[str] | None = None,
     x_account_mode: str = "off",
     x_account_weight_pct: float = 35.0,
@@ -531,6 +765,24 @@ def build_community_provider(
 
     if "csv" in requested and csv_path.exists():
         providers.append(CsvCommunityScoreProvider(csv_path=csv_path))
+
+    if "news" in requested and news_csv_path.exists():
+        providers.append(NewsCommunityScoreProvider(csv_path=news_csv_path))
+
+    if "telegram" in requested and telegram_csv_path.exists():
+        providers.append(TelegramCommunityScoreProvider(csv_path=telegram_csv_path))
+
+    if "reddit" in requested:
+        providers.append(
+            RedditCommunityScoreProvider(
+                alias_registry=AliasRegistry(alias_csv_path=alias_csv_path),
+                base_url=reddit_api_base_url,
+                ttl_seconds=community_ttl_seconds,
+                recent_window_hours=reddit_recent_window_hours,
+                max_results=reddit_max_results,
+                user_agent=reddit_user_agent,
+            )
+        )
 
     if not providers:
         return NullCommunityScoreProvider()

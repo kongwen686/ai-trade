@@ -2,9 +2,80 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+import base64
+import hashlib
+import hmac
 import json
+import os
 
 from .config import AppSettings
+
+RUNTIME_CONFIG_TEMPLATE_VERSION = 1
+RUNTIME_CONFIG_ENCRYPTED_KIND = "runtime_config_encrypted"
+RUNTIME_CONFIG_ENCRYPTED_VERSION = 1
+SECRET_FIELDS = ("binance_api_key", "binance_api_secret", "x_bearer_token")
+
+
+def _pbkdf2_key_material(passphrase: str, salt: bytes) -> bytes:
+    return hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), salt, 200_000, dklen=64)
+
+
+def _xor_stream(data: bytes, key: bytes, nonce: bytes) -> bytes:
+    chunks: list[bytes] = []
+    counter = 0
+    offset = 0
+    while offset < len(data):
+        block = hmac.new(key, nonce + counter.to_bytes(8, "big"), hashlib.sha256).digest()
+        chunk = data[offset : offset + len(block)]
+        chunks.append(bytes(left ^ right for left, right in zip(chunk, block)))
+        offset += len(block)
+        counter += 1
+    return b"".join(chunks)
+
+
+def encrypt_runtime_config_payload(payload: dict[str, object], passphrase: str) -> dict[str, object]:
+    plaintext = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    salt = os.urandom(16)
+    nonce = os.urandom(16)
+    key_material = _pbkdf2_key_material(passphrase, salt)
+    encryption_key = key_material[:32]
+    mac_key = key_material[32:]
+    ciphertext = _xor_stream(plaintext, encryption_key, nonce)
+    mac = hmac.new(mac_key, nonce + ciphertext, hashlib.sha256).digest()
+    return {
+        "kind": RUNTIME_CONFIG_ENCRYPTED_KIND,
+        "version": RUNTIME_CONFIG_ENCRYPTED_VERSION,
+        "salt": base64.b64encode(salt).decode("ascii"),
+        "nonce": base64.b64encode(nonce).decode("ascii"),
+        "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
+        "mac": base64.b64encode(mac).decode("ascii"),
+    }
+
+
+def decrypt_runtime_config_payload(payload: dict[str, object], passphrase: str) -> dict[str, object]:
+    try:
+        salt = base64.b64decode(str(payload["salt"]))
+        nonce = base64.b64decode(str(payload["nonce"]))
+        ciphertext = base64.b64decode(str(payload["ciphertext"]))
+        expected_mac = base64.b64decode(str(payload["mac"]))
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("加密配置文件格式无效。") from exc
+
+    key_material = _pbkdf2_key_material(passphrase, salt)
+    encryption_key = key_material[:32]
+    mac_key = key_material[32:]
+    actual_mac = hmac.new(mac_key, nonce + ciphertext, hashlib.sha256).digest()
+    if not hmac.compare_digest(actual_mac, expected_mac):
+        raise ValueError("运行配置解密失败，请检查 RUNTIME_CONFIG_PASSPHRASE 是否正确。")
+
+    plaintext = _xor_stream(ciphertext, encryption_key, nonce)
+    try:
+        decoded = json.loads(plaintext.decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("加密配置解密后不是合法 JSON。") from exc
+    if not isinstance(decoded, dict):
+        raise ValueError("加密配置解密后根节点必须是 JSON 对象。")
+    return decoded
 
 
 @dataclass
@@ -18,6 +89,7 @@ class ScanDefaults:
 
 @dataclass
 class BacktestDefaults:
+    preset: str = "custom"
     archives: str = ""
     lookback_bars: int = 240
     score_threshold: float = 70.0
@@ -65,6 +137,10 @@ class RuntimeConfig:
     x_account_mode: str = "off"
     x_account_weight_pct: float = 35.0
     x_tracked_accounts: list[str] = field(default_factory=list)
+    reddit_api_base_url: str = "https://www.reddit.com"
+    reddit_recent_window_hours: int = 24
+    reddit_max_results: int = 25
+    reddit_user_agent: str = "trade-signal-app/0.2"
     scan_defaults: ScanDefaults = field(default_factory=ScanDefaults)
     backtest_defaults: BacktestDefaults = field(default_factory=BacktestDefaults)
 
@@ -80,6 +156,10 @@ class RuntimeConfig:
             x_recent_window_hours=settings.x_recent_window_hours,
             x_recent_max_results=settings.x_recent_max_results,
             x_language=settings.x_language,
+            reddit_api_base_url=settings.reddit_api_base_url,
+            reddit_recent_window_hours=settings.reddit_recent_window_hours,
+            reddit_max_results=settings.reddit_max_results,
+            reddit_user_agent=settings.reddit_user_agent,
             scan_defaults=ScanDefaults(
                 quote_asset=settings.quote_asset,
                 interval=settings.interval,
@@ -113,6 +193,10 @@ class RuntimeConfig:
             ]
             if isinstance(payload.get("x_tracked_accounts", defaults.x_tracked_accounts), list)
             else defaults.x_tracked_accounts,
+            reddit_api_base_url=str(payload.get("reddit_api_base_url", defaults.reddit_api_base_url)),
+            reddit_recent_window_hours=int(payload.get("reddit_recent_window_hours", defaults.reddit_recent_window_hours)),
+            reddit_max_results=int(payload.get("reddit_max_results", defaults.reddit_max_results)),
+            reddit_user_agent=str(payload.get("reddit_user_agent", defaults.reddit_user_agent)),
             scan_defaults=ScanDefaults(
                 **{
                     **asdict(defaults.scan_defaults),
@@ -130,10 +214,46 @@ class RuntimeConfig:
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
+    def to_template_payload(self, *, include_secrets: bool = False) -> dict[str, object]:
+        payload = self.to_dict()
+        if not include_secrets:
+            for field_name in SECRET_FIELDS:
+                payload[field_name] = ""
+        return {
+            "kind": "runtime_config_template",
+            "version": RUNTIME_CONFIG_TEMPLATE_VERSION,
+            "include_secrets": include_secrets,
+            "config": payload,
+        }
+
+    @classmethod
+    def from_template_payload(
+        cls,
+        payload: dict[str, object],
+        settings: AppSettings,
+        *,
+        current_config: "RuntimeConfig | None" = None,
+    ) -> "RuntimeConfig":
+        raw_config = payload.get("config", payload)
+        if not isinstance(raw_config, dict):
+            raise ValueError("配置模板缺少 config 对象。")
+
+        merged_payload = dict(raw_config)
+        if current_config is not None:
+            for field_name in SECRET_FIELDS:
+                incoming = merged_payload.get(field_name)
+                if incoming is None or str(incoming).strip() == "":
+                    merged_payload[field_name] = getattr(current_config, field_name)
+        return cls.from_dict(merged_payload, settings)
+
 
 class RuntimeConfigStore:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, passphrase: str = "") -> None:
         self.path = path
+        self.passphrase = passphrase
+
+    def storage_mode_label(self) -> str:
+        return "Encrypted" if self.passphrase else "Local"
 
     def load(self, settings: AppSettings) -> RuntimeConfig:
         if not self.path.exists():
@@ -141,11 +261,20 @@ class RuntimeConfigStore:
         payload = json.loads(self.path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             return RuntimeConfig.default_from_settings(settings)
+        if payload.get("kind") == RUNTIME_CONFIG_ENCRYPTED_KIND:
+            if not self.passphrase:
+                raise ValueError("运行配置文件已加密，请先设置环境变量 RUNTIME_CONFIG_PASSPHRASE。")
+            payload = decrypt_runtime_config_payload(payload, self.passphrase)
         return RuntimeConfig.from_dict(payload, settings)
 
     def save(self, config: RuntimeConfig) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict[str, object]
+        if self.passphrase:
+            payload = encrypt_runtime_config_payload(config.to_dict(), self.passphrase)
+        else:
+            payload = config.to_dict()
         self.path.write_text(
-            json.dumps(config.to_dict(), ensure_ascii=False, indent=2),
+            json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )

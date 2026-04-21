@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from html import escape
+from urllib.parse import urlencode
+
+from .presets import get_backtest_preset
 
 
 def _option(value: str, selected: str) -> str:
@@ -216,6 +219,7 @@ def render_settings_page(
     status: dict[str, object],
     message: str | None,
     error: str | None,
+    import_payload_text: str | None,
 ) -> str:
     notices = []
     if message:
@@ -224,6 +228,7 @@ def render_settings_page(
         notices.append(f'<div class="notice notice-error">{escape(error)}</div>')
 
     tracked_accounts = "\n".join(str(item) for item in params["x_tracked_accounts"])
+    import_template = import_payload_text or ""
     hero_right = f"""
       <div class="stat-card">
         <span>Binance Auth</span>
@@ -231,14 +236,14 @@ def render_settings_page(
         <small>{escape(str(status["binance_auth_label"]))}</small>
       </div>
       <div class="stat-card">
-        <span>X / Twitter</span>
-        <strong>{"On" if status["x_auth_configured"] else "Off"}</strong>
+        <span>X / Reddit</span>
+        <strong>{"On" if status["x_auth_configured"] else "Mixed"}</strong>
         <small>{int(status["tracked_account_count"])} tracked accounts</small>
       </div>
       <div class="stat-card">
         <span>Storage</span>
-        <strong>Local</strong>
-        <small>配置保存到本地 JSON</small>
+        <strong>{escape(str(status["storage_mode"]))}</strong>
+        <small>{"已启用口令保护" if str(status["storage_mode"]) == "Encrypted" else "配置保存到本地 JSON"}</small>
       </div>
     """
     content = f"""
@@ -254,13 +259,13 @@ def render_settings_page(
           <label><span>Binance RecvWindow</span><input type="number" step="1" min="1" name="binance_recv_window_ms" value="{float(params['binance_recv_window_ms']):.0f}" /></label>
           <label class="inline-check"><input type="checkbox" name="clear_binance_auth" /><span>Clear Binance auth</span></label>
           <label><span>X Bearer Token</span><input type="password" name="x_bearer_token" value="" placeholder="留空保持当前" /></label>
-          <label><span>Community Provider</span><select name="community_provider">{''.join(_option(item, str(params['community_provider'])) for item in ['auto', 'x', 'csv', 'x,csv'])}</select></label>
+          <label><span>Community Provider</span><select name="community_provider">{''.join(_option(item, str(params['community_provider'])) for item in ['auto', 'x', 'csv', 'news', 'telegram', 'reddit', 'x,csv', 'x,news', 'x,telegram', 'x,reddit', 'csv,news', 'csv,telegram', 'csv,reddit', 'news,telegram', 'news,reddit', 'telegram,reddit', 'x,csv,news', 'x,csv,telegram', 'x,csv,reddit', 'x,news,telegram', 'x,news,reddit', 'x,telegram,reddit', 'csv,news,telegram', 'csv,news,reddit', 'csv,telegram,reddit', 'news,telegram,reddit', 'x,csv,news,telegram', 'x,csv,news,reddit', 'x,csv,telegram,reddit', 'x,news,telegram,reddit', 'csv,news,telegram,reddit', 'x,csv,news,telegram,reddit'])}</select></label>
           <label><span>X API Base URL</span><input type="text" name="x_api_base_url" value="{escape(str(params['x_api_base_url']))}" /></label>
           <label class="inline-check"><input type="checkbox" name="clear_x_auth" /><span>Clear X auth</span></label>
 
           <div class="settings-heading full-span">
             <h2>Twitter Intel</h2>
-            <p>账号列表支持一行一个用户名。`blend` 会把普通舆情和指定账号情报按权重混合，`only` 只看指定账号。</p>
+            <p>账号列表支持一行一个用户名。`blend` 会把普通舆情和指定账号情报按权重混合，`only` 只看指定账号。本地新闻与 Telegram 情报可分别通过 <code>data/news_sentiment.csv</code> 和 <code>data/telegram_sentiment.csv</code> 参与混合。</p>
           </div>
           <label><span>X Window Hours</span><input type="number" min="1" name="x_recent_window_hours" value="{int(params['x_recent_window_hours'])}" /></label>
           <label><span>X Max Results</span><input type="number" min="10" max="100" name="x_recent_max_results" value="{int(params['x_recent_max_results'])}" /></label>
@@ -268,6 +273,10 @@ def render_settings_page(
           <label><span>Account Mode</span><select name="x_account_mode">{''.join(_option(item, str(params['x_account_mode'])) for item in ['off', 'blend', 'only'])}</select></label>
           <label><span>Account Weight %</span><input type="number" step="0.1" min="0" max="100" name="x_account_weight_pct" value="{float(params['x_account_weight_pct']):.1f}" /></label>
           <label class="full-span"><span>Tracked Accounts</span><textarea name="x_tracked_accounts" rows="5" placeholder="@lookonchain&#10;wu_blockchain&#10;TheBlock__">{escape(tracked_accounts)}</textarea></label>
+          <label><span>Reddit API Base URL</span><input type="text" name="reddit_api_base_url" value="{escape(str(params['reddit_api_base_url']))}" /></label>
+          <label><span>Reddit Window Hours</span><input type="number" min="1" name="reddit_recent_window_hours" value="{int(params['reddit_recent_window_hours'])}" /></label>
+          <label><span>Reddit Max Results</span><input type="number" min="5" max="100" name="reddit_max_results" value="{int(params['reddit_max_results'])}" /></label>
+          <label class="full-span"><span>Reddit User-Agent</span><input type="text" name="reddit_user_agent" value="{escape(str(params['reddit_user_agent']))}" /></label>
 
           <div class="settings-heading full-span">
             <h2>Scan Defaults</h2>
@@ -283,6 +292,7 @@ def render_settings_page(
             <h2>Backtest Defaults</h2>
             <p>这些值会作为回测页的默认策略参数。你可以把实盘偏好先固定下来，再按每次任务微调。</p>
           </div>
+          <label><span>Default Preset</span><select name="backtest_preset">{''.join(_option(item, str(params['backtest_preset'])) for item in ['custom', 'balanced_swing', 'breakout_aggressive', 'portfolio_rotation'])}</select></label>
           <label class="full-span"><span>Default Archives</span><textarea name="backtest_archives" rows="4" placeholder="data/spot/monthly/klines/*/4h/*.zip">{escape(str(params['backtest_archives']))}</textarea></label>
           <label><span>Lookback Bars</span><input type="number" min="60" name="backtest_lookback_bars" value="{int(params['backtest_lookback_bars'])}" /></label>
           <label><span>Score Threshold</span><input type="number" step="0.1" name="backtest_score_threshold" value="{float(params['backtest_score_threshold']):.1f}" /></label>
@@ -317,8 +327,31 @@ def render_settings_page(
 
           <button type="submit">保存运行配置</button>
         </form>
+        <div class="settings-transfer">
+          <div class="settings-transfer-card">
+            <div class="settings-heading">
+              <h2>Config Export</h2>
+              <p>模板导出默认会清空密钥字段，适合备份参数或跨机器迁移。需要完整备份时再导出包含密钥的版本。</p>
+            </div>
+            <div class="action-row">
+              <a class="action-link" href="/api/settings/export">导出模板 JSON</a>
+              <a class="action-link" href="/api/settings/export?include_secrets=1">导出完整配置</a>
+            </div>
+          </div>
+          <form method="post" action="/settings/import" class="settings-transfer-card import-form">
+            <div class="settings-heading">
+              <h2>Config Import</h2>
+              <p>支持粘贴导出的模板 JSON。若模板中的密钥为空，当前已保存的密钥会自动保留。</p>
+            </div>
+            <label>
+              <span>Template JSON</span>
+              <textarea name="config_template" rows="10" placeholder='{{"kind":"runtime_config_template","version":1,"config":{{...}}}}'>{escape(import_template)}</textarea>
+            </label>
+            <button type="submit">导入配置模板</button>
+          </form>
+        </div>
         <p class="helper-text">
-          当前实现会把配置写入本地 JSON 文件。适合你自己本机使用；如果后面要多用户部署，需要再把密钥存储切到加密后端。
+          当前实现支持本地 JSON 存储；如果设置环境变量 <code>RUNTIME_CONFIG_PASSPHRASE</code>，后续保存会自动写成加密格式。未设置时仍保持明文 JSON，适合单机研究使用。
         </p>
       </section>
     """
@@ -470,6 +503,95 @@ def _selection_rows(selections: list[dict[str, object]]) -> str:
     """
 
 
+def _serialize_query_value(value: object) -> str:
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    return str(value)
+
+
+def _build_backtest_export_query(params: dict[str, object]) -> str:
+    return urlencode({key: _serialize_query_value(value) for key, value in params.items()})
+
+
+def _summary_bars(items: list[dict[str, object]], *, label_key: str) -> str:
+    if not items:
+        return '<p class="helper-text">当前没有可绘制的权益结果。</p>'
+
+    max_equity = max(float(item["final_equity"]) for item in items) or 1.0
+    bars = []
+    for item in items[:10]:
+        final_equity = float(item["final_equity"])
+        max_drawdown_pct = float(item["max_drawdown_pct"])
+        width_pct = max(8.0, (final_equity / max_equity) * 100)
+        bars.append(
+            f"""
+            <div class="summary-bar-row">
+              <div class="summary-bar-label">
+                <strong>{escape(str(item[label_key]))}</strong>
+                <span>Equity {final_equity:.3f} · Max DD {max_drawdown_pct:+.2f}%</span>
+              </div>
+              <div class="summary-bar-track">
+                <i style="width: {width_pct:.2f}%"></i>
+              </div>
+            </div>
+            """
+        )
+    return "".join(bars)
+
+
+def _backtest_overview(
+    *,
+    params: dict[str, object],
+    series_reports: list[dict[str, object]],
+    portfolio_reports: list[dict[str, object]],
+) -> str:
+    export_query = _build_backtest_export_query(params)
+    total_series_trades = sum(int(report["signal_count"]) for report in series_reports)
+    total_portfolio_batches = sum(int(report["batch_count"]) for report in portfolio_reports)
+    best_series = max((float(report["final_equity"]) for report in series_reports), default=0.0)
+    best_portfolio = max((float(report["final_equity"]) for report in portfolio_reports), default=0.0)
+    return f"""
+      <section class="overview-grid">
+        <article class="overview-card">
+          <div class="section-heading">
+            <div>
+              <h2>Export</h2>
+              <p>基于当前页面参数直接导出结果。</p>
+            </div>
+          </div>
+          <div class="action-row">
+            <a class="action-link" href="/api/backtest?{escape(export_query)}">导出 JSON</a>
+            <a class="action-link" href="/api/backtest/export?format=csv&amp;{escape(export_query)}">导出 CSV</a>
+          </div>
+          <div class="mini-stat-grid compact-grid">
+            <div class="mini-stat"><span>Series Trades</span><strong>{total_series_trades}</strong></div>
+            <div class="mini-stat"><span>Portfolio Batches</span><strong>{total_portfolio_batches}</strong></div>
+            <div class="mini-stat"><span>Best Series Equity</span><strong>{best_series:.3f}</strong></div>
+            <div class="mini-stat"><span>Best Portfolio Equity</span><strong>{best_portfolio:.3f}</strong></div>
+          </div>
+        </article>
+        <article class="overview-card">
+          <div class="section-heading">
+            <div>
+              <h2>Series Equity Rank</h2>
+              <p>按最终权益对单币种结果做快速比较。</p>
+            </div>
+          </div>
+          {_summary_bars(sorted(series_reports, key=lambda item: float(item["final_equity"]), reverse=True), label_key="symbol")}
+        </article>
+        <article class="overview-card">
+          <div class="section-heading">
+            <div>
+              <h2>Portfolio Equity Rank</h2>
+              <p>组合回测优先看权益，再结合回撤判断稳定性。</p>
+            </div>
+          </div>
+          {_summary_bars(sorted(portfolio_reports, key=lambda item: float(item["final_equity"]), reverse=True), label_key="interval")}
+        </article>
+      </section>
+    """
+
+
 def _backtest_card(report: dict[str, object]) -> str:
     trade_pills = _trade_pills(report["trade_stat"], float(report["final_equity"]), float(report["max_drawdown_pct"]))
     return f"""
@@ -532,8 +654,11 @@ def render_backtest_page(
     series_reports: list[dict[str, object]],
     portfolio_reports: list[dict[str, object]],
     error: str | None,
+    presets: list[dict[str, object]],
 ) -> str:
     archive_value = escape(str(params["archives"]))
+    current_preset = get_backtest_preset(str(params["preset"]))
+    preset_options = "".join(_option(str(preset["preset_id"]), str(params["preset"])) for preset in presets)
     hero_right = f"""
       <div class="stat-card">
         <span>Series Reports</span>
@@ -567,6 +692,12 @@ def render_backtest_page(
       <section class="control-panel">
         {error_html}
         <form method="get" action="/backtest" class="backtest-form">
+          <label><span>Preset</span><select name="preset">{preset_options}</select></label>
+          <div class="preset-note">
+            <strong>{escape(current_preset.label)}</strong>
+            <span>{escape(current_preset.description)}</span>
+            <a href="/api/backtest/presets">查看模板清单</a>
+          </div>
           <label class="full-span">
             <span>Archive Patterns</span>
             <textarea name="archives" rows="4" placeholder="例如：data/spot/monthly/klines/*/4h/*.zip">{archive_value}</textarea>
@@ -607,6 +738,8 @@ def render_backtest_page(
           页面会直接读取你本机上的 Binance public-data ZIP。支持 glob pattern、多个 pattern 换行，以及组合层 top N 回测。
         </p>
       </section>
+
+      {_backtest_overview(params=params, series_reports=series_reports, portfolio_reports=portfolio_reports)}
 
       <section class="section-block">
         <div class="section-heading">

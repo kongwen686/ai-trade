@@ -32,6 +32,9 @@
   - X/Twitter 实时舆情
   - 指定账号情报模式：`off` / `blend` / `only`
   - 本地 CSV 社区分数
+  - 本地新闻情报 CSV 聚合
+  - 本地 Telegram 情报 CSV 聚合
+  - Reddit 公开搜索舆情
   - 社媒查询别名
 - 历史回测
   - Binance public-data ZIP 读取
@@ -41,9 +44,12 @@
   - 手续费 / maker-taker / Binance 账户真实 commission
   - 固定滑点 / 动态滑点
   - 资金曲线 / 最大回撤 / Profit Factor
+  - 页面级权益对比图和 JSON / CSV 结果导出
+  - 内建参数预设与策略组合模板
 - 运行配置
   - Web 页面直接配置 Binance key、X token、情报账号和策略默认值
-  - 保存后自动应用到扫描页和回测页
+- 保存后自动应用到扫描页和回测页
+  - 支持配置模板 JSON 导出 / 导入
 
 ## Web 入口
 
@@ -111,6 +117,7 @@ python3 run_backtest.py "data/spot/monthly/klines/*/4h/*.zip" \
 - 情报模式与权重
 - 实时扫描默认参数
 - 历史回测默认参数
+- 配置模板 JSON 导出 / 导入
 
 保存机制：
 
@@ -119,11 +126,29 @@ python3 run_backtest.py "data/spot/monthly/klines/*/4h/*.zip" \
 - 会持久化到本地 `data/runtime_config.json`
 - 保存后 `/` 和 `/backtest` 会自动使用新的默认值
 
+模板流转：
+
+- `GET /api/settings/export`
+  - 导出脱敏模板，默认清空 Binance / X 密钥
+- `GET /api/settings/export?include_secrets=1`
+  - 导出完整配置，适合你自己的本地完整备份
+- `POST /settings/import`
+  - 从设置页粘贴 JSON 模板导入
+  - 如果模板里的密钥字段为空，会自动保留当前本机已保存的密钥
+
 安全边界：
 
-- `data/runtime_config.json` 当前是本地明文存储
-- 适合个人单机使用
-- 如果要做多用户部署，建议切换到数据库或专用密钥存储
+- 默认仍兼容本地明文 `data/runtime_config.json`
+- 如果设置环境变量 `RUNTIME_CONFIG_PASSPHRASE`，后续保存会自动写成加密格式
+- 已加密配置文件在缺少口令时不会被读取
+- 当前实现适合个人单机使用；如果要做多用户部署，仍建议切换到数据库或专用密钥存储
+
+启用示例：
+
+```bash
+export RUNTIME_CONFIG_PASSPHRASE="your-strong-passphrase"
+python3 run.py
+```
 
 ## 信号维度
 
@@ -163,6 +188,43 @@ python3 run.py
 - `only`
   - 只看指定账号内容
 
+`Community Provider` 现在支持：
+
+- `x`
+- `csv`
+- `news`
+- `telegram`
+- `reddit`
+- `x,csv`
+- `x,news`
+- `x,telegram`
+- `x,reddit`
+- `csv,news`
+- `csv,telegram`
+- `csv,reddit`
+- `news,telegram`
+- `news,reddit`
+- `telegram,reddit`
+- `x,csv,news`
+- `x,csv,telegram`
+- `x,csv,reddit`
+- `x,news,telegram`
+- `x,news,reddit`
+- `x,telegram,reddit`
+- `csv,news,telegram`
+- `csv,news,reddit`
+- `csv,telegram,reddit`
+- `news,telegram,reddit`
+- `x,csv,news,telegram`
+- `x,csv,news,reddit`
+- `x,csv,telegram,reddit`
+- `x,news,telegram,reddit`
+- `csv,news,telegram,reddit`
+- `x,csv,news,telegram,reddit`
+- `auto`
+  - 自动尝试可用的 `x + csv + news`
+  - 为了避免无意增加网络依赖，`telegram` 和 `reddit` 需要显式选择
+
 示例账号：
 
 ```text
@@ -186,6 +248,66 @@ symbol,score,mentions,sentiment,source
 BTCUSDT,82,1240,0.78,manual-research
 ETHUSDT,76,890,0.72,manual-research
 ```
+
+### 新闻情报 CSV
+
+如果你有本地整理的新闻研究结果，可以直接使用：
+
+```bash
+cp data/news_sentiment.example.csv data/news_sentiment.csv
+```
+
+格式：
+
+```csv
+symbol,headline,sentiment,source,published_at,url
+BTCUSDT,US spot BTC ETF inflows extend for fifth session,0.72,newsdesk,2026-04-20T08:30:00Z,https://example.com/btc-etf-inflows
+ETHUSDT,Ethereum scaling upgrade attracts renewed developer activity,0.68,blockwire,2026-04-20T09:10:00Z,https://example.com/eth-upgrade
+```
+
+说明：
+
+- `sentiment` 建议使用 `-1` 到 `1`
+- 同一 `symbol` 的多条新闻会按平均情绪和样本数聚合
+- 聚合后会和 X / CSV 社区分数一起参与最终社区评分
+
+### Telegram 情报 CSV
+
+如果你有自己整理的频道消息，也可以直接使用：
+
+```bash
+cp data/telegram_sentiment.example.csv data/telegram_sentiment.csv
+```
+
+格式：
+
+```csv
+symbol,channel,message,sentiment,published_at,url
+BTCUSDT,whalewatch,Large wallets keep adding BTC on pullbacks,0.66,2026-04-20T07:20:00Z,https://t.me/example_btc
+ETHUSDT,defialpha,Layer2 activity expands after new upgrade cycle,0.62,2026-04-20T10:45:00Z,https://t.me/example_eth
+```
+
+说明：
+
+- `sentiment` 建议使用 `-1` 到 `1`
+- 同一 `symbol` 的多条频道消息会按平均情绪和样本数聚合
+- 聚合后会和 X / 新闻 / CSV / Reddit 一起参与最终社区评分
+
+### Reddit
+
+Reddit 走公开搜索接口，不需要单独秘钥。可在 `/settings` 中配置：
+
+- `Reddit API Base URL`
+- `Reddit Window Hours`
+- `Reddit Max Results`
+- `Reddit User-Agent`
+
+实现方式：
+
+- 根据交易对和别名生成搜索词
+- 读取最近帖子标题和正文
+- 按最近时间窗过滤
+- 用帖子数和文本情绪生成 `reddit` 社区分数
 
 ### 社媒查询别名
 
@@ -230,6 +352,32 @@ python3 run_backtest.py "data/spot/monthly/klines/*/4h/*.zip" \
   --holding-periods 3,6,12 \
   --portfolio-top-n 2
 ```
+
+### Web 结果导出
+
+回测页现在支持基于当前筛选参数直接导出：
+
+- `GET /api/backtest`
+  - 返回完整 JSON 结果
+- `GET /api/backtest/export?format=csv`
+  - 返回扁平化 CSV 摘要，适合后续表格分析
+- `GET /api/backtest/export?format=json`
+  - 返回带缩进的导出 JSON
+
+### 回测预设
+
+回测页和设置页现在支持内建策略模板：
+
+- `custom`
+- `balanced_swing`
+- `breakout_aggressive`
+- `portfolio_rotation`
+
+用途：
+
+- 在 `/backtest` 里快速套用一组参数
+- 在 `/settings` 里把某个 preset 保存成默认回测模板
+- 通过 `GET /api/backtest/presets` 查看模板清单和参数
 
 ### 当前默认入场逻辑
 
