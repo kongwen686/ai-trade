@@ -1,0 +1,5 @@
+symbol,query
+BTCUSDT,($BTC OR #BTC OR Bitcoin OR #Bitcoin) lang:en -is:retweet
+ETHUSDT,($ETH OR #ETH OR Ethereum OR #Ethereum) lang:en -is:retweet
+LINKUSDT,($LINK OR #LINK OR Chainlink OR #Chainlink) lang:en -is:retweet
+ONEUSDT,($ONE OR #HarmonyONE OR "Harmony One") lang:en -is:retweet
