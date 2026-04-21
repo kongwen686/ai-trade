@@ -418,6 +418,31 @@ class MainTests(unittest.TestCase):
         self.assertEqual(params["portfolio_top_n"], 3)
         self.assertEqual(params["capital_fraction_pct"], 60.0)
 
+    def test_backtest_payload_applies_btc_cycle_trend_preset(self) -> None:
+        current = RuntimeConfig()
+        current.backtest_defaults.preset = "btc_cycle_trend"
+
+        with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(current, None)):
+            _, params, _ = _backtest_payload({})
+
+        self.assertEqual(params["preset"], "btc_cycle_trend")
+        self.assertEqual(params["portfolio_top_n"], 1)
+        self.assertEqual(params["min_rsi"], 46.0)
+        self.assertEqual(params["max_rsi"], 74.0)
+        self.assertEqual(params["max_concurrent_positions"], 1)
+
+    def test_backtest_payload_applies_btc_core_trading_preset(self) -> None:
+        current = RuntimeConfig()
+        current.backtest_defaults.preset = "btc_core_trading"
+
+        with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(current, None)):
+            _, params, _ = _backtest_payload({})
+
+        self.assertEqual(params["preset"], "btc_core_trading")
+        self.assertEqual(params["min_buy_pressure"], 0.56)
+        self.assertEqual(params["max_rsi"], 74.0)
+        self.assertTrue(params["no_kdj_confirmation"])
+
     def test_backtest_payload_returns_error_for_binance_fee_resolution_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             archive = Path(temp_dir) / "BTCUSDT-4h-2025-01.zip"

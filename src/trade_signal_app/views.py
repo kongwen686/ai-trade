@@ -292,7 +292,7 @@ def render_settings_page(
             <h2>Backtest Defaults</h2>
             <p>这些值会作为回测页的默认策略参数。你可以把实盘偏好先固定下来，再按每次任务微调。</p>
           </div>
-          <label><span>Default Preset</span><select name="backtest_preset">{''.join(_option(item, str(params['backtest_preset'])) for item in ['custom', 'balanced_swing', 'breakout_aggressive', 'portfolio_rotation'])}</select></label>
+          <label><span>Default Preset</span><select name="backtest_preset">{''.join(_option(item, str(params['backtest_preset'])) for item in ['custom', 'balanced_swing', 'breakout_aggressive', 'portfolio_rotation', 'btc_cycle_trend', 'btc_core_trading', 'btc_compounding_risk_off'])}</select></label>
           <label class="full-span"><span>Default Archives</span><textarea name="backtest_archives" rows="4" placeholder="data/spot/monthly/klines/*/4h/*.zip">{escape(str(params['backtest_archives']))}</textarea></label>
           <label><span>Lookback Bars</span><input type="number" min="60" name="backtest_lookback_bars" value="{int(params['backtest_lookback_bars'])}" /></label>
           <label><span>Score Threshold</span><input type="number" step="0.1" name="backtest_score_threshold" value="{float(params['backtest_score_threshold']):.1f}" /></label>

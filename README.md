@@ -372,12 +372,24 @@ python3 run_backtest.py "data/spot/monthly/klines/*/4h/*.zip" \
 - `balanced_swing`
 - `breakout_aggressive`
 - `portfolio_rotation`
+- `btc_cycle_trend`
+- `btc_core_trading`
+- `btc_compounding_risk_off`
 
 用途：
 
 - 在 `/backtest` 里快速套用一组参数
 - 在 `/settings` 里把某个 preset 保存成默认回测模板
 - 通过 `GET /api/backtest/presets` 查看模板清单和参数
+
+其中 3 个 BTC 定向模板，是基于对公开 BTC 交易账户档案的研究思路提炼出来的：
+
+- `btc_cycle_trend`
+  - 更偏 BTC 周期趋势跟随，强调顺势和中等持仓周期
+- `btc_core_trading`
+  - 更偏核心仓 + 交易仓，允许围绕主方向做更积极的仓位管理
+- `btc_compounding_risk_off`
+  - 更偏复利与回撤控制，主动压低暴露和并发
 
 ### 当前默认入场逻辑
 

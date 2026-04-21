@@ -70,6 +70,8 @@
 - 回测页支持单币种 / 组合权益排名总览
 - 支持回测结果 JSON / CSV 导出
 - 支持内建回测参数预设与策略组合模板
+- 新增 3 个 BTC 定向研究模板：周期趋势、核心仓交易、复利风控
+- 已基于真实 BTCUSDT 4h 月度数据完成首轮模板验证与样本外检验
 
 相关入口：
 
@@ -152,6 +154,17 @@
 - 新增本地 Telegram 情报 CSV provider，可显式加入社区评分混合
 - 新增内建回测 preset 与模板 API：`/api/backtest/presets`
 - 新增可选加密配置存储，支持对 `runtime_config.json` 做口令保护
+- 新增 3 个 BTC 专用回测 preset，可直接用于策略验证
+- 使用 Binance public-data 真实 BTCUSDT 4h ZIP 对 3 个 BTC 模板完成实测
+- 已优化 `btc_cycle_trend`：
+  - `min_rsi: 48 -> 46`
+  - `max_rsi: 72 -> 74`
+- 已验证 `btc_core_trading` 是当前更稳的主模板：
+  - 2024-2025 全样本：`final_equity 1.0782`、`max_drawdown -5.34%`
+  - 2025 样本外：`final_equity 1.0768`、`max_drawdown -3.45%`
+- 已验证 `btc_cycle_trend` 更适合作为趋势年份进攻模板：
+  - 2024 样本内：`final_equity 1.2325`
+  - 2025 样本外：`final_equity 0.9053`
 
 ## 4. 验证记录
 
@@ -164,13 +177,14 @@ PYTHONPATH=src python3 -m compileall src run.py run_backtest.py
 
 结果：
 
-- 53 个测试通过
+- 55 个测试通过
 - 编译通过
 - `/settings`
 - `/`
 - `/backtest`
 - `/api/backtest`
 - `/api/backtest/export`
+- `/api/backtest/presets`
 
 均已做本地冒烟验证
 
@@ -181,37 +195,15 @@ PYTHONPATH=src python3 -m compileall src run.py run_backtest.py
 - 未接入真实下单，仅用于研究、筛选和回测
 - Twitter/X 数据依赖 Bearer Token 和接口配额
 - Binance 账户手续费依赖 API Key、权限与 IP 白名单
+- 当前 BTC 模板验证仅覆盖 `BTCUSDT 4h / 2024-01 ~ 2025-12` 这一组样本，尚未扩展到更多年份与多交易对
 
 ## 7. 发布状态
 
-本地代码已整理完毕，适合进入 Git 版本管理并推送到远程仓库。
+当前仓库已完成 Git 初始化、远端绑定、首个 release 发布与主分支同步。
 
-但当前环境存在两个阻塞：
+当前状态：
 
-- 当前目录还不是 Git 仓库
-- 当前机器未安装 GitHub CLI `gh`
-
-因此“新建远程 GitHub 项目并推送”这一步还不能直接完成。
-
-完成发布所需的最小条件：
-
-```bash
-brew install gh
-gh auth login
-```
-
-完成后建议：
-
-```bash
-git init
-git add .
-git commit -m "initial trade signal app"
-gh repo create ai-trade --private --source=. --remote=origin --push
-```
-
-如果后续确定要继续由我接手发布，我可以在 `gh` 可用后直接完成：
-
-- 初始化 Git
-- 首次提交
-- 新建远程仓库
-- 推送到 `origin`
+- Git 仓库已初始化
+- `origin` 已绑定 `https://github.com/kongwen686/ai-trade.git`
+- `main` 已推送
+- 已发布 release：`v0.1.0`
