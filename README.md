@@ -403,6 +403,11 @@ python3 run_backtest.py "data/spot/monthly/klines/*/4h/*.zip" \
    - 当前版本先作为观察模板
    - 回撤控制思路合理，但现阶段收益端还不成立
 
+相关研究笔记：
+
+- [BTC Preset Validation](docs/research/btc-preset-validation.md)
+  - 记录了 `BTCUSDT 4h / 2024-2025` 的首轮全样本验证、参数收敛和 `2024/2025` 样本外检验结果
+
 ### 当前默认入场逻辑
 
 - 综合分数大于等于阈值
