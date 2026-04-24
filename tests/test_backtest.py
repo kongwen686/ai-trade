@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import io
 from pathlib import Path
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 import zipfile
 
+from trade_signal_app import __version__
 from trade_signal_app.backtest import (
     archive_key,
     merge_candles,
+    parse_args,
     resolve_commission_from_account_payload,
     resolve_commission_from_symbol_payload,
     resolve_execution_config_from_binance,
@@ -55,6 +59,14 @@ def _make_backtest_candles() -> list[Candlestick]:
 
 
 class BacktestTests(unittest.TestCase):
+    def test_parse_args_supports_version(self) -> None:
+        buffer = io.StringIO()
+        with self.assertRaises(SystemExit) as exc, redirect_stdout(buffer):
+            parse_args(["--version"])
+
+        self.assertEqual(exc.exception.code, 0)
+        self.assertIn(__version__, buffer.getvalue())
+
     def test_archive_key(self) -> None:
         symbol, interval = archive_key(Path("BTCUSDT-4h-2025-01.zip"))
         self.assertEqual(symbol, "BTCUSDT")

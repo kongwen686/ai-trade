@@ -1,6 +1,6 @@
 # 项目进度文档
 
-更新日期：2026-04-21
+更新日期：2026-04-24
 
 ## 1. 项目目标
 
@@ -78,7 +78,7 @@
 
 - Web：`/backtest`
 - API：`/api/backtest`
-- CLI：`run_backtest.py`
+- CLI：`python3 -m trade_signal_app.backtest` / `run_backtest.py`
 
 核心文件：
 
@@ -166,19 +166,26 @@
 - 已验证 `btc_cycle_trend` 更适合作为趋势年份进攻模板：
   - 2024 样本内：`final_equity 1.2325`
   - 2025 样本外：`final_equity 0.9053`
+- 收口默认测试入口，仓库根目录直接执行 `pytest -q` 即可完成测试发现
+- 增加包级模块入口：`python3 -m trade_signal_app`
+- 增加安装后 CLI 入口：`trade-signal-web`、`trade-signal-backtest`
+- Web CLI 新增 `--host`、`--port`、`--version`
+- Backtest CLI 新增 `--version`，并统一版本输出
+- README 已区分“源码目录运行”和“安装后运行”两条路径
+- 版本号改为以 `src/trade_signal_app/__init__.py` 为单一来源
 
 ## 4. 验证记录
 
-2026-04-21 已执行：
+2026-04-24 已执行：
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'
-PYTHONPATH=src python3 -m compileall src run.py run_backtest.py
+pytest -q
+python3 -m compileall src run.py run_backtest.py tests
 ```
 
 结果：
 
-- 55 个测试通过
+- 60 个测试通过
 - 编译通过
 - `/settings`
 - `/`
@@ -186,6 +193,10 @@ PYTHONPATH=src python3 -m compileall src run.py run_backtest.py
 - `/api/backtest`
 - `/api/backtest/export`
 - `/api/backtest/presets`
+- `python3 -m trade_signal_app --help`
+- `python3 -m trade_signal_app --version`
+- `python3 -m trade_signal_app.backtest --help`
+- `python3 -m trade_signal_app.backtest --version`
 
 均已做本地冒烟验证
 

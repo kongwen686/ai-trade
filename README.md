@@ -63,10 +63,18 @@
 
 ## 快速开始
 
-### 1. 运行 Web 应用
+### 1. 从源码目录直接运行
+
+未安装时，`src/` 布局需要显式带上 `PYTHONPATH`：
 
 ```bash
-python3 run.py
+PYTHONPATH=src python3 -m trade_signal_app
+```
+
+自定义监听地址示例：
+
+```bash
+PYTHONPATH=src python3 -m trade_signal_app --host 0.0.0.0 --port 8000
 ```
 
 然后打开：
@@ -82,12 +90,44 @@ http://127.0.0.1:8000/settings
 3. 填写 `Tracked Accounts`，如果你想跟踪特定 Twitter 情报账号
 4. 设置扫描默认参数和回测默认参数
 
-### 2. 运行回测 CLI
+源码目录下运行回测 CLI：
 
 ```bash
-python3 run_backtest.py "data/spot/monthly/klines/*/4h/*.zip" \
+PYTHONPATH=src python3 -m trade_signal_app.backtest "data/spot/monthly/klines/*/4h/*.zip" \
   --score-threshold 72 \
   --portfolio-top-n 2
+```
+
+### 2. 安装后运行
+
+如果你希望直接使用模块入口或 console scripts，先安装：
+
+```bash
+python3 -m pip install -e .
+```
+
+安装完成后，可以直接使用：
+
+```bash
+python3 -m trade_signal_app
+python3 -m trade_signal_app.backtest "data/spot/monthly/klines/*/4h/*.zip"
+trade-signal-web
+trade-signal-backtest "data/spot/monthly/klines/*/4h/*.zip"
+```
+
+安装后的 Web 入口同样支持：
+
+```bash
+trade-signal-web --host 0.0.0.0 --port 8000
+```
+
+如果你处在离线或受限环境，优先使用上面的源码目录运行方式。
+
+查看当前版本：
+
+```bash
+PYTHONPATH=src python3 -m trade_signal_app --version
+PYTHONPATH=src python3 -m trade_signal_app.backtest --version
 ```
 
 ## 为什么这个项目有用
@@ -147,7 +187,7 @@ python3 run_backtest.py "data/spot/monthly/klines/*/4h/*.zip" \
 
 ```bash
 export RUNTIME_CONFIG_PASSPHRASE="your-strong-passphrase"
-python3 run.py
+python3 -m trade_signal_app
 ```
 
 ## 信号维度
@@ -176,7 +216,7 @@ python3 run.py
 
 ```bash
 export X_BEARER_TOKEN="your-bearer-token"
-python3 run.py
+python3 -m trade_signal_app
 ```
 
 支持模式：
@@ -339,7 +379,7 @@ curl -L "https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/4h/BTCUSDT
 ### 单币种回测
 
 ```bash
-python3 run_backtest.py "BTCUSDT-4h-2025-*.zip" \
+python3 -m trade_signal_app.backtest "BTCUSDT-4h-2025-*.zip" \
   --score-threshold 70 \
   --holding-periods 3,6,12
 ```
@@ -347,7 +387,7 @@ python3 run_backtest.py "BTCUSDT-4h-2025-*.zip" \
 ### 多币种组合回测
 
 ```bash
-python3 run_backtest.py "data/spot/monthly/klines/*/4h/*.zip" \
+python3 -m trade_signal_app.backtest "data/spot/monthly/klines/*/4h/*.zip" \
   --score-threshold 70 \
   --holding-periods 3,6,12 \
   --portfolio-top-n 2
@@ -488,8 +528,8 @@ export BINANCE_RECV_WINDOW_MS="5000"
 ├── src/trade_signal_app/     # 核心应用代码
 ├── static/                   # Web 样式
 ├── tests/                    # 单元测试
-├── run.py                    # Web 服务入口
-├── run_backtest.py           # 回测 CLI 入口
+├── run.py                    # Web 服务兼容入口
+├── run_backtest.py           # 回测 CLI 兼容入口
 ├── PROJECT_PROGRESS.md       # 当前进度与后续跟进文档
 └── README.md
 ```
@@ -497,8 +537,8 @@ export BINANCE_RECV_WINDOW_MS="5000"
 ## 验证
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'
-PYTHONPATH=src python3 -m compileall src run.py run_backtest.py
+pytest -q
+python3 -m compileall src run.py run_backtest.py tests
 ```
 
 当前版本在本地已经完成：
@@ -513,8 +553,8 @@ PYTHONPATH=src python3 -m compileall src run.py run_backtest.py
 - 接入 Binance WebSocket，支持更接近实时的刷新
 - 增加更完整的参数预设与策略模板
 - 给回测页补更完整的图形化结果和导出能力
-- 接入更多情报源，例如新闻、Telegram、Reddit
-- 评估将本地明文配置升级为加密存储
+- 增加更多样本区间和多交易对的回测验证
+- 完善安装与发布体验
 
 ## 项目状态
 

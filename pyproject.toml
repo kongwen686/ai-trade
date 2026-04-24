@@ -1,17 +1,27 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=65"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "trade-signal-app"
-version = "0.1.0"
 description = "A Binance-powered spot signal scanner with an extensible scoring engine."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
+dynamic = ["version"]
+
+[project.scripts]
+trade-signal-web = "trade_signal_app.main:main"
+trade-signal-backtest = "trade_signal_app.backtest:main"
 
 [project.optional-dependencies]
-dev = []
+dev = ["pytest>=8,<9"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "trade_signal_app.__version__"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

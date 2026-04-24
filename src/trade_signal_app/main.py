@@ -4,11 +4,13 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import argparse
 import csv
 import io
 import json
 from urllib.parse import parse_qs, urlparse
 
+from . import __version__
 from .app_state import AppState
 from .backtest import (
     group_archives,
@@ -664,11 +666,26 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
-def run() -> None:
-    server = ThreadingHTTPServer((SETTINGS.server_host, SETTINGS.server_port), RequestHandler)
-    print(f"Serving on http://{SETTINGS.server_host}:{SETTINGS.server_port}")
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="trade_signal_app", description="Run the AI Trade local web application.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--host", default=SETTINGS.server_host, help="Host interface to bind the local HTTP server.")
+    parser.add_argument("--port", type=int, default=SETTINGS.server_port, help="TCP port to bind the local HTTP server.")
+    return parser.parse_args(argv)
+
+
+def run(*, host: str | None = None, port: int | None = None) -> None:
+    resolved_host = host or SETTINGS.server_host
+    resolved_port = port if port is not None else SETTINGS.server_port
+    server = ThreadingHTTPServer((resolved_host, resolved_port), RequestHandler)
+    print(f"Serving on http://{resolved_host}:{resolved_port}")
     server.serve_forever()
 
 
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    run(host=args.host, port=args.port)
+
+
 if __name__ == "__main__":
-    run()
+    main()

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import io
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from contextlib import redirect_stdout
+from unittest.mock import Mock, patch
 import zipfile
 
+from trade_signal_app import __version__
 from trade_signal_app.main import (
     _backtest_payload,
     _backtest_export_csv,
@@ -14,6 +17,9 @@ from trade_signal_app.main import (
     _export_runtime_config_template,
     _import_runtime_config_template,
     _split_archives,
+    main,
+    parse_args,
+    run,
 )
 from trade_signal_app.presets import list_backtest_presets
 from trade_signal_app.runtime_config import RuntimeConfig
@@ -61,6 +67,38 @@ def _build_archive(path: Path) -> None:
 
 
 class MainTests(unittest.TestCase):
+    def test_parse_args_supports_host_and_port(self) -> None:
+        args = parse_args(["--host", "0.0.0.0", "--port", "9000"])
+
+        self.assertEqual(args.host, "0.0.0.0")
+        self.assertEqual(args.port, 9000)
+
+    def test_parse_args_supports_version(self) -> None:
+        buffer = io.StringIO()
+        with self.assertRaises(SystemExit) as exc, redirect_stdout(buffer):
+            parse_args(["--version"])
+
+        self.assertEqual(exc.exception.code, 0)
+        self.assertIn(__version__, buffer.getvalue())
+
+    def test_main_runs_server_with_cli_arguments(self) -> None:
+        server = Mock()
+        with patch("trade_signal_app.main.ThreadingHTTPServer", return_value=server) as server_factory:
+            main(["--host", "0.0.0.0", "--port", "9000"])
+
+        server_factory.assert_called_once()
+        self.assertEqual(server_factory.call_args.args[0], ("0.0.0.0", 9000))
+        self.assertEqual(server_factory.call_args.args[1].__name__, "RequestHandler")
+        server.serve_forever.assert_called_once_with()
+
+    def test_run_uses_explicit_host_and_port_over_defaults(self) -> None:
+        server = Mock()
+        with patch("trade_signal_app.main.ThreadingHTTPServer", return_value=server) as server_factory:
+            run(host="127.0.0.2", port=8100)
+
+        self.assertEqual(server_factory.call_args.args[0], ("127.0.0.2", 8100))
+        server.serve_forever.assert_called_once_with()
+
     def test_split_archives_supports_commas_and_lines(self) -> None:
         self.assertEqual(
             _split_archives("data/a.zip, data/b.zip\n\ndata/c.zip"),

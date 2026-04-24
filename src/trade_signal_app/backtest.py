@@ -9,6 +9,7 @@ import math
 from pathlib import Path
 import statistics
 
+from . import __version__
 from .archive_loader import load_public_data_klines
 from .binance_client import BinanceSpotGateway
 from .config import SETTINGS
@@ -1153,8 +1154,12 @@ def json_default(value: object) -> object:
     return value
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Backtest the signal model on Binance public-data kline archives.")
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="trade_signal_app.backtest",
+        description="Backtest the signal model on Binance public-data kline archives.",
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("archives", nargs="+", help="ZIP files, folders, or glob patterns from Binance public data.")
     parser.add_argument("--score-threshold", type=float, default=70.0, help="Minimum composite score to count as a signal.")
     parser.add_argument("--lookback-bars", type=int, default=240, help="Trailing bars used to compute indicators.")
@@ -1255,11 +1260,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--top-events", type=int, default=5, help="How many recent signals to print for each report.")
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of human-readable text.")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
     paths = resolve_archive_paths(args.archives)
     if not paths:
         raise SystemExit("No ZIP archives found.")
