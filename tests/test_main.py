@@ -23,7 +23,7 @@ from trade_signal_app.main import (
 )
 from trade_signal_app.presets import list_backtest_presets
 from trade_signal_app.runtime_config import RuntimeConfig
-from trade_signal_app.views import render_backtest_page, render_settings_page
+from trade_signal_app.views import render_backtest_page, render_settings_page, render_trading_page
 
 
 def _build_archive(path: Path) -> None:
@@ -244,6 +244,18 @@ class MainTests(unittest.TestCase):
                 "scan_candidate_pool": 18,
                 "scan_min_quote_volume": 10_000_000,
                 "scan_min_trade_count": 3000,
+                "autotrade_enabled": False,
+                "autotrade_mode": "paper",
+                "autotrade_quote_order_qty": 25.0,
+                "autotrade_max_open_positions": 3,
+                "autotrade_max_total_quote_exposure": 100.0,
+                "autotrade_score_threshold": 75.0,
+                "autotrade_min_volume_ratio": 1.1,
+                "autotrade_min_buy_pressure": 0.52,
+                "autotrade_stop_loss_pct": 4.0,
+                "autotrade_take_profit_pct": 9.0,
+                "autotrade_cooldown_minutes": 240,
+                "autotrade_order_test_only": True,
                 "backtest_archives": "data/spot/monthly/klines/*/4h/*.zip",
                 "backtest_preset": "balanced_swing",
                 "backtest_lookback_bars": 240,
@@ -283,6 +295,8 @@ class MainTests(unittest.TestCase):
                 "x_auth_configured": True,
                 "tracked_account_count": 2,
                 "storage_mode": "Encrypted",
+                "autotrade_enabled": False,
+                "autotrade_mode": "paper",
             },
             message="运行配置已保存。",
             error=None,
@@ -300,8 +314,34 @@ class MainTests(unittest.TestCase):
         self.assertIn("Reddit API Base URL", html)
         self.assertIn("Reddit User-Agent", html)
         self.assertIn("Default Preset", html)
+        self.assertIn("Auto Trade Defaults", html)
         self.assertIn("Encrypted", html)
         self.assertIn("RUNTIME_CONFIG_PASSPHRASE", html)
+
+    def test_render_trading_page_includes_execution_controls(self) -> None:
+        html = render_trading_page(
+            config={
+                "enabled": True,
+                "mode": "paper",
+                "quote_order_qty": 25.0,
+                "max_open_positions": 3,
+                "max_total_quote_exposure": 100.0,
+                "score_threshold": 75.0,
+                "min_volume_ratio": 1.1,
+                "min_buy_pressure": 0.52,
+                "stop_loss_pct": 4.0,
+                "take_profit_pct": 9.0,
+                "cooldown_minutes": 240,
+                "order_test_only": True,
+            },
+            positions=[],
+            events=[],
+        )
+
+        self.assertIn("AI Trade Auto Execution", html)
+        self.assertIn("运行一次自动交易", html)
+        self.assertIn("Positions", html)
+        self.assertIn("Execution Events", html)
 
     def test_build_runtime_config_parses_runtime_form(self) -> None:
         current = RuntimeConfig()
@@ -330,6 +370,18 @@ class MainTests(unittest.TestCase):
                     "scan_candidate_pool": ["12"],
                     "scan_min_quote_volume": ["2000000"],
                     "scan_min_trade_count": ["800"],
+                    "autotrade_enabled": ["on"],
+                    "autotrade_mode": ["paper"],
+                    "autotrade_quote_order_qty": ["30"],
+                    "autotrade_max_open_positions": ["2"],
+                    "autotrade_max_total_quote_exposure": ["90"],
+                    "autotrade_score_threshold": ["78"],
+                    "autotrade_min_volume_ratio": ["1.2"],
+                    "autotrade_min_buy_pressure": ["0.58"],
+                    "autotrade_stop_loss_pct": ["3"],
+                    "autotrade_take_profit_pct": ["8"],
+                    "autotrade_cooldown_minutes": ["180"],
+                    "autotrade_order_test_only": ["on"],
                     "backtest_archives": ["/tmp/example.zip"],
                     "backtest_preset": ["portfolio_rotation"],
                     "backtest_lookback_bars": ["120"],
@@ -375,6 +427,9 @@ class MainTests(unittest.TestCase):
         self.assertEqual(config.reddit_user_agent, "trade-signal-app/test")
         self.assertEqual(config.backtest_defaults.preset, "portfolio_rotation")
         self.assertEqual(config.scan_defaults.quote_asset, "FDUSD")
+        self.assertTrue(config.autotrade_defaults.enabled)
+        self.assertEqual(config.autotrade_defaults.quote_order_qty, 30.0)
+        self.assertEqual(config.autotrade_defaults.max_open_positions, 2)
         self.assertEqual(config.backtest_defaults.fee_source, "account")
         self.assertTrue(config.backtest_defaults.no_binance_discount)
         self.assertTrue(config.backtest_defaults.no_kdj_confirmation)

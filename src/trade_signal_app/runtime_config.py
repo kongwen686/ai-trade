@@ -124,6 +124,22 @@ class BacktestDefaults:
 
 
 @dataclass
+class AutoTradeDefaults:
+    enabled: bool = False
+    mode: str = "paper"
+    quote_order_qty: float = 25.0
+    max_open_positions: int = 3
+    max_total_quote_exposure: float = 100.0
+    score_threshold: float = 75.0
+    min_volume_ratio: float = 1.10
+    min_buy_pressure: float = 0.52
+    stop_loss_pct: float = 4.0
+    take_profit_pct: float = 9.0
+    cooldown_minutes: int = 240
+    order_test_only: bool = True
+
+
+@dataclass
 class RuntimeConfig:
     binance_api_key: str = ""
     binance_api_secret: str = ""
@@ -143,6 +159,7 @@ class RuntimeConfig:
     reddit_user_agent: str = "trade-signal-app/0.2"
     scan_defaults: ScanDefaults = field(default_factory=ScanDefaults)
     backtest_defaults: BacktestDefaults = field(default_factory=BacktestDefaults)
+    autotrade_defaults: AutoTradeDefaults = field(default_factory=AutoTradeDefaults)
 
     @classmethod
     def default_from_settings(cls, settings: AppSettings) -> "RuntimeConfig":
@@ -174,6 +191,7 @@ class RuntimeConfig:
         defaults = cls.default_from_settings(settings)
         scan_payload = payload.get("scan_defaults")
         backtest_payload = payload.get("backtest_defaults")
+        autotrade_payload = payload.get("autotrade_defaults")
         return cls(
             binance_api_key=str(payload.get("binance_api_key", defaults.binance_api_key)),
             binance_api_secret=str(payload.get("binance_api_secret", defaults.binance_api_secret)),
@@ -207,6 +225,12 @@ class RuntimeConfig:
                 **{
                     **asdict(defaults.backtest_defaults),
                     **(backtest_payload if isinstance(backtest_payload, dict) else {}),
+                }
+            ),
+            autotrade_defaults=AutoTradeDefaults(
+                **{
+                    **asdict(defaults.autotrade_defaults),
+                    **(autotrade_payload if isinstance(autotrade_payload, dict) else {}),
                 }
             ),
         )

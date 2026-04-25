@@ -22,12 +22,14 @@ from .backtest import (
 )
 from .config import BASE_DIR, SETTINGS
 from .presets import apply_backtest_preset, list_backtest_presets
-from .runtime_config import BacktestDefaults, RuntimeConfig, ScanDefaults
+from .runtime_config import AutoTradeDefaults, BacktestDefaults, RuntimeConfig, ScanDefaults
 from .strategy import EntryRuleConfig, ExecutionConfig, ExitRuleConfig
+from .trading import AutoTrader, TradingEvent, TradingPosition, TradingRunReport, TradingStateStore
 from .ui import format_backtest_report, format_portfolio_report, format_signal_row
-from .views import render_backtest_page, render_index_page, render_settings_page
+from .views import render_backtest_page, render_index_page, render_settings_page, render_trading_page
 
 RUNTIME_CONFIG_PATH = BASE_DIR / "data" / "runtime_config.json"
+TRADING_STATE_PATH = BASE_DIR / "data" / "trading_state.json"
 APP_STATE = AppState(SETTINGS, RUNTIME_CONFIG_PATH)
 
 
@@ -112,6 +114,7 @@ def _backtest_params_from_config(config: RuntimeConfig) -> dict[str, object]:
 
 def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
     backtest = _backtest_params_from_config(config)
+    autotrade = config.autotrade_defaults
     return {
         "binance_recv_window_ms": config.binance_recv_window_ms,
         "community_provider": config.community_provider,
@@ -131,6 +134,18 @@ def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "scan_candidate_pool": config.scan_defaults.candidate_pool,
         "scan_min_quote_volume": int(config.scan_defaults.min_quote_volume),
         "scan_min_trade_count": config.scan_defaults.min_trade_count,
+        "autotrade_enabled": autotrade.enabled,
+        "autotrade_mode": autotrade.mode,
+        "autotrade_quote_order_qty": autotrade.quote_order_qty,
+        "autotrade_max_open_positions": autotrade.max_open_positions,
+        "autotrade_max_total_quote_exposure": autotrade.max_total_quote_exposure,
+        "autotrade_score_threshold": autotrade.score_threshold,
+        "autotrade_min_volume_ratio": autotrade.min_volume_ratio,
+        "autotrade_min_buy_pressure": autotrade.min_buy_pressure,
+        "autotrade_stop_loss_pct": autotrade.stop_loss_pct,
+        "autotrade_take_profit_pct": autotrade.take_profit_pct,
+        "autotrade_cooldown_minutes": autotrade.cooldown_minutes,
+        "autotrade_order_test_only": autotrade.order_test_only,
         **{f"backtest_{key}": value for key, value in backtest.items()},
     }
 
@@ -142,6 +157,8 @@ def _settings_status_from_config(config: RuntimeConfig) -> dict[str, object]:
         "x_auth_configured": bool(config.x_bearer_token),
         "tracked_account_count": len(config.x_tracked_accounts),
         "storage_mode": APP_STATE.storage_mode_label(),
+        "autotrade_enabled": config.autotrade_defaults.enabled,
+        "autotrade_mode": config.autotrade_defaults.mode,
     }
 
 
@@ -153,6 +170,70 @@ def _settings_context() -> tuple[dict[str, object], dict[str, object]]:
 def _export_runtime_config_template(*, include_secrets: bool) -> dict[str, object]:
     runtime_config, _ = APP_STATE.snapshot()
     return runtime_config.to_template_payload(include_secrets=include_secrets)
+
+
+def _trading_store() -> TradingStateStore:
+    return TradingStateStore(TRADING_STATE_PATH)
+
+
+def _serialize_trading_position(position: TradingPosition) -> dict[str, object]:
+    return {
+        "symbol": position.symbol,
+        "quantity": position.quantity,
+        "entry_price": position.entry_price,
+        "quote_notional": position.quote_notional,
+        "score": position.score,
+        "grade": position.grade,
+        "opened_at": position.opened_at.isoformat(),
+        "stop_price": position.stop_price,
+        "take_profit_price": position.take_profit_price,
+        "mode": position.mode,
+        "client_order_id": position.client_order_id,
+    }
+
+
+def _serialize_trading_event(event: TradingEvent) -> dict[str, object]:
+    return {
+        "action": event.action,
+        "symbol": event.symbol,
+        "mode": event.mode,
+        "status": event.status,
+        "message": event.message,
+        "score": event.score,
+        "price": event.price,
+        "quantity": event.quantity,
+        "quote_notional": event.quote_notional,
+        "created_at": event.created_at.isoformat(),
+        "response": event.response,
+    }
+
+
+def _serialize_trading_report(report: TradingRunReport) -> dict[str, object]:
+    return {
+        "enabled": report.enabled,
+        "mode": report.mode,
+        "scanned_symbols": report.scanned_symbols,
+        "returned_signals": report.returned_signals,
+        "open_positions": [_serialize_trading_position(position) for position in report.open_positions],
+        "events": [_serialize_trading_event(event) for event in report.events],
+        "generated_at": report.generated_at.isoformat(),
+    }
+
+
+def _trading_status_payload() -> dict[str, object]:
+    runtime_config, _ = APP_STATE.snapshot()
+    positions = _trading_store().load()
+    return {
+        "config": _to_jsonable(runtime_config.autotrade_defaults),
+        "open_positions": [_serialize_trading_position(position) for position in positions],
+        "events": [],
+    }
+
+
+def _run_trading_once() -> dict[str, object]:
+    runtime_config, scanner = APP_STATE.snapshot()
+    trader = AutoTrader(scanner=scanner, state_store=_trading_store())
+    return _serialize_trading_report(trader.run_once(runtime_config.autotrade_defaults))
 
 
 def _import_runtime_config_template(form: dict[str, list[str]]) -> RuntimeConfig:
@@ -440,6 +521,20 @@ def _build_runtime_config(form: dict[str, list[str]]) -> RuntimeConfig:
             min_quote_volume=_parse_float_value(_get_first(form, "scan_min_quote_volume", str(current_config.scan_defaults.min_quote_volume)), "Min Quote Volume"),
             min_trade_count=_parse_int_value(_get_first(form, "scan_min_trade_count", str(current_config.scan_defaults.min_trade_count)), "Min Trade Count"),
         ),
+        autotrade_defaults=AutoTradeDefaults(
+            enabled=_parse_bool_flag(form, "autotrade_enabled"),
+            mode=_get_first(form, "autotrade_mode", current_config.autotrade_defaults.mode).strip() or "paper",
+            quote_order_qty=_parse_float_value(_get_first(form, "autotrade_quote_order_qty", str(current_config.autotrade_defaults.quote_order_qty)), "Auto Trade Quote Order Qty"),
+            max_open_positions=_parse_int_value(_get_first(form, "autotrade_max_open_positions", str(current_config.autotrade_defaults.max_open_positions)), "Auto Trade Max Open Positions"),
+            max_total_quote_exposure=_parse_float_value(_get_first(form, "autotrade_max_total_quote_exposure", str(current_config.autotrade_defaults.max_total_quote_exposure)), "Auto Trade Max Exposure"),
+            score_threshold=_parse_float_value(_get_first(form, "autotrade_score_threshold", str(current_config.autotrade_defaults.score_threshold)), "Auto Trade Score Threshold"),
+            min_volume_ratio=_parse_float_value(_get_first(form, "autotrade_min_volume_ratio", str(current_config.autotrade_defaults.min_volume_ratio)), "Auto Trade Min Volume Ratio"),
+            min_buy_pressure=_parse_float_value(_get_first(form, "autotrade_min_buy_pressure", str(current_config.autotrade_defaults.min_buy_pressure)), "Auto Trade Min Buy Pressure"),
+            stop_loss_pct=_parse_float_value(_get_first(form, "autotrade_stop_loss_pct", str(current_config.autotrade_defaults.stop_loss_pct)), "Auto Trade Stop Loss"),
+            take_profit_pct=_parse_float_value(_get_first(form, "autotrade_take_profit_pct", str(current_config.autotrade_defaults.take_profit_pct)), "Auto Trade Take Profit"),
+            cooldown_minutes=_parse_int_value(_get_first(form, "autotrade_cooldown_minutes", str(current_config.autotrade_defaults.cooldown_minutes)), "Auto Trade Cooldown"),
+            order_test_only=_parse_bool_flag(form, "autotrade_order_test_only"),
+        ),
         backtest_defaults=BacktestDefaults(
             preset=_get_first(form, "backtest_preset", current_config.backtest_defaults.preset).strip() or "custom",
             archives=_get_first(form, "backtest_archives", current_config.backtest_defaults.archives),
@@ -512,6 +607,23 @@ class RequestHandler(BaseHTTPRequestHandler):
                     presets=list_backtest_presets(),
                 )
                 self._send_text(html, content_type="text/html; charset=utf-8")
+                return
+
+            if parsed.path == "/trading":
+                payload = _trading_status_payload()
+                html = render_trading_page(
+                    config=payload["config"],
+                    positions=payload["open_positions"],
+                    events=[],
+                )
+                self._send_text(html, content_type="text/html; charset=utf-8")
+                return
+
+            if parsed.path == "/api/trading/status":
+                self._send_text(
+                    json.dumps(_trading_status_payload(), ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
                 return
 
             if parsed.path == "/api/backtest/presets":
@@ -629,6 +741,28 @@ class RequestHandler(BaseHTTPRequestHandler):
                 config = _import_runtime_config_template(form)
                 APP_STATE.update_config(config)
                 self._redirect("/settings?imported=1")
+                return
+
+            if parsed.path == "/trading/run":
+                payload = _run_trading_once()
+                html = render_trading_page(
+                    config={
+                        **_trading_status_payload()["config"],
+                        "enabled": payload["enabled"],
+                        "mode": payload["mode"],
+                    },
+                    positions=payload["open_positions"],
+                    events=payload["events"],
+                )
+                self._send_text(html, content_type="text/html; charset=utf-8")
+                return
+
+            if parsed.path == "/api/trading/run":
+                payload = _run_trading_once()
+                self._send_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
                 return
 
             self.send_error(HTTPStatus.NOT_FOUND)

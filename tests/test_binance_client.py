@@ -63,6 +63,30 @@ class BinanceClientTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "HTTP 401"):
                 gateway.account()
 
+    def test_market_buy_uses_signed_post_body(self) -> None:
+        with patch("trade_signal_app.binance_client.time.time", return_value=1_700_000_000.0):
+            with patch(
+                "trade_signal_app.binance_client.urlopen",
+                return_value=FakeResponse(json.dumps({"orderId": 123})),
+            ) as mock_urlopen:
+                gateway = BinanceSpotGateway(
+                    api_key="test-key",
+                    api_secret="test-secret",
+                    recv_window_ms=5000,
+                )
+                payload = gateway.order_market_buy(symbol="BTCUSDT", quote_order_qty=25.5, test=False)
+
+        request = mock_urlopen.call_args.args[0]
+        body = request.data.decode("utf-8")
+        self.assertEqual(payload["orderId"], 123)
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(request.full_url, "https://api.binance.com/api/v3/order")
+        self.assertIn("symbol=BTCUSDT", body)
+        self.assertIn("side=BUY", body)
+        self.assertIn("type=MARKET", body)
+        self.assertIn("quoteOrderQty=25.5", body)
+        self.assertIn("signature=", body)
+
 
 if __name__ == "__main__":
     unittest.main()

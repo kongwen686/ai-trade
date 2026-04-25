@@ -70,7 +70,12 @@ class BinanceSpotGateway:
         with urlopen(request, timeout=self._timeout) as response:
             return json.load(response)
 
-    def _signed_get_json(self, path: str, params: dict[str, object] | None = None) -> object:
+    def _signed_request_json(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, object] | None = None,
+    ) -> object:
         if not self.has_user_data_auth():
             raise ValueError("BINANCE_API_KEY / BINANCE_API_SECRET 未配置，无法访问账户级 SIGNED 接口。")
 
@@ -83,12 +88,19 @@ class BinanceSpotGateway:
             query.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
-        url = f"{self._base_url}{path}?{query}&signature={signature}"
+        body = f"{query}&signature={signature}".encode("utf-8")
+        url = f"{self._base_url}{path}"
+        data = body if method.upper() in {"POST", "PUT", "DELETE"} else None
+        if data is None:
+            url = f"{url}?{body.decode('utf-8')}"
         request = Request(
             url,
+            data=data,
+            method=method.upper(),
             headers={
                 "User-Agent": "trade-signal-app/0.1",
                 "X-MBX-APIKEY": self._api_key,
+                "Content-Type": "application/x-www-form-urlencoded",
             },
         )
         try:
@@ -102,6 +114,12 @@ class BinanceSpotGateway:
             raise ValueError(message) from exc
         except URLError as exc:
             raise ValueError(f"Binance SIGNED 接口请求失败：{exc.reason}") from exc
+
+    def _signed_get_json(self, path: str, params: dict[str, object] | None = None) -> object:
+        return self._signed_request_json("GET", path, params)
+
+    def _signed_post_json(self, path: str, params: dict[str, object] | None = None) -> object:
+        return self._signed_request_json("POST", path, params)
 
     def exchange_info(self) -> dict:
         cache_key = "exchange_info"
@@ -140,6 +158,44 @@ class BinanceSpotGateway:
             {"symbol": symbol.upper()},
         )
         return self._cache_set(cache_key, data)  # type: ignore[return-value]
+
+    def order_market_buy(
+        self,
+        *,
+        symbol: str,
+        quote_order_qty: float,
+        test: bool = False,
+        client_order_id: str | None = None,
+    ) -> dict:
+        params = {
+            "symbol": symbol.upper(),
+            "side": "BUY",
+            "type": "MARKET",
+            "quoteOrderQty": f"{quote_order_qty:.8f}".rstrip("0").rstrip("."),
+            "newOrderRespType": "FULL",
+            "newClientOrderId": client_order_id,
+        }
+        path = "/api/v3/order/test" if test else "/api/v3/order"
+        return self._signed_post_json(path, params)  # type: ignore[return-value]
+
+    def order_market_sell(
+        self,
+        *,
+        symbol: str,
+        quantity: float,
+        test: bool = False,
+        client_order_id: str | None = None,
+    ) -> dict:
+        params = {
+            "symbol": symbol.upper(),
+            "side": "SELL",
+            "type": "MARKET",
+            "quantity": f"{quantity:.8f}".rstrip("0").rstrip("."),
+            "newOrderRespType": "FULL",
+            "newClientOrderId": client_order_id,
+        }
+        path = "/api/v3/order/test" if test else "/api/v3/order"
+        return self._signed_post_json(path, params)  # type: ignore[return-value]
 
     def klines(self, symbol: str, interval: str, limit: int) -> list[Candlestick]:
         data = self._get_json(

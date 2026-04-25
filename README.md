@@ -58,8 +58,10 @@
 - 实时扫描：`http://127.0.0.1:8000/`
 - 历史回测：`http://127.0.0.1:8000/backtest`
 - 运行配置：`http://127.0.0.1:8000/settings`
+- 自动量化：`http://127.0.0.1:8000/trading`
 - 扫描 API：`http://127.0.0.1:8000/api/scan`
 - 回测 API：`http://127.0.0.1:8000/api/backtest`
+- 自动交易 API：`POST http://127.0.0.1:8000/api/trading/run`
 
 ## 快速开始
 
@@ -111,8 +113,10 @@ python3 -m pip install -e .
 ```bash
 python3 -m trade_signal_app
 python3 -m trade_signal_app.backtest "data/spot/monthly/klines/*/4h/*.zip"
+python3 -m trade_signal_app.autotrade
 trade-signal-web
 trade-signal-backtest "data/spot/monthly/klines/*/4h/*.zip"
+trade-signal-autotrade
 ```
 
 安装后的 Web 入口同样支持：
@@ -182,6 +186,42 @@ PYTHONPATH=src python3 -m trade_signal_app.backtest --version
 - 如果设置环境变量 `RUNTIME_CONFIG_PASSPHRASE`，后续保存会自动写成加密格式
 - 已加密配置文件在缺少口令时不会被读取
 - 当前实现适合个人单机使用；如果要做多用户部署，仍建议切换到数据库或专用密钥存储
+
+## 自动量化交易
+
+`/trading` 页面会把实时预测信号接入一个单次执行循环：
+
+- 扫描当前市场信号
+- 检查已有持仓的止损 / 止盈
+- 按分数阈值、量比、买盘压力筛选新仓
+- 按单笔投入、最大持仓数、最大总敞口做风控
+- 在本地 `data/trading_state.json` 记录持仓状态
+
+默认模式是 `paper`，只模拟记录持仓，不会向 Binance 提交真实订单。
+
+如需实盘，必须同时满足：
+
+1. `/settings` 中启用 Auto Trade，并把 Execution Mode 设为 `live`
+2. 配置 Binance API Key / Secret，且 API 权限允许 Spot Trading
+3. 服务端环境变量设置为：
+
+```bash
+export AI_TRADE_LIVE_CONFIRM="I_UNDERSTAND_REAL_ORDERS"
+```
+
+默认还会勾选 `Use Binance order/test`，这只校验订单参数，不会真实成交。只有关闭该选项，并满足上面的实盘确认后，系统才会调用 Binance Spot `POST /api/v3/order` 提交市价单。
+
+自动运行示例：
+
+```bash
+PYTHONPATH=src python3 -m trade_signal_app.autotrade --loop --interval-seconds 300
+```
+
+安装后也可以使用：
+
+```bash
+trade-signal-autotrade --loop --interval-seconds 300
+```
 
 启用示例：
 

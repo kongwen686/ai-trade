@@ -13,6 +13,7 @@ dynamic = ["version"]
 [project.scripts]
 trade-signal-web = "trade_signal_app.main:main"
 trade-signal-backtest = "trade_signal_app.backtest:main"
+trade-signal-autotrade = "trade_signal_app.autotrade:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<9"]

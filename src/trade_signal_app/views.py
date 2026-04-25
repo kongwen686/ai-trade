@@ -14,13 +14,24 @@ def _option(value: str, selected: str) -> str:
 def _layout(*, page_title: str, active_page: str, hero_title: str, hero_text: str, hero_right: str, content: str) -> str:
     scan_active = "nav-link active" if active_page == "scan" else "nav-link"
     backtest_active = "nav-link active" if active_page == "backtest" else "nav-link"
+    trading_active = "nav-link active" if active_page == "trading" else "nav-link"
     settings_active = "nav-link active" if active_page == "settings" else "nav-link"
+    page_label = {
+        "scan": "SIGNAL DESK",
+        "backtest": "STRATEGY LAB",
+        "trading": "AUTO TRADE",
+        "settings": "OPS CONSOLE",
+    }.get(
+        active_page,
+        "AI TRADE",
+    )
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{escape(page_title)}</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='10' fill='%2307090a'/%3E%3Cpath d='M18 45 28 19l7 16 4-9 7 19' fill='none' stroke='%2350d7e8' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet" />
@@ -28,17 +39,37 @@ def _layout(*, page_title: str, active_page: str, hero_title: str, hero_text: st
   </head>
   <body>
     <main class="page-shell">
-      <nav class="top-nav">
-        <a class="{scan_active}" href="/">实时扫描</a>
-        <a class="{backtest_active}" href="/backtest">历史回测</a>
-        <a class="{settings_active}" href="/settings">运行配置</a>
-      </nav>
+      <header class="platform-header">
+        <a class="brand-lockup" href="/">
+          <span class="brand-mark">AT</span>
+          <span>
+            <strong>AI Trade Terminal</strong>
+            <small>{escape(page_label)}</small>
+          </span>
+        </a>
+        <nav class="top-nav" aria-label="Primary">
+          <a class="{scan_active}" href="/"><span>Signal Desk</span><small>实时扫描</small></a>
+          <a class="{backtest_active}" href="/backtest"><span>Strategy Lab</span><small>历史回测</small></a>
+          <a class="{trading_active}" href="/trading"><span>Auto Trade</span><small>自动量化</small></a>
+          <a class="{settings_active}" href="/settings"><span>Ops Console</span><small>运行配置</small></a>
+        </nav>
+        <div class="session-status" aria-label="Runtime status">
+          <span>LOCAL</span>
+          <strong>Binance Spot</strong>
+        </div>
+      </header>
 
       <section class="hero">
         <div class="hero-copy">
-          <p class="eyebrow">Binance Spot Signal Scanner</p>
+          <p class="eyebrow">{escape(page_label)}</p>
           <h1>{escape(hero_title)}</h1>
           <p class="hero-text">{escape(hero_text)}</p>
+          <div class="platform-ribbon">
+            <span>Market Intelligence</span>
+            <span>Signal Scoring</span>
+            <span>Portfolio Backtest</span>
+            <span>Runtime Vault</span>
+          </div>
         </div>
         <div class="hero-meta">{hero_right}</div>
       </section>
@@ -213,6 +244,143 @@ def render_index_page(
     )
 
 
+def _trading_position_rows(positions: list[dict[str, object]]) -> str:
+    if not positions:
+        return '<p class="helper-text">当前没有自动交易持仓。</p>'
+    rows = []
+    for position in positions:
+        rows.append(
+            f"""
+            <tr>
+              <td>{escape(str(position["symbol"]))}</td>
+              <td>{float(position["quantity"]):.8f}</td>
+              <td>{float(position["entry_price"]):.8f}</td>
+              <td>{float(position["quote_notional"]):.2f}</td>
+              <td>{float(position["score"]):.1f} / {escape(str(position["grade"]))}</td>
+              <td>{float(position["stop_price"]):.8f}</td>
+              <td>{float(position["take_profit_price"]):.8f}</td>
+              <td>{escape(str(position["mode"]))}</td>
+            </tr>
+            """
+        )
+    return f"""
+      <table class="data-table">
+        <tr>
+          <th>Symbol</th>
+          <th>Qty</th>
+          <th>Entry</th>
+          <th>Notional</th>
+          <th>Signal</th>
+          <th>Stop</th>
+          <th>Take Profit</th>
+          <th>Mode</th>
+        </tr>
+        <tbody>{''.join(rows)}</tbody>
+      </table>
+    """
+
+
+def _trading_event_rows(events: list[dict[str, object]]) -> str:
+    if not events:
+        return '<p class="helper-text">还没有本次执行事件。点击运行后会显示买入、卖出或跳过原因。</p>'
+    rows = []
+    for event in events:
+        rows.append(
+            f"""
+            <tr>
+              <td>{escape(str(event["created_at"]))}</td>
+              <td>{escape(str(event["action"]))}</td>
+              <td>{escape(str(event["symbol"]))}</td>
+              <td>{escape(str(event["status"]))}</td>
+              <td>{escape(str(event["message"]))}</td>
+              <td>{'' if event.get("score") is None else f'{float(event["score"]):.1f}'}</td>
+              <td>{'' if event.get("quote_notional") is None else f'{float(event["quote_notional"]):.2f}'}</td>
+            </tr>
+            """
+        )
+    return f"""
+      <table class="data-table">
+        <tr>
+          <th>Time</th>
+          <th>Action</th>
+          <th>Symbol</th>
+          <th>Status</th>
+          <th>Message</th>
+          <th>Score</th>
+          <th>Notional</th>
+        </tr>
+        <tbody>{''.join(rows)}</tbody>
+      </table>
+    """
+
+
+def render_trading_page(
+    *,
+    config: dict[str, object],
+    positions: list[dict[str, object]],
+    events: list[dict[str, object]],
+) -> str:
+    exposure = sum(float(position["quote_notional"]) for position in positions)
+    hero_right = f"""
+      <div class="stat-card">
+        <span>Auto Engine</span>
+        <strong>{"On" if config["enabled"] else "Off"}</strong>
+        <small>{escape(str(config["mode"]))} mode</small>
+      </div>
+      <div class="stat-card">
+        <span>Open Positions</span>
+        <strong>{len(positions)}</strong>
+        <small>max {int(config["max_open_positions"])}</small>
+      </div>
+      <div class="stat-card">
+        <span>Exposure</span>
+        <strong>{exposure:.0f}</strong>
+        <small>limit {float(config["max_total_quote_exposure"]):.0f}</small>
+      </div>
+    """
+    content = f"""
+      <section class="control-panel">
+        <form method="post" action="/trading/run" class="trading-command">
+          <div>
+            <h2>Execution Loop</h2>
+            <p class="helper-text">运行一次会扫描当前市场、检查止盈止损、再按分数阈值打开新仓。paper 模式只写入本地持仓；live 模式会被环境变量和 order/test 双重保护。</p>
+          </div>
+          <button type="submit">运行一次自动交易</button>
+        </form>
+        <div class="mini-stat-grid compact-grid trading-risk-grid">
+          <div class="mini-stat"><span>Score Threshold</span><strong>{float(config["score_threshold"]):.1f}</strong></div>
+          <div class="mini-stat"><span>Order Qty</span><strong>{float(config["quote_order_qty"]):.2f}</strong></div>
+          <div class="mini-stat"><span>Stop Loss</span><strong>{float(config["stop_loss_pct"]):.1f}%</strong></div>
+          <div class="mini-stat"><span>Take Profit</span><strong>{float(config["take_profit_pct"]):.1f}%</strong></div>
+        </div>
+      </section>
+
+      <section class="section-block">
+        <div class="section-heading">
+          <h2>Positions</h2>
+          <p>自动交易状态保存在本机 <code>data/trading_state.json</code>。</p>
+        </div>
+        <article class="portfolio-card table-shell">{_trading_position_rows(positions)}</article>
+      </section>
+
+      <section class="section-block">
+        <div class="section-heading">
+          <h2>Execution Events</h2>
+          <p>本次运行的下单、风控和跳过原因。</p>
+        </div>
+        <article class="backtest-card table-shell">{_trading_event_rows(events)}</article>
+      </section>
+    """
+    return _layout(
+        page_title="AI Trade Auto Execution",
+        active_page="trading",
+        hero_title="把预测信号接入自动量化执行循环。",
+        hero_text="系统会根据实时评分、量能、买盘压力和持仓风控生成订单意图，并在 paper 或受保护的 live 模式下执行。",
+        hero_right=hero_right,
+        content=content,
+    )
+
+
 def render_settings_page(
     *,
     params: dict[str, object],
@@ -245,6 +413,11 @@ def render_settings_page(
         <strong>{escape(str(status["storage_mode"]))}</strong>
         <small>{"已启用口令保护" if str(status["storage_mode"]) == "Encrypted" else "配置保存到本地 JSON"}</small>
       </div>
+      <div class="stat-card">
+        <span>Auto Trade</span>
+        <strong>{"On" if status["autotrade_enabled"] else "Off"}</strong>
+        <small>{escape(str(status["autotrade_mode"]))} execution</small>
+      </div>
     """
     content = f"""
       <section class="control-panel">
@@ -254,11 +427,11 @@ def render_settings_page(
             <h2>Access</h2>
             <p>密钥通过 POST 提交，不会出现在 URL。留空表示保持当前值。</p>
           </div>
-          <label><span>Binance API Key</span><input type="password" name="binance_api_key" value="" placeholder="留空保持当前" /></label>
-          <label><span>Binance API Secret</span><input type="password" name="binance_api_secret" value="" placeholder="留空保持当前" /></label>
+          <label><span>Binance API Key</span><input type="password" name="binance_api_key" value="" placeholder="留空保持当前" autocomplete="new-password" /></label>
+          <label><span>Binance API Secret</span><input type="password" name="binance_api_secret" value="" placeholder="留空保持当前" autocomplete="new-password" /></label>
           <label><span>Binance RecvWindow</span><input type="number" step="1" min="1" name="binance_recv_window_ms" value="{float(params['binance_recv_window_ms']):.0f}" /></label>
           <label class="inline-check"><input type="checkbox" name="clear_binance_auth" /><span>Clear Binance auth</span></label>
-          <label><span>X Bearer Token</span><input type="password" name="x_bearer_token" value="" placeholder="留空保持当前" /></label>
+          <label><span>X Bearer Token</span><input type="password" name="x_bearer_token" value="" placeholder="留空保持当前" autocomplete="new-password" /></label>
           <label><span>Community Provider</span><select name="community_provider">{''.join(_option(item, str(params['community_provider'])) for item in ['auto', 'x', 'csv', 'news', 'telegram', 'reddit', 'x,csv', 'x,news', 'x,telegram', 'x,reddit', 'csv,news', 'csv,telegram', 'csv,reddit', 'news,telegram', 'news,reddit', 'telegram,reddit', 'x,csv,news', 'x,csv,telegram', 'x,csv,reddit', 'x,news,telegram', 'x,news,reddit', 'x,telegram,reddit', 'csv,news,telegram', 'csv,news,reddit', 'csv,telegram,reddit', 'news,telegram,reddit', 'x,csv,news,telegram', 'x,csv,news,reddit', 'x,csv,telegram,reddit', 'x,news,telegram,reddit', 'csv,news,telegram,reddit', 'x,csv,news,telegram,reddit'])}</select></label>
           <label><span>X API Base URL</span><input type="text" name="x_api_base_url" value="{escape(str(params['x_api_base_url']))}" /></label>
           <label class="inline-check"><input type="checkbox" name="clear_x_auth" /><span>Clear X auth</span></label>
@@ -287,6 +460,23 @@ def render_settings_page(
           <label><span>Candidate Pool</span><input type="number" min="5" max="40" name="scan_candidate_pool" value="{int(params['scan_candidate_pool'])}" /></label>
           <label><span>Min Quote Volume</span><input type="number" min="1000000" step="1000000" name="scan_min_quote_volume" value="{int(params['scan_min_quote_volume'])}" /></label>
           <label><span>Min Trade Count</span><input type="number" min="100" step="100" name="scan_min_trade_count" value="{int(params['scan_min_trade_count'])}" /></label>
+
+          <div class="settings-heading full-span">
+            <h2>Auto Trade Defaults</h2>
+            <p>自动交易会根据实时扫描分数生成市价单。默认 paper 模式只记录模拟持仓；live 模式还需要服务端环境变量确认才会提交真实订单。</p>
+          </div>
+          <label class="inline-check"><input type="checkbox" name="autotrade_enabled" {"checked" if params["autotrade_enabled"] else ""} /><span>Enable auto trade</span></label>
+          <label><span>Execution Mode</span><select name="autotrade_mode">{''.join(_option(item, str(params['autotrade_mode'])) for item in ['paper', 'live'])}</select></label>
+          <label><span>Quote Order Qty</span><input type="number" step="0.01" min="0.01" name="autotrade_quote_order_qty" value="{float(params['autotrade_quote_order_qty']):.2f}" /></label>
+          <label><span>Max Open Positions</span><input type="number" min="1" name="autotrade_max_open_positions" value="{int(params['autotrade_max_open_positions'])}" /></label>
+          <label><span>Max Total Exposure</span><input type="number" step="0.01" min="0.01" name="autotrade_max_total_quote_exposure" value="{float(params['autotrade_max_total_quote_exposure']):.2f}" /></label>
+          <label><span>Score Threshold</span><input type="number" step="0.1" min="0" max="100" name="autotrade_score_threshold" value="{float(params['autotrade_score_threshold']):.1f}" /></label>
+          <label><span>Min Volume Ratio</span><input type="number" step="0.01" min="0" name="autotrade_min_volume_ratio" value="{float(params['autotrade_min_volume_ratio']):.2f}" /></label>
+          <label><span>Min Buy Pressure</span><input type="number" step="0.01" min="0" max="1" name="autotrade_min_buy_pressure" value="{float(params['autotrade_min_buy_pressure']):.2f}" /></label>
+          <label><span>Stop Loss %</span><input type="number" step="0.1" min="0.1" name="autotrade_stop_loss_pct" value="{float(params['autotrade_stop_loss_pct']):.1f}" /></label>
+          <label><span>Take Profit %</span><input type="number" step="0.1" min="0.1" name="autotrade_take_profit_pct" value="{float(params['autotrade_take_profit_pct']):.1f}" /></label>
+          <label><span>Cooldown Minutes</span><input type="number" min="0" name="autotrade_cooldown_minutes" value="{int(params['autotrade_cooldown_minutes'])}" /></label>
+          <label class="inline-check"><input type="checkbox" name="autotrade_order_test_only" {"checked" if params["autotrade_order_test_only"] else ""} /><span>Use Binance order/test</span></label>
 
           <div class="settings-heading full-span">
             <h2>Backtest Defaults</h2>
