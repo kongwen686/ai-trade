@@ -403,6 +403,10 @@ class MainTests(unittest.TestCase):
         )
 
         self.assertIn("AI Trade Command Center", html)
+        self.assertIn("app-shell", html)
+        self.assertIn("app-sidebar", html)
+        self.assertIn("market-ticker", html)
+        self.assertIn("量化交易系统", html)
         self.assertIn("交易所与热门情报", html)
         self.assertIn("链上异动", html)
         self.assertIn("现货 / 合约价差", html)
@@ -509,6 +513,7 @@ class MainTests(unittest.TestCase):
         )
 
         self.assertIn('html lang="en"', html)
+        self.assertIn("app-shell", html)
         self.assertIn("Run Auto Trade Once", html)
         self.assertIn("Paper Filled", html)
         self.assertIn("Paper buy recorded.", html)

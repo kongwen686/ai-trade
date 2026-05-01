@@ -186,6 +186,109 @@ def _option(value: str, selected: str) -> str:
     return f'<option value="{escape(value)}"{is_selected}>{escape(value)}</option>'
 
 
+def _top_nav(active_page: str, lang: str) -> str:
+    items = [
+        ("terminal", _text(lang, "工作台", "Workspace"), _text(lang, "系统总览", "System Overview"), "/terminal"),
+        ("backtest", _text(lang, "策略研究", "Strategy Research"), _text(lang, "历史回测", "Backtesting"), "/backtest"),
+        ("scan", _text(lang, "回测分析", "Signal Analysis"), _text(lang, "实时扫描", "Live Signals"), "/"),
+        ("trading", _text(lang, "交易执行", "Trade Execution"), _text(lang, "模拟/实盘", "Paper / Live"), "/trading"),
+        ("risk", _text(lang, "风险管理", "Risk Management"), _text(lang, "执行风控", "Risk Gate"), "/terminal/risk"),
+        ("settings", _text(lang, "系统管理", "System Admin"), _text(lang, "运行配置", "Runtime Config"), "/settings"),
+    ]
+    links = []
+    for page_id, label, sublabel, href in items:
+        active = " active" if page_id == active_page or (page_id == "risk" and active_page == "terminal") else ""
+        links.append(
+            f'<a class="nav-link{active}" href="{escape(_url(href, lang))}"><span>{escape(label)}</span><small>{escape(sublabel)}</small></a>'
+        )
+    return "".join(links)
+
+
+def _sidebar_group(title: str, links: list[tuple[str, str]], lang: str, active_page: str) -> str:
+    items = []
+    for label, href in links:
+        path = href.split("?", 1)[0]
+        is_active = (
+            (active_page == "terminal" and path == "/terminal")
+            or (active_page == "scan" and path == "/")
+            or (active_page == "backtest" and path == "/backtest")
+            or (active_page == "trading" and path == "/trading")
+            or (active_page == "settings" and path == "/settings")
+        )
+        active = " active" if is_active else ""
+        items.append(f'<a class="sidebar-link{active}" href="{escape(_url(href, lang))}"><span>{escape(label)}</span></a>')
+    return f"""
+      <div class="sidebar-group">
+        <button type="button" class="sidebar-group-title">{escape(title)}<span></span></button>
+        <div class="sidebar-links">{"".join(items)}</div>
+      </div>
+    """
+
+
+def _app_sidebar(active_page: str, lang: str) -> str:
+    return f"""
+      <aside class="app-sidebar">
+        <a class="sidebar-brand" href="{escape(_url('/terminal', lang))}">
+          <span class="sidebar-logo">QT</span>
+          <span>
+            <strong>{_text(lang, "量化交易系统", "Quantitative Trading System")}</strong>
+            <small>{_text(lang, "Quantitative Trading System", "Quant Platform")}</small>
+          </span>
+        </a>
+        <nav class="sidebar-nav" aria-label="Sidebar">
+          {_sidebar_group(_text(lang, "核心导航", "Core Navigation"), [
+              (_text(lang, "工作台", "Workspace"), "/terminal"),
+              (_text(lang, "信号扫描", "Signal Scanner"), "/"),
+          ], lang, active_page)}
+          {_sidebar_group(_text(lang, "数据中心", "Data Center"), [
+              (_text(lang, "数据概览", "Data Overview"), "/terminal/market"),
+              (_text(lang, "社区情报", "Community Intel"), "/terminal/community"),
+              (_text(lang, "链上监控", "On-chain Monitor"), "/terminal/onchain"),
+              (_text(lang, "价差分析", "Basis Analysis"), "/terminal/basis"),
+          ], lang, active_page)}
+          {_sidebar_group(_text(lang, "策略研究", "Strategy Research"), [
+              (_text(lang, "策略命中", "Strategy Hits"), "/terminal/strategies"),
+              (_text(lang, "回测分析", "Backtesting"), "/backtest"),
+          ], lang, active_page)}
+          {_sidebar_group(_text(lang, "交易执行", "Trade Execution"), [
+              (_text(lang, "自动交易", "Auto Trading"), "/trading"),
+              (_text(lang, "模拟账户", "Paper Account"), "/terminal/trading"),
+              (_text(lang, "风险控制", "Risk Control"), "/terminal/risk"),
+          ], lang, active_page)}
+          {_sidebar_group(_text(lang, "系统管理", "System Admin"), [
+              (_text(lang, "系统配置", "System Config"), "/settings"),
+          ], lang, active_page)}
+        </nav>
+        <div class="sidebar-footer">
+          <span>{_text(lang, "系统状态", "System Status")}</span>
+          <strong>{_text(lang, "运行中", "Running")}</strong>
+        </div>
+      </aside>
+    """
+
+
+def _market_ticker(lang: str) -> str:
+    labels = [
+        ("BTC/USDT", "+1.56%"),
+        ("ETH/USDT", "+2.34%"),
+        ("BNB/USDT", "+1.12%"),
+        ("SOL/USDT", "+3.45%"),
+        ("XRP/USDT", "-0.23%"),
+        ("IF2406", "+0.39%"),
+    ]
+    items = "".join(
+        f'<span><strong>{escape(name)}</strong><em class="{"down" if value.startswith("-") else "up"}">{escape(value)}</em></span>'
+        for name, value in labels
+    )
+    return f"""
+      <footer class="market-ticker">
+        <strong>{_text(lang, "市场行情", "Market Ticker")}</strong>
+        <div>{items}</div>
+        <a href="{escape(_url('/terminal/market', lang))}">{_text(lang, "更多", "More")}</a>
+      </footer>
+    """
+
+
 def _layout(
     *,
     page_title: str,
@@ -198,11 +301,6 @@ def _layout(
     current_path: str = "/",
 ) -> str:
     active_lang = normalize_language(lang)
-    terminal_active = "nav-link active" if active_page == "terminal" else "nav-link"
-    scan_active = "nav-link active" if active_page == "scan" else "nav-link"
-    backtest_active = "nav-link active" if active_page == "backtest" else "nav-link"
-    trading_active = "nav-link active" if active_page == "trading" else "nav-link"
-    settings_active = "nav-link active" if active_page == "settings" else "nav-link"
     page_label = {
         "scan": _text(active_lang, "信号工作台", "SIGNAL DESK"),
         "backtest": _text(active_lang, "策略实验室", "STRATEGY LAB"),
@@ -227,45 +325,42 @@ def _layout(
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <main class="page-shell">
-      <header class="platform-header">
-        <a class="brand-lockup" href="/">
-          <span class="brand-mark">AT</span>
-          <span>
-            <strong>AI Trade Terminal</strong>
-            <small>{escape(page_label)}</small>
-          </span>
-        </a>
-        <nav class="top-nav" aria-label="Primary">
-          <a class="{terminal_active}" href="{_url('/terminal', active_lang)}"><span>{_text(active_lang, '总控台', 'Command')}</span><small>{_text(active_lang, '统一监控', 'Control Center')}</small></a>
-          <a class="{scan_active}" href="{_url('/', active_lang)}"><span>{_text(active_lang, '信号扫描', 'Signal Desk')}</span><small>{_text(active_lang, '实时行情', 'Live Signals')}</small></a>
-          <a class="{backtest_active}" href="{_url('/backtest', active_lang)}"><span>{_text(active_lang, '策略回测', 'Strategy Lab')}</span><small>{_text(active_lang, '历史验证', 'Backtesting')}</small></a>
-          <a class="{trading_active}" href="{_url('/trading', active_lang)}"><span>{_text(active_lang, '自动量化', 'Auto Trade')}</span><small>{_text(active_lang, '模拟/实盘', 'Paper / Live')}</small></a>
-          <a class="{settings_active}" href="{_url('/settings', active_lang)}"><span>{_text(active_lang, '系统设置', 'Ops Console')}</span><small>{_text(active_lang, '运行配置', 'Runtime Config')}</small></a>
-        </nav>
-        <div class="session-status" aria-label="Runtime status">
-          <span>LOCAL</span>
-          <strong>Binance Spot</strong>
-          {_language_switch(active_lang, current_path)}
-        </div>
-      </header>
-
-      <section class="hero">
-        <div class="hero-copy">
-          <p class="eyebrow">{escape(page_label)}</p>
-          <h1>{escape(hero_title)}</h1>
-          <p class="hero-text">{escape(hero_text)}</p>
-          <div class="platform-ribbon">
-            <span>Market Intelligence</span>
-            <span>Signal Scoring</span>
-            <span>Portfolio Backtest</span>
-            <span>Runtime Vault</span>
+    <main class="app-shell">
+      {_app_sidebar(active_page, active_lang)}
+      <section class="workspace">
+        <header class="platform-header">
+          <nav class="top-nav" aria-label="Primary">
+            {_top_nav(active_page, active_lang)}
+          </nav>
+          <div class="top-actions" aria-label="Runtime tools">
+            <a class="tool-button" href="{escape(_url('/api/terminal/snapshot', active_lang))}" title="Snapshot">S</a>
+            <a class="tool-button" href="{escape(_url('/settings', active_lang))}" title="Settings">C</a>
+            <span class="tool-button is-alert">3</span>
+            <div class="user-chip">
+              <span>quant_admin</span>
+              <small>{_text(active_lang, "超级管理员", "Super Admin")}</small>
+            </div>
           </div>
-        </div>
-        <div class="hero-meta">{hero_right}</div>
-      </section>
+        </header>
 
-      {content}
+        <section class="hero dashboard-hero">
+          <div class="hero-copy">
+            <p class="eyebrow">{escape(page_label)}</p>
+            <h1>{escape(hero_title)}</h1>
+            <p class="hero-text">{escape(hero_text)}</p>
+            <div class="platform-ribbon">
+              <span>Market Intelligence</span>
+              <span>Signal Scoring</span>
+              <span>Portfolio Backtest</span>
+              <span>Runtime Vault</span>
+            </div>
+          </div>
+          <div class="hero-meta">{hero_right}</div>
+        </section>
+
+        {content}
+        {_market_ticker(active_lang)}
+      </section>
     </main>
   </body>
 </html>
