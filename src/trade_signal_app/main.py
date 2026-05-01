@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass, replace
 from datetime import datetime
+from http.cookies import SimpleCookie
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import argparse
 import csv
 import io
 import json
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from . import __version__
 from .app_state import AppState
@@ -28,7 +29,7 @@ from .runtime_config import AutoTradeDefaults, BacktestDefaults, IntelligenceDef
 from .strategy import EntryRuleConfig, ExecutionConfig, ExitRuleConfig
 from .trading import AutoTrader, TradingEvent, TradingPosition, TradingRunReport, TradingStateStore
 from .ui import format_backtest_report, format_portfolio_report, format_signal_row
-from .views import render_backtest_page, render_index_page, render_settings_page, render_terminal_module_page, render_terminal_page, render_trading_page
+from .views import normalize_language, render_backtest_page, render_index_page, render_settings_page, render_terminal_module_page, render_terminal_page, render_trading_page
 
 RUNTIME_CONFIG_PATH = BASE_DIR / "data" / "runtime_config.json"
 TRADING_STATE_PATH = BASE_DIR / "data" / "trading_state.json"
@@ -391,6 +392,15 @@ def _parse_bool_flag(query: dict[str, list[str]], key: str) -> bool:
     return key in query and _get_first(query, key, "") not in {"", "0", "false", "False"}
 
 
+def _path_with_lang(path: str, lang: str, **params: object) -> str:
+    query_params = {key: value for key, value in params.items() if value is not None}
+    if normalize_language(lang) == "en":
+        query_params["lang"] = "en"
+    if not query_params:
+        return path
+    return f"{path}?{urlencode(query_params)}"
+
+
 def _split_archives(value: str) -> list[str]:
     items = []
     for raw in value.replace(",", "\n").splitlines():
@@ -705,9 +715,20 @@ def _build_runtime_config(form: dict[str, list[str]]) -> RuntimeConfig:
 
 
 class RequestHandler(BaseHTTPRequestHandler):
+    def _request_lang(self, query: dict[str, list[str]]) -> str:
+        lang = _get_first(query, "lang", "")
+        if not lang:
+            cookie = SimpleCookie(self.headers.get("Cookie", ""))
+            if "ai_trade_lang" in cookie:
+                lang = cookie["ai_trade_lang"].value
+        lang = normalize_language(lang)
+        self._active_lang = lang
+        return lang
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
+        lang = self._request_lang(query)
 
         try:
             if parsed.path == "/":
@@ -717,13 +738,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                     signals=payload["signals"],
                     params=params,
                     intervals=["15m", "1h", "4h", "1d"],
+                    lang=lang,
                 )
                 self._send_text(html, content_type="text/html; charset=utf-8")
                 return
 
             if parsed.path == "/terminal":
                 payload = _terminal_payload()
-                html = render_terminal_page(payload)
+                html = render_terminal_page(payload, lang=lang)
                 self._send_text(html, content_type="text/html; charset=utf-8")
                 return
 
@@ -734,6 +756,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         snapshot=_terminal_payload(),
                         module=module,
                         trading_status=_trading_status_payload() if module == "trading" else None,
+                        lang=lang,
                     )
                     self._send_text(html, content_type="text/html; charset=utf-8")
                     return
@@ -808,6 +831,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     portfolio_reports=payload["portfolio_reports"],
                     error=error,
                     presets=list_backtest_presets(),
+                    lang=lang,
                 )
                 self._send_text(html, content_type="text/html; charset=utf-8")
                 return
@@ -818,6 +842,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     config=payload["config"],
                     positions=payload["open_positions"],
                     events=payload["events"],
+                    lang=lang,
                 )
                 self._send_text(html, content_type="text/html; charset=utf-8")
                 return
@@ -873,15 +898,16 @@ class RequestHandler(BaseHTTPRequestHandler):
                 params, status = _settings_context()
                 message = None
                 if _parse_bool_flag(query, "saved"):
-                    message = "运行配置已保存。"
+                    message = "运行配置已保存。" if lang == "zh" else "Runtime configuration saved."
                 if _parse_bool_flag(query, "imported"):
-                    message = "配置模板已导入。"
+                    message = "配置模板已导入。" if lang == "zh" else "Configuration template imported."
                 html = render_settings_page(
                     params=params,
                     status=status,
                     message=message,
                     error=None,
                     import_payload_text=None,
+                    lang=lang,
                 )
                 self._send_text(html, content_type="text/html; charset=utf-8")
                 return
@@ -927,23 +953,29 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+        lang = self._request_lang(query)
         try:
             if parsed.path == "/settings":
                 length = int(self.headers.get("Content-Length", "0"))
                 payload = self.rfile.read(length).decode("utf-8")
                 form = parse_qs(payload)
+                lang = normalize_language(_get_first(form, "lang", lang))
+                self._active_lang = lang
                 config = _build_runtime_config(form)
                 APP_STATE.update_config(config)
-                self._redirect("/settings?saved=1")
+                self._redirect(_path_with_lang("/settings", lang, saved=1))
                 return
 
             if parsed.path == "/settings/import":
                 length = int(self.headers.get("Content-Length", "0"))
                 payload = self.rfile.read(length).decode("utf-8")
                 form = parse_qs(payload)
+                lang = normalize_language(_get_first(form, "lang", lang))
+                self._active_lang = lang
                 config = _import_runtime_config_template(form)
                 APP_STATE.update_config(config)
-                self._redirect("/settings?imported=1")
+                self._redirect(_path_with_lang("/settings", lang, imported=1))
                 return
 
             if parsed.path == "/trading/run":
@@ -956,6 +988,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     },
                     positions=payload["open_positions"],
                     events=payload["events"],
+                    lang=lang,
                 )
                 self._send_text(html, content_type="text/html; charset=utf-8")
                 return
@@ -964,12 +997,17 @@ class RequestHandler(BaseHTTPRequestHandler):
                 payload = _run_trading_once(force_paper=True)
                 filled = sum(1 for event in payload["events"] if event["status"] == "paper_filled")
                 blocked = sum(1 for event in payload["events"] if event["status"] in {"risk_blocked", "blocked", "rejected"})
-                message = f"模拟量化交易已执行：成交事件 {filled} 个，阻断/拒绝 {blocked} 个。"
+                message = (
+                    f"模拟量化交易已执行：成交事件 {filled} 个，阻断/拒绝 {blocked} 个。"
+                    if lang == "zh"
+                    else f"Paper quant run completed: {filled} fill event(s), {blocked} blocked/rejected."
+                )
                 html = render_terminal_module_page(
                     snapshot=_terminal_payload(),
                     module="trading",
                     trading_status=_trading_status_payload(),
                     message=message,
+                    lang=lang,
                 )
                 self._send_text(html, content_type="text/html; charset=utf-8")
                 return
@@ -999,6 +1037,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 message=None,
                 error=str(exc),
                 import_payload_text=_get_first(form, "config_template", "") if "form" in locals() else None,
+                lang=lang,
             )
             self._send_text(html, content_type="text/html; charset=utf-8", status=HTTPStatus.BAD_REQUEST)
         except Exception as exc:  # noqa: BLE001
@@ -1016,12 +1055,16 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
+        if hasattr(self, "_active_lang"):
+            self.send_header("Set-Cookie", f"ai_trade_lang={self._active_lang}; Path=/; SameSite=Lax")
         self.end_headers()
         self.wfile.write(payload)
 
     def _redirect(self, location: str) -> None:
         self.send_response(HTTPStatus.SEE_OTHER)
         self.send_header("Location", location)
+        if hasattr(self, "_active_lang"):
+            self.send_header("Set-Cookie", f"ai_trade_lang={self._active_lang}; Path=/; SameSite=Lax")
         self.end_headers()
 
 

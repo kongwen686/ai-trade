@@ -97,6 +97,15 @@
 - 自动交易 API：`POST http://127.0.0.1:8000/api/trading/run`
 - 模拟交易 API：`POST http://127.0.0.1:8000/api/trading/paper/run`
 
+## 中英文界面
+
+页面右上角提供 `中文 / English` 切换。中文版本会把关键指标、状态、菜单和操作说明翻译成通俗中文；英文版本使用交易系统常见的专业术语，例如 `Strategy Hits`、`Pre-trade Risk Gate`、`Paper Filled`、`Risk Blocked`。
+
+也可以直接通过 URL 切换：
+
+- 中文：`http://127.0.0.1:8000/terminal?lang=zh`
+- English：`http://127.0.0.1:8000/terminal?lang=en`
+
 ## 快速开始
 
 ### 1. 从源码目录直接运行

@@ -484,8 +484,34 @@ class MainTests(unittest.TestCase):
 
         self.assertIn("AI Trade Auto Execution", html)
         self.assertIn("运行一次自动交易", html)
-        self.assertIn("Positions", html)
-        self.assertIn("Execution Events", html)
+        self.assertIn("持仓", html)
+        self.assertIn("执行事件", html)
+
+    def test_render_trading_page_supports_english_labels(self) -> None:
+        html = render_trading_page(
+            config={
+                "enabled": True,
+                "mode": "paper",
+                "quote_order_qty": 25.0,
+                "max_open_positions": 3,
+                "max_total_quote_exposure": 100.0,
+                "score_threshold": 75.0,
+                "min_volume_ratio": 1.1,
+                "min_buy_pressure": 0.52,
+                "stop_loss_pct": 4.0,
+                "take_profit_pct": 9.0,
+                "cooldown_minutes": 240,
+                "order_test_only": True,
+            },
+            positions=[],
+            events=[{"created_at": "2026-04-28T00:00:00+00:00", "action": "BUY", "symbol": "BTCUSDT", "status": "paper_filled", "message": "模拟买入已记录。", "score": 82.0, "quote_notional": 25.0}],
+            lang="en",
+        )
+
+        self.assertIn('html lang="en"', html)
+        self.assertIn("Run Auto Trade Once", html)
+        self.assertIn("Paper Filled", html)
+        self.assertIn("Paper buy recorded.", html)
 
     def test_forced_paper_trading_run_uses_signal_source_when_autotrade_disabled(self) -> None:
         signal = SimpleNamespace(

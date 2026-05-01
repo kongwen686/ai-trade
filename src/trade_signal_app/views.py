@@ -5,30 +5,217 @@ from urllib.parse import urlencode
 
 from .presets import get_backtest_preset
 
+SUPPORTED_LANGUAGES = {"zh", "en"}
+
+
+def normalize_language(lang: str | None) -> str:
+    return "en" if str(lang or "").lower().startswith("en") else "zh"
+
+
+def _text(lang: str, zh: str, en: str) -> str:
+    return en if normalize_language(lang) == "en" else zh
+
+
+def _url(path: str, lang: str) -> str:
+    if normalize_language(lang) == "zh":
+        return path
+    delimiter = "&" if "?" in path else "?"
+    return f"{path}{delimiter}lang=en"
+
+
+def _hidden_lang_input(lang: str) -> str:
+    if normalize_language(lang) == "zh":
+        return ""
+    return '<input type="hidden" name="lang" value="en" />'
+
+
+def _language_switch(lang: str, current_path: str) -> str:
+    active_lang = normalize_language(lang)
+    zh_class = "active" if active_lang == "zh" else ""
+    en_class = "active" if active_lang == "en" else ""
+    return f"""
+      <div class="language-switch" aria-label="Language">
+        <a class="{zh_class}" href="{escape(current_path)}?lang=zh">中文</a>
+        <a class="{en_class}" href="{escape(current_path)}?lang=en">English</a>
+      </div>
+    """
+
+
+_VALUE_LABELS = {
+    "zh": {
+        "ready": "就绪",
+        "ready_public": "公开数据就绪",
+        "configured": "已配置",
+        "token_missing": "缺少令牌",
+        "fallback": "本地规则",
+        "guarded": "受保护",
+        "active": "启用",
+        "disabled": "停用",
+        "not_configured": "未配置",
+        "paper_ready": "模拟就绪",
+        "watch_only": "仅观察",
+        "enabled": "已启用",
+        "monitoring": "监控中",
+        "guarding": "风控中",
+        "clear": "低风险",
+        "caution": "谨慎",
+        "blocked": "已阻断",
+        "paper": "模拟",
+        "live": "实盘",
+        "paper_filled": "模拟成交",
+        "risk_blocked": "风控阻断",
+        "test_accepted": "测试通过",
+        "filled": "已成交",
+        "rejected": "已拒绝",
+        "skipped": "已跳过",
+        "BUY": "买入",
+        "SELL": "卖出",
+        "SKIP": "跳过",
+        "candidate_buy": "候选买入",
+        "watch": "观察",
+        "priority_watch": "优先观察",
+        "local": "本地规则",
+        "rules": "规则引擎",
+        "ok": "正常",
+        "openai": "OpenAI",
+    },
+    "en": {
+        "ready": "Ready",
+        "ready_public": "Public Data Ready",
+        "configured": "Configured",
+        "token_missing": "Token Missing",
+        "fallback": "Local Fallback",
+        "guarded": "Guarded",
+        "active": "Active",
+        "disabled": "Disabled",
+        "not_configured": "Not Configured",
+        "paper_ready": "Paper Ready",
+        "watch_only": "Watch Only",
+        "enabled": "Enabled",
+        "monitoring": "Monitoring",
+        "guarding": "Guarding",
+        "clear": "Clear",
+        "caution": "Caution",
+        "blocked": "Blocked",
+        "paper": "Paper",
+        "live": "Live",
+        "paper_filled": "Paper Filled",
+        "risk_blocked": "Risk Blocked",
+        "test_accepted": "Test Accepted",
+        "filled": "Filled",
+        "rejected": "Rejected",
+        "skipped": "Skipped",
+        "BUY": "Buy",
+        "SELL": "Sell",
+        "SKIP": "Skip",
+        "candidate_buy": "Candidate Buy",
+        "watch": "Watch",
+        "priority_watch": "Priority Watch",
+        "local": "Local",
+        "rules": "Rules Engine",
+        "ok": "OK",
+        "openai": "OpenAI",
+    },
+}
+
+
+_EN_VALUE_TRANSLATIONS = {
+    "接入层": "Access Layer",
+    "策略层": "Strategy Layer",
+    "执行层": "Execution Layer",
+    "数据层": "Data Layer",
+    "风控层": "Risk Layer",
+    "现货行情、账户费率、实盘市价单": "Spot market data, account fees, live market orders",
+    "OKX 接入参数与后续跨交易所扩展": "OKX credentials and cross-exchange expansion",
+    "热门社区和指定账号情报": "Community trends and tracked account intelligence",
+    "链上异动、大额转账、交易所流入流出": "On-chain anomalies, large transfers, exchange flows",
+    "综合指标分析和风险解释": "Composite signal analysis and risk explanation",
+    "趋势、动量、量能、社区评分": "Trend, momentum, volume, and community scoring",
+    "现货/合约价差和跨市场 basis": "Spot/futures spread and cross-market basis",
+    "自动交易候选和策略命中": "Auto-trading candidates and strategy hits",
+    "本地模拟交易和持仓状态": "Local paper trading and position state",
+    "实盘环境变量、order/test 和密钥保护": "Live guardrails, order/test, and credential checks",
+    "市价买入、卖出、客户端订单号": "Market buy/sell and client order IDs",
+    "持仓、止损、止盈和冷却": "Positions, stop loss, take profit, and cooldown",
+    "本地配置、模板导入导出、可选加密": "Local config, template import/export, optional encryption",
+    "持仓和事件历史持久化": "Persistent positions and event history",
+    "链上、价差、策略命中执行前阻断": "Pre-trade blocking from on-chain, basis, and strategy signals",
+    "综合评分突破": "Composite Score Breakout",
+    "量价压力策略": "Volume Pressure Strategy",
+    "现货/合约价差策略": "Spot/Futures Basis Strategy",
+    "链上大额异动风控": "On-chain Whale Guard",
+    "paper/live 市价买入": "Paper/live market buy",
+    "候选优先级提升": "Candidate priority boost",
+    "套利/对冲观察": "Arbitrage/hedge watch",
+    "阻断或降级自动开仓": "Block or downgrade automated entries",
+    "最大持仓数": "Max Open Positions",
+    "最大总敞口": "Max Total Exposure",
+    "单仓止损": "Single-position Stop Loss",
+    "单仓止盈": "Single-position Take Profit",
+    "同标的冷却": "Symbol Cooldown",
+    "实盘确认": "Live Confirmation",
+    "仅校验不成交": "Validate only, no fill",
+    "拒绝新开仓": "Reject new entries",
+    "拒绝超额订单": "Reject over-limit orders",
+    "触发平仓": "Trigger exit",
+    "跳过重复开仓": "Skip duplicate entries",
+    "阻断真实订单": "Block live orders",
+    "阻断风险标的": "Block risky symbols",
+    "智能执行风控": "Intelligent Execution Risk Gate",
+    "模拟买入已记录。": "Paper buy recorded.",
+    "模拟卖出已记录：stop_loss。": "Paper sell recorded: stop loss.",
+    "模拟卖出已记录：take_profit。": "Paper sell recorded: take profit.",
+}
+
+
+def _display_value(value: object, lang: str) -> str:
+    if isinstance(value, bool):
+        return _text(lang, "是" if value else "否", "Yes" if value else "No")
+    text = str(value)
+    active_lang = normalize_language(lang)
+    mapped = _VALUE_LABELS.get(active_lang, {}).get(text)
+    if mapped:
+        return mapped
+    if active_lang == "en":
+        return _EN_VALUE_TRANSLATIONS.get(text, text)
+    return text
+
 
 def _option(value: str, selected: str) -> str:
     is_selected = " selected" if value == selected else ""
     return f'<option value="{escape(value)}"{is_selected}>{escape(value)}</option>'
 
 
-def _layout(*, page_title: str, active_page: str, hero_title: str, hero_text: str, hero_right: str, content: str) -> str:
+def _layout(
+    *,
+    page_title: str,
+    active_page: str,
+    hero_title: str,
+    hero_text: str,
+    hero_right: str,
+    content: str,
+    lang: str = "zh",
+    current_path: str = "/",
+) -> str:
+    active_lang = normalize_language(lang)
     terminal_active = "nav-link active" if active_page == "terminal" else "nav-link"
     scan_active = "nav-link active" if active_page == "scan" else "nav-link"
     backtest_active = "nav-link active" if active_page == "backtest" else "nav-link"
     trading_active = "nav-link active" if active_page == "trading" else "nav-link"
     settings_active = "nav-link active" if active_page == "settings" else "nav-link"
     page_label = {
-        "scan": "SIGNAL DESK",
-        "backtest": "STRATEGY LAB",
-        "trading": "AUTO TRADE",
-        "terminal": "COMMAND CENTER",
-        "settings": "OPS CONSOLE",
+        "scan": _text(active_lang, "信号工作台", "SIGNAL DESK"),
+        "backtest": _text(active_lang, "策略实验室", "STRATEGY LAB"),
+        "trading": _text(active_lang, "自动量化", "AUTO TRADE"),
+        "terminal": _text(active_lang, "总控台", "COMMAND CENTER"),
+        "settings": _text(active_lang, "运行配置", "OPS CONSOLE"),
     }.get(
         active_page,
         "AI TRADE",
     )
+    html_lang = "en" if active_lang == "en" else "zh-CN"
     return f"""<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="{html_lang}">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -50,15 +237,16 @@ def _layout(*, page_title: str, active_page: str, hero_title: str, hero_text: st
           </span>
         </a>
         <nav class="top-nav" aria-label="Primary">
-          <a class="{terminal_active}" href="/terminal"><span>Command</span><small>总控台</small></a>
-          <a class="{scan_active}" href="/"><span>Signal Desk</span><small>实时扫描</small></a>
-          <a class="{backtest_active}" href="/backtest"><span>Strategy Lab</span><small>历史回测</small></a>
-          <a class="{trading_active}" href="/trading"><span>Auto Trade</span><small>自动量化</small></a>
-          <a class="{settings_active}" href="/settings"><span>Ops Console</span><small>运行配置</small></a>
+          <a class="{terminal_active}" href="{_url('/terminal', active_lang)}"><span>{_text(active_lang, '总控台', 'Command')}</span><small>{_text(active_lang, '统一监控', 'Control Center')}</small></a>
+          <a class="{scan_active}" href="{_url('/', active_lang)}"><span>{_text(active_lang, '信号扫描', 'Signal Desk')}</span><small>{_text(active_lang, '实时行情', 'Live Signals')}</small></a>
+          <a class="{backtest_active}" href="{_url('/backtest', active_lang)}"><span>{_text(active_lang, '策略回测', 'Strategy Lab')}</span><small>{_text(active_lang, '历史验证', 'Backtesting')}</small></a>
+          <a class="{trading_active}" href="{_url('/trading', active_lang)}"><span>{_text(active_lang, '自动量化', 'Auto Trade')}</span><small>{_text(active_lang, '模拟/实盘', 'Paper / Live')}</small></a>
+          <a class="{settings_active}" href="{_url('/settings', active_lang)}"><span>{_text(active_lang, '系统设置', 'Ops Console')}</span><small>{_text(active_lang, '运行配置', 'Runtime Config')}</small></a>
         </nav>
         <div class="session-status" aria-label="Runtime status">
           <span>LOCAL</span>
           <strong>Binance Spot</strong>
+          {_language_switch(active_lang, current_path)}
         </div>
       </header>
 
@@ -175,30 +363,33 @@ def render_index_page(
     signals: list[dict[str, object]],
     params: dict[str, object],
     intervals: list[str],
+    lang: str = "zh",
 ) -> str:
+    active_lang = normalize_language(lang)
+    t = lambda zh, en: _text(active_lang, zh, en)
     cards = "".join(_signal_card(signal) for signal in signals)
     if not cards:
-        cards = """
+        cards = f"""
         <article class="empty-state">
-          <h2>当前条件下没有足够强的候选币种。</h2>
-          <p>可以适当降低最小成交额或增大候选数，再重新扫描。</p>
+          <h2>{t("当前条件下没有足够强的候选币种。", "No sufficiently strong candidates under the current filters.")}</h2>
+          <p>{t("可以适当降低最小成交额或增大候选数，再重新扫描。", "Lower minimum quote volume or increase the candidate pool, then scan again.")}</p>
         </article>
         """
 
     options = "".join(_option(interval, str(params["interval"])) for interval in intervals)
     hero_right = f"""
       <div class="stat-card">
-        <span>扫描范围</span>
+        <span>{t("扫描范围", "Scan Universe")}</span>
         <strong>{int(summary["scanned_symbols"])}</strong>
-        <small>{escape(str(summary["quote_asset"]))} 现货交易对</small>
+        <small>{escape(str(summary["quote_asset"]))} {t("现货交易对", "spot pairs")}</small>
       </div>
       <div class="stat-card">
-        <span>返回信号</span>
+        <span>{t("返回信号", "Returned Signals")}</span>
         <strong>{int(summary["returned_signals"])}</strong>
-        <small>{escape(str(summary["interval"]))} 周期</small>
+        <small>{escape(str(summary["interval"]))} {t("周期", "interval")}</small>
       </div>
       <div class="stat-card">
-        <span>最小成交额</span>
+        <span>{t("最小成交额", "Min Quote Volume")}</span>
         <strong>{float(summary["min_quote_volume"]) / 1_000_000:.0f}M</strong>
         <small>Quote Volume</small>
       </div>
@@ -206,30 +397,31 @@ def render_index_page(
     content = f"""
       <section class="control-panel">
         <form method="get" class="filters">
+          {_hidden_lang_input(active_lang)}
           <label>
-            <span>计价币</span>
+            <span>{t("计价币", "Quote Asset")}</span>
             <input type="text" name="quote_asset" value="{escape(str(params["quote_asset"]))}" />
           </label>
           <label>
-            <span>周期</span>
+            <span>{t("周期", "Interval")}</span>
             <select name="interval">{options}</select>
           </label>
           <label>
-            <span>候选数</span>
+            <span>{t("候选数", "Candidate Pool")}</span>
             <input type="number" name="candidate_pool" min="5" max="40" value="{int(params["candidate_pool"])}" />
           </label>
           <label>
-            <span>最小成交额</span>
+            <span>{t("最小成交额", "Min Quote Volume")}</span>
             <input type="number" name="min_quote_volume" min="1000000" step="1000000" value="{int(params["min_quote_volume"])}" />
           </label>
           <label>
-            <span>最小成交笔数</span>
+            <span>{t("最小成交笔数", "Min Trades")}</span>
             <input type="number" name="min_trade_count" min="100" step="100" value="{int(params["min_trade_count"])}" />
           </label>
-          <button type="submit">刷新信号</button>
+          <button type="submit">{t("刷新信号", "Refresh Signals")}</button>
         </form>
         <p class="helper-text">
-          数据来自 Binance Spot 市场接口。社区热度支持 X/Twitter Bearer Token 和本地 <code>data/community_scores.csv</code>，未配置时会自动忽略该维度。
+          {t("数据来自 Binance Spot 市场接口。社区热度支持 X/Twitter Bearer Token 和本地", "Market data comes from Binance Spot APIs. Community heat supports X/Twitter Bearer Token and local")} <code>data/community_scores.csv</code>{t("，未配置时会自动忽略该维度。", "; this dimension is skipped when unconfigured.")}
         </p>
       </section>
 
@@ -240,10 +432,12 @@ def render_index_page(
     return _layout(
         page_title="Binance Signal Scanner",
         active_page="scan",
-        hero_title="从高流动性币种里抓更像“可入手”的那一批。",
-        hero_text="先用 24h 市场活跃度做初筛，再计算 RSI、EMA、MACD、KDJ、量能放大和可选的社区热度，输出一份偏实战的候选榜。",
+        hero_title=t("从高流动性币种里抓更像“可入手”的那一批。", "Find tradable candidates from high-liquidity spot markets."),
+        hero_text=t("先用 24h 市场活跃度做初筛，再计算 RSI、EMA、MACD、KDJ、量能放大和可选的社区热度，输出一份偏实战的候选榜。", "Filter by 24h market activity, then score RSI, EMA, MACD, KDJ, volume expansion, buy pressure, and optional community heat."),
         hero_right=hero_right,
         content=content,
+        lang=active_lang,
+        current_path="/",
     )
 
 
@@ -257,18 +451,18 @@ def _terminal_card(title: str, value: str, subtitle: str, accent: str = "") -> s
     """
 
 
-def _terminal_rows(items: list[dict[str, object]], columns: list[tuple[str, str]]) -> str:
+def _terminal_rows(items: list[dict[str, object]], columns: list[tuple[str, str]], *, lang: str = "zh") -> str:
     if not items:
-        return '<p class="helper-text">暂无数据。配置本地 CSV 或外部数据源后会自动显示。</p>'
+        return f'<p class="helper-text">{escape(_text(lang, "暂无数据。配置本地 CSV 或外部数据源后会自动显示。", "No data yet. Configure local CSV or external data sources to populate this panel."))}</p>'
     header = "".join(f"<th>{escape(label)}</th>" for label, _ in columns)
     rows = []
     for item in items:
-        cells = "".join(f"<td>{escape(_format_cell(item.get(key)))}</td>" for _, key in columns)
+        cells = "".join(f"<td>{escape(_format_cell(item.get(key), lang))}</td>" for _, key in columns)
         rows.append(f"<tr>{cells}</tr>")
     return f'<table class="data-table terminal-table"><tr>{header}</tr><tbody>{"".join(rows)}</tbody></table>'
 
 
-def _format_cell(value: object) -> str:
+def _format_cell(value: object, lang: str = "zh") -> str:
     if value is None:
         return ""
     if isinstance(value, float):
@@ -276,16 +470,16 @@ def _format_cell(value: object) -> str:
             return f"{value:,.2f}"
         return f"{value:.2f}"
     if isinstance(value, list):
-        return " / ".join(str(item) for item in value[:3])
-    return str(value)
+        return " / ".join(_display_value(item, lang) for item in value[:3])
+    return _display_value(value, lang)
 
 
-def _terminal_system_layers() -> str:
+def _terminal_system_layers(lang: str = "zh") -> str:
     layers = [
-        ("接入层", "Binance API", "OKX Ready", "Twitter/X", "On-chain CSV", "OpenAI"),
-        ("策略层", "信号评分", "趋势突破", "量价压力", "跨市价差", "策略命中"),
-        ("执行层", "Paper", "Live Guard", "order/test", "仓位状态", "风控阈值"),
-        ("数据层", "行情", "社区情报", "链上异动", "持仓", "交易日志"),
+        (_text(lang, "接入层", "Access Layer"), "Binance API", _text(lang, "OKX 就绪", "OKX Ready"), "Twitter/X", _text(lang, "链上 CSV", "On-chain CSV"), "OpenAI"),
+        (_text(lang, "策略层", "Strategy Layer"), _text(lang, "信号评分", "Signal Scoring"), _text(lang, "趋势突破", "Trend Breakout"), _text(lang, "量价压力", "Volume Pressure"), _text(lang, "跨市价差", "Cross-market Basis"), _text(lang, "策略命中", "Strategy Hits")),
+        (_text(lang, "执行层", "Execution Layer"), _text(lang, "模拟交易", "Paper Trading"), "Live Guard", "order/test", _text(lang, "仓位状态", "Position State"), _text(lang, "风控阈值", "Risk Limits")),
+        (_text(lang, "数据层", "Data Layer"), _text(lang, "行情", "Market Data"), _text(lang, "社区情报", "Community Intel"), _text(lang, "链上异动", "On-chain Events"), _text(lang, "持仓", "Positions"), _text(lang, "交易日志", "Trade Logs")),
     ]
     return "".join(
         f"""
@@ -298,28 +492,28 @@ def _terminal_system_layers() -> str:
     )
 
 
-_TERMINAL_NAV_ITEMS = [
-    ("overview", "控制台", "/terminal"),
-    ("market", "交易市场", "/terminal/market"),
-    ("community", "社区情报", "/terminal/community"),
-    ("onchain", "链上监控", "/terminal/onchain"),
-    ("basis", "价差分析", "/terminal/basis"),
-    ("strategies", "策略命中", "/terminal/strategies"),
-    ("trading", "自动交易", "/terminal/trading"),
-    ("risk", "风险控制", "/terminal/risk"),
+_TERMINAL_NAV_ITEMS: list[tuple[str, str, str, str]] = [
+    ("overview", "控制台", "Overview", "/terminal"),
+    ("market", "交易市场", "Markets", "/terminal/market"),
+    ("community", "社区情报", "Community Intel", "/terminal/community"),
+    ("onchain", "链上监控", "On-chain Monitor", "/terminal/onchain"),
+    ("basis", "价差分析", "Basis Analysis", "/terminal/basis"),
+    ("strategies", "策略命中", "Strategy Hits", "/terminal/strategies"),
+    ("trading", "自动交易", "Auto Trading", "/terminal/trading"),
+    ("risk", "风险控制", "Risk Control", "/terminal/risk"),
 ]
 
 
-def _terminal_sidebar(active_module: str) -> str:
+def _terminal_sidebar(active_module: str, lang: str = "zh") -> str:
     links = []
-    for module_id, label, href in _TERMINAL_NAV_ITEMS:
+    for module_id, zh_label, en_label, href in _TERMINAL_NAV_ITEMS:
         active = ' class="active"' if module_id == active_module else ""
-        links.append(f'<a{active} href="{escape(href)}">{escape(label)}</a>')
+        links.append(f'<a{active} href="{escape(_url(href, lang))}">{escape(_text(lang, zh_label, en_label))}</a>')
     return f"""
       <aside class="terminal-sidebar">
         <div class="terminal-brand-block">
           <strong>BINANCE</strong>
-          <span>OKX Ready</span>
+          <span>{escape(_text(lang, "OKX 就绪", "OKX Ready"))}</span>
         </div>
         <nav class="terminal-menu" aria-label="Terminal modules">
           {"".join(links)}
@@ -341,10 +535,10 @@ def _terminal_panel(title: str, subtitle: str, body: str, *, wide: bool = False)
     """
 
 
-def _terminal_shell(active_module: str, body: str) -> str:
+def _terminal_shell(active_module: str, body: str, lang: str = "zh") -> str:
     return f"""
       <section class="terminal-shell">
-        {_terminal_sidebar(active_module)}
+        {_terminal_sidebar(active_module, lang)}
         <div class="terminal-main">
           <section class="terminal-grid">
             {body}
@@ -354,7 +548,9 @@ def _terminal_shell(active_module: str, body: str) -> str:
     """
 
 
-def render_terminal_page(snapshot: dict[str, object]) -> str:
+def render_terminal_page(snapshot: dict[str, object], *, lang: str = "zh") -> str:
+    active_lang = normalize_language(lang)
+    t = lambda zh, en: _text(active_lang, zh, en)
     intel_items = snapshot["intel_items"]
     twitter_accounts = snapshot["twitter_accounts"]
     onchain_events = snapshot["onchain_events"]
@@ -364,48 +560,50 @@ def render_terminal_page(snapshot: dict[str, object]) -> str:
     risk = snapshot["execution_risk"]
     platform = snapshot["platform"]
     hero_right = f"""
-      {_terminal_card("扫描标的", str(int(snapshot["scanned_symbols"])), "Binance Spot Universe", "cyan")}
-      {_terminal_card("策略命中", str(len(strategy_hits)), "score / volume / pressure", "green")}
-      {_terminal_card("执行风控", str(risk["status"]).upper(), f'risk {float(risk["risk_score"]):.1f}', "amber")}
-      {_terminal_card("可执行候选", str(len(risk["allowed_symbols"])), f'blocked {len(risk["blocked_symbols"])}', "green")}
+      {_terminal_card(t("扫描标的", "Scanned Symbols"), str(int(snapshot["scanned_symbols"])), "Binance Spot Universe", "cyan")}
+      {_terminal_card(t("策略命中", "Strategy Hits"), str(len(strategy_hits)), t("评分 / 量能 / 买压", "score / volume / pressure"), "green")}
+      {_terminal_card(t("执行风控", "Execution Risk"), _display_value(risk["status"], active_lang).upper(), f'{t("风险分", "risk")} {float(risk["risk_score"]):.1f}', "amber")}
+      {_terminal_card(t("可执行候选", "Allowed Candidates"), str(len(risk["allowed_symbols"])), f'{t("已阻断", "blocked")} {len(risk["blocked_symbols"])}', "green")}
     """
     panels = "".join(
         [
-            _terminal_panel("系统架构", "交易所、社区、链上、策略与执行层统一监控。", f'<div class="terminal-layers">{_terminal_system_layers()}</div>', wide=True),
-            _terminal_panel("功能实现状态", "架构组件、API 入口和配置状态。", _terminal_rows(platform["components"], [("Layer", "layer"), ("Name", "name"), ("Status", "status"), ("Capability", "capability"), ("Endpoint", "endpoint")]), wide=True),
-            _terminal_panel("交易账户概览", "模拟交易和真实交易账户状态。", _terminal_rows(platform["accounts"], [("Exchange", "exchange"), ("Mode", "mode"), ("Status", "status"), ("Positions", "open_positions"), ("Exposure", "quote_exposure")])),
-            _terminal_panel("大模型分析", f'{escape(str(llm["provider"]))} / {escape(str(llm["model"]))} / {escape(str(llm["status"]))}', f'<p class="terminal-insight">{escape(str(llm["summary"]))}</p>'),
+            _terminal_panel(t("系统架构", "System Architecture"), t("交易所、社区、链上、策略与执行层统一监控。", "Unified monitoring for exchange, community, on-chain, strategy, and execution layers."), f'<div class="terminal-layers">{_terminal_system_layers(active_lang)}</div>', wide=True),
+            _terminal_panel(t("功能实现状态", "Capability Status"), t("架构组件、API 入口和配置状态。", "Architecture components, API endpoints, and configuration state."), _terminal_rows(platform["components"], [(t("层级", "Layer"), "layer"), (t("名称", "Name"), "name"), (t("状态", "Status"), "status"), (t("能力", "Capability"), "capability"), (t("接口", "Endpoint"), "endpoint")], lang=active_lang), wide=True),
+            _terminal_panel(t("交易账户概览", "Trading Accounts"), t("模拟交易和真实交易账户状态。", "Paper and live account state."), _terminal_rows(platform["accounts"], [(t("交易所", "Exchange"), "exchange"), (t("模式", "Mode"), "mode"), (t("状态", "Status"), "status"), (t("持仓数", "Positions"), "open_positions"), (t("敞口", "Exposure"), "quote_exposure")], lang=active_lang)),
+            _terminal_panel(t("大模型分析", "LLM Analysis"), f'{escape(_display_value(llm["provider"], active_lang))} / {escape(_display_value(llm["model"], active_lang))} / {escape(_display_value(llm["status"], active_lang))}', f'<p class="terminal-insight">{escape(str(llm["summary"]))}</p>'),
             _terminal_panel(
-                "执行前风控",
+                t("执行前风控", "Pre-trade Risk Gate"),
                 str(risk["summary"]),
                 f"""
                 <div class="terminal-risk-board">
-                  <div class="mini-stat"><span>Status</span><strong>{escape(str(risk["status"]))}</strong></div>
-                  <div class="mini-stat"><span>Risk Score</span><strong>{float(risk["risk_score"]):.1f}</strong></div>
-                  <div class="mini-stat"><span>Allowed</span><strong>{len(risk["allowed_symbols"])}</strong></div>
-                  <div class="mini-stat"><span>Blocked</span><strong>{len(risk["blocked_symbols"])}</strong></div>
+                  <div class="mini-stat"><span>{t("状态", "Status")}</span><strong>{escape(_display_value(risk["status"], active_lang))}</strong></div>
+                  <div class="mini-stat"><span>{t("风险分", "Risk Score")}</span><strong>{float(risk["risk_score"]):.1f}</strong></div>
+                  <div class="mini-stat"><span>{t("允许", "Allowed")}</span><strong>{len(risk["allowed_symbols"])}</strong></div>
+                  <div class="mini-stat"><span>{t("阻断", "Blocked")}</span><strong>{len(risk["blocked_symbols"])}</strong></div>
                 </div>
-                {_terminal_rows([{"symbol": symbol, "reason": reason} for symbol, reason in dict(risk["blocked_symbols"]).items()], [("Symbol", "symbol"), ("Reason", "reason")])}
+                {_terminal_rows([{"symbol": symbol, "reason": reason} for symbol, reason in dict(risk["blocked_symbols"]).items()], [(t("标的", "Symbol"), "symbol"), (t("原因", "Reason"), "reason")], lang=active_lang)}
                 """,
             ),
-            _terminal_panel("交易所与热门情报", "公告、新闻、社区热度与信号引擎聚合。", _terminal_rows(intel_items, [("Source", "source"), ("Symbol", "symbol"), ("Title", "title"), ("Severity", "severity")])),
-            _terminal_panel("Twitter 账户监控", "运行配置中的 tracked accounts。", _terminal_rows(twitter_accounts, [("Account", "username"), ("Focus", "focus"), ("Mode", "mode"), ("Status", "status")])),
-            _terminal_panel("链上异动", "大额转账、交易所流入流出和量能代理。", _terminal_rows(onchain_events, [("Chain", "chain"), ("Symbol", "symbol"), ("Type", "event_type"), ("USD", "amount_usd"), ("Direction", "direction")])),
-            _terminal_panel("现货 / 合约价差", "用于套利、对冲和资金费率观察。", _terminal_rows(spreads, [("Symbol", "symbol"), ("Spot", "spot_exchange"), ("Futures", "futures_exchange"), ("Spread bps", "spread_bps"), ("Direction", "direction")])),
-            _terminal_panel("策略命中", "自动交易前的候选池和执行意图。", _terminal_rows(strategy_hits, [("Symbol", "symbol"), ("Strategy", "strategy"), ("Score", "score"), ("Grade", "grade"), ("Action", "action"), ("Reasons", "reasons")]), wide=True),
-            _terminal_panel("策略目录", "已实现策略、触发条件和执行方式。", _terminal_rows(platform["strategies"], [("ID", "strategy_id"), ("Name", "name"), ("Status", "status"), ("Trigger", "trigger"), ("Execution", "execution")])),
-            _terminal_panel("风险规则", "执行层硬性约束和保护条件。", _terminal_rows(platform["risk_rules"], [("Rule", "name"), ("Status", "status"), ("Threshold", "threshold"), ("Action", "action")])),
-            _terminal_panel("交易日志", "自动交易执行、跳过、阻断和下单事件。", _terminal_rows(platform["recent_events"], [("Time", "created_at"), ("Action", "action"), ("Symbol", "symbol"), ("Status", "status"), ("Message", "message")]), wide=True),
+            _terminal_panel(t("交易所与热门情报", "Exchange & Market Intelligence"), t("公告、新闻、社区热度与信号引擎聚合。", "Announcements, news, community heat, and signal-engine intelligence."), _terminal_rows(intel_items, [(t("来源", "Source"), "source"), (t("标的", "Symbol"), "symbol"), (t("标题", "Title"), "title"), (t("严重度", "Severity"), "severity")], lang=active_lang)),
+            _terminal_panel(t("Twitter 账户监控", "Twitter Account Monitor"), t("运行配置中的 tracked accounts。", "Tracked accounts from runtime configuration."), _terminal_rows(twitter_accounts, [(t("账号", "Account"), "username"), (t("关注点", "Focus"), "focus"), (t("模式", "Mode"), "mode"), (t("状态", "Status"), "status")], lang=active_lang)),
+            _terminal_panel(t("链上异动", "On-chain Events"), t("大额转账、交易所流入流出和量能代理。", "Large transfers, exchange flows, and volume-based proxies."), _terminal_rows(onchain_events, [(t("链", "Chain"), "chain"), (t("标的", "Symbol"), "symbol"), (t("类型", "Type"), "event_type"), ("USD", "amount_usd"), (t("方向", "Direction"), "direction")], lang=active_lang)),
+            _terminal_panel(t("现货 / 合约价差", "Spot / Futures Basis"), t("用于套利、对冲和资金费率观察。", "Used for arbitrage, hedging, and funding-rate monitoring."), _terminal_rows(spreads, [(t("标的", "Symbol"), "symbol"), (t("现货", "Spot"), "spot_exchange"), (t("合约", "Futures"), "futures_exchange"), ("Spread bps", "spread_bps"), (t("方向", "Direction"), "direction")], lang=active_lang)),
+            _terminal_panel(t("策略命中", "Strategy Hits"), t("自动交易前的候选池和执行意图。", "Candidate pool and execution intent before automated trading."), _terminal_rows(strategy_hits, [(t("标的", "Symbol"), "symbol"), (t("策略", "Strategy"), "strategy"), (t("评分", "Score"), "score"), (t("等级", "Grade"), "grade"), (t("动作", "Action"), "action"), (t("原因", "Reasons"), "reasons")], lang=active_lang), wide=True),
+            _terminal_panel(t("策略目录", "Strategy Catalog"), t("已实现策略、触发条件和执行方式。", "Implemented strategies, triggers, and execution methods."), _terminal_rows(platform["strategies"], [("ID", "strategy_id"), (t("名称", "Name"), "name"), (t("状态", "Status"), "status"), (t("触发条件", "Trigger"), "trigger"), (t("执行方式", "Execution"), "execution")], lang=active_lang)),
+            _terminal_panel(t("风险规则", "Risk Rules"), t("执行层硬性约束和保护条件。", "Hard execution constraints and guardrails."), _terminal_rows(platform["risk_rules"], [(t("规则", "Rule"), "name"), (t("状态", "Status"), "status"), (t("阈值", "Threshold"), "threshold"), (t("动作", "Action"), "action")], lang=active_lang)),
+            _terminal_panel(t("交易日志", "Trading Logs"), t("自动交易执行、跳过、阻断和下单事件。", "Automated trading execution, skip, block, and order events."), _terminal_rows(platform["recent_events"], [(t("时间", "Time"), "created_at"), (t("动作", "Action"), "action"), (t("标的", "Symbol"), "symbol"), (t("状态", "Status"), "status"), (t("消息", "Message"), "message")], lang=active_lang), wide=True),
         ]
     )
-    content = _terminal_shell("overview", panels)
+    content = _terminal_shell("overview", panels, active_lang)
     return _layout(
         page_title="AI Trade Command Center",
         active_page="terminal",
-        hero_title="交易所、社区、链上、价差和策略执行的统一总控台。",
-        hero_text="将关键交易所信息、热门社区情报、Twitter 账号、链上异动、现货合约价差和策略命中集中分析，并可交给自动交易引擎执行。",
+        hero_title=t("交易所、社区、链上、价差和策略执行的统一总控台。", "Unified command center for exchange, community, on-chain, basis, and strategy execution."),
+        hero_text=t("将关键交易所信息、热门社区情报、Twitter 账号、链上异动、现货合约价差和策略命中集中分析，并可交给自动交易引擎执行。", "Centralize exchange intelligence, community signals, Twitter accounts, on-chain anomalies, spot/futures basis, and strategy hits, then hand execution intent to the automated trading engine."),
         hero_right=hero_right,
         content=content,
+        lang=active_lang,
+        current_path="/terminal",
     )
 
 
@@ -415,7 +613,10 @@ def render_terminal_module_page(
     module: str,
     trading_status: dict[str, object] | None = None,
     message: str | None = None,
+    lang: str = "zh",
 ) -> str:
+    active_lang = normalize_language(lang)
+    t = lambda zh, en: _text(active_lang, zh, en)
     intel_items = snapshot["intel_items"]
     twitter_accounts = snapshot["twitter_accounts"]
     onchain_events = snapshot["onchain_events"]
@@ -426,49 +627,49 @@ def render_terminal_module_page(
     trading_status = trading_status or {"config": {}, "open_positions": [], "events": []}
 
     module_titles = {
-        "market": ("交易市场", "交易所关键情报、热门标的和信号引擎结果。"),
-        "community": ("社区情报", "Twitter/X tracked accounts、社区热度和行业信息源。"),
-        "onchain": ("链上监控", "链上大额异动、交易所流入流出和风险代理。"),
-        "basis": ("价差分析", "现货、合约和跨市场 basis 机会。"),
-        "strategies": ("策略命中", "策略目录、命中候选和自动执行意图。"),
-        "trading": ("自动交易", "模拟账户、策略信号源和执行事件。"),
-        "risk": ("风险控制", "执行前风控、阻断原因和硬性风险规则。"),
+        "market": (t("交易市场", "Markets"), t("交易所关键情报、热门标的和信号引擎结果。", "Exchange intelligence, trending symbols, and signal-engine output.")),
+        "community": (t("社区情报", "Community Intelligence"), t("Twitter/X tracked accounts、社区热度和行业信息源。", "Twitter/X tracked accounts, community heat, and industry information sources.")),
+        "onchain": (t("链上监控", "On-chain Monitor"), t("链上大额异动、交易所流入流出和风险代理。", "Large on-chain movements, exchange flows, and risk proxies.")),
+        "basis": (t("价差分析", "Basis Analysis"), t("现货、合约和跨市场 basis 机会。", "Spot, futures, and cross-market basis opportunities.")),
+        "strategies": (t("策略命中", "Strategy Hits"), t("策略目录、命中候选和自动执行意图。", "Strategy catalog, hit candidates, and automated execution intent.")),
+        "trading": (t("自动交易", "Auto Trading"), t("模拟账户、策略信号源和执行事件。", "Paper account, strategy signal source, and execution events.")),
+        "risk": (t("风险控制", "Risk Control"), t("执行前风控、阻断原因和硬性风险规则。", "Pre-trade risk gate, block reasons, and hard risk rules.")),
     }
     title, subtitle = module_titles.get(module, module_titles["market"])
 
     if module == "market":
         panels = "".join(
             [
-                _terminal_panel("交易所与热门情报", "公告、新闻、市场热度与信号引擎聚合。", _terminal_rows(intel_items, [("Source", "source"), ("Symbol", "symbol"), ("Title", "title"), ("Severity", "severity"), ("Sentiment", "sentiment")]), wide=True),
-                _terminal_panel("现货 / 合约价差", "价差异常会参与执行前风控。", _terminal_rows(spreads, [("Symbol", "symbol"), ("Spot", "spot_exchange"), ("Spot Price", "spot_price"), ("Futures", "futures_exchange"), ("Futures Price", "futures_price"), ("Spread bps", "spread_bps")]), wide=True),
+                _terminal_panel(t("交易所与热门情报", "Exchange & Market Intelligence"), t("公告、新闻、市场热度与信号引擎聚合。", "Announcements, news, market heat, and signal-engine intelligence."), _terminal_rows(intel_items, [(t("来源", "Source"), "source"), (t("标的", "Symbol"), "symbol"), (t("标题", "Title"), "title"), (t("严重度", "Severity"), "severity"), (t("情绪", "Sentiment"), "sentiment")], lang=active_lang), wide=True),
+                _terminal_panel(t("现货 / 合约价差", "Spot / Futures Basis"), t("价差异常会参与执行前风控。", "Basis anomalies feed the pre-trade risk gate."), _terminal_rows(spreads, [(t("标的", "Symbol"), "symbol"), (t("现货", "Spot"), "spot_exchange"), (t("现货价格", "Spot Price"), "spot_price"), (t("合约", "Futures"), "futures_exchange"), (t("合约价格", "Futures Price"), "futures_price"), ("Spread bps", "spread_bps")], lang=active_lang), wide=True),
             ]
         )
     elif module == "community":
         panels = "".join(
             [
-                _terminal_panel("Twitter 账户监控", "运行配置中的 tracked accounts 和抓取状态。", _terminal_rows(twitter_accounts, [("Account", "username"), ("Focus", "focus"), ("Mode", "mode"), ("Weight", "weight_pct"), ("Status", "status")]), wide=True),
-                _terminal_panel("社区/交易所情报", "X、Reddit、本地新闻、Telegram 与信号引擎信息统一入池。", _terminal_rows(intel_items, [("Source", "source"), ("Symbol", "symbol"), ("Category", "category"), ("Title", "title"), ("Severity", "severity")]), wide=True),
+                _terminal_panel(t("Twitter 账户监控", "Twitter Account Monitor"), t("运行配置中的 tracked accounts 和抓取状态。", "Tracked accounts and fetch state from runtime configuration."), _terminal_rows(twitter_accounts, [(t("账号", "Account"), "username"), (t("关注点", "Focus"), "focus"), (t("模式", "Mode"), "mode"), (t("权重", "Weight"), "weight_pct"), (t("状态", "Status"), "status")], lang=active_lang), wide=True),
+                _terminal_panel(t("社区/交易所情报", "Community / Exchange Intelligence"), t("X、Reddit、本地新闻、Telegram 与信号引擎信息统一入池。", "X, Reddit, local news, Telegram, and signal-engine items are merged into one intelligence pool."), _terminal_rows(intel_items, [(t("来源", "Source"), "source"), (t("标的", "Symbol"), "symbol"), (t("类别", "Category"), "category"), (t("标题", "Title"), "title"), (t("严重度", "Severity"), "severity")], lang=active_lang), wide=True),
             ]
         )
     elif module == "onchain":
         panels = "".join(
             [
-                _terminal_panel("链上异动", "CSV 接入或量能代理生成的大额转账与流入流出事件。", _terminal_rows(onchain_events, [("Chain", "chain"), ("Symbol", "symbol"), ("Type", "event_type"), ("USD", "amount_usd"), ("Direction", "direction"), ("Severity", "severity")]), wide=True),
-                _terminal_panel("链上风控阻断", "高严重度交易所流入会阻断自动开仓。", _terminal_rows([{"symbol": symbol, "reason": reason} for symbol, reason in dict(risk["blocked_symbols"]).items()], [("Symbol", "symbol"), ("Reason", "reason")]), wide=True),
+                _terminal_panel(t("链上异动", "On-chain Events"), t("CSV 接入或量能代理生成的大额转账与流入流出事件。", "Large transfers and exchange-flow events from CSV or volume proxies."), _terminal_rows(onchain_events, [(t("链", "Chain"), "chain"), (t("标的", "Symbol"), "symbol"), (t("类型", "Type"), "event_type"), ("USD", "amount_usd"), (t("方向", "Direction"), "direction"), (t("严重度", "Severity"), "severity")], lang=active_lang), wide=True),
+                _terminal_panel(t("链上风控阻断", "On-chain Risk Blocks"), t("高严重度交易所流入会阻断自动开仓。", "High-severity exchange inflows block automated entries."), _terminal_rows([{"symbol": symbol, "reason": reason} for symbol, reason in dict(risk["blocked_symbols"]).items()], [(t("标的", "Symbol"), "symbol"), (t("原因", "Reason"), "reason")], lang=active_lang), wide=True),
             ]
         )
     elif module == "basis":
         panels = "".join(
             [
-                _terminal_panel("现货 / 合约价差", "用于套利、对冲、资金费率观察和异常价差阻断。", _terminal_rows(spreads, [("Symbol", "symbol"), ("Spot", "spot_exchange"), ("Spot Price", "spot_price"), ("Futures", "futures_exchange"), ("Futures Price", "futures_price"), ("Spread bps", "spread_bps"), ("Direction", "direction")]), wide=True),
-                _terminal_panel("价差执行提示", "极端 basis 不直接下单，会进入风控复核。", _terminal_rows(platform["risk_rules"], [("Rule", "name"), ("Status", "status"), ("Threshold", "threshold"), ("Action", "action")]), wide=True),
+                _terminal_panel(t("现货 / 合约价差", "Spot / Futures Basis"), t("用于套利、对冲、资金费率观察和异常价差阻断。", "Used for arbitrage, hedging, funding-rate monitoring, and basis anomaly blocks."), _terminal_rows(spreads, [(t("标的", "Symbol"), "symbol"), (t("现货", "Spot"), "spot_exchange"), (t("现货价格", "Spot Price"), "spot_price"), (t("合约", "Futures"), "futures_exchange"), (t("合约价格", "Futures Price"), "futures_price"), ("Spread bps", "spread_bps"), (t("方向", "Direction"), "direction")], lang=active_lang), wide=True),
+                _terminal_panel(t("价差执行提示", "Basis Execution Notes"), t("极端 basis 不直接下单，会进入风控复核。", "Extreme basis does not trigger direct orders; it goes to risk review."), _terminal_rows(platform["risk_rules"], [(t("规则", "Rule"), "name"), (t("状态", "Status"), "status"), (t("阈值", "Threshold"), "threshold"), (t("动作", "Action"), "action")], lang=active_lang), wide=True),
             ]
         )
     elif module == "strategies":
         panels = "".join(
             [
-                _terminal_panel("策略命中", "自动交易前的候选池和执行意图。", _terminal_rows(strategy_hits, [("Symbol", "symbol"), ("Strategy", "strategy"), ("Score", "score"), ("Grade", "grade"), ("Action", "action"), ("Reasons", "reasons")]), wide=True),
-                _terminal_panel("策略目录", "已实现策略、触发条件、执行方式和风控依赖。", _terminal_rows(platform["strategies"], [("ID", "strategy_id"), ("Name", "name"), ("Status", "status"), ("Trigger", "trigger"), ("Execution", "execution"), ("Risk", "risk_controls")]), wide=True),
+                _terminal_panel(t("策略命中", "Strategy Hits"), t("自动交易前的候选池和执行意图。", "Candidate pool and execution intent before automated trading."), _terminal_rows(strategy_hits, [(t("标的", "Symbol"), "symbol"), (t("策略", "Strategy"), "strategy"), (t("评分", "Score"), "score"), (t("等级", "Grade"), "grade"), (t("动作", "Action"), "action"), (t("原因", "Reasons"), "reasons")], lang=active_lang), wide=True),
+                _terminal_panel(t("策略目录", "Strategy Catalog"), t("已实现策略、触发条件、执行方式和风控依赖。", "Implemented strategies, triggers, execution methods, and risk dependencies."), _terminal_rows(platform["strategies"], [("ID", "strategy_id"), (t("名称", "Name"), "name"), (t("状态", "Status"), "status"), (t("触发条件", "Trigger"), "trigger"), (t("执行方式", "Execution"), "execution"), (t("风控", "Risk"), "risk_controls")], lang=active_lang), wide=True),
             ]
         )
     elif module == "trading":
@@ -476,53 +677,54 @@ def render_terminal_module_page(
         positions = trading_status["open_positions"]
         events = trading_status["events"]
         command = f"""
-          <form method="post" action="/terminal/trading/run" class="trading-command terminal-action-form">
+          <form method="post" action="{_url('/terminal/trading/run', active_lang)}" class="trading-command terminal-action-form">
+            {_hidden_lang_input(active_lang)}
             <div>
-              <h2>模拟账户执行</h2>
-              <p class="helper-text">使用当前策略信号源和执行前风控，强制以 paper 模式运行一次。不会提交真实订单。</p>
+              <h2>{t("模拟账户执行", "Paper Account Execution")}</h2>
+              <p class="helper-text">{t("使用当前策略信号源和执行前风控，强制以 paper 模式运行一次。不会提交真实订单。", "Run the current strategy signal source and pre-trade risk gate once in forced paper mode. No live order will be submitted.")}</p>
             </div>
-            <button type="submit">运行模拟量化交易</button>
+            <button type="submit">{t("运行模拟量化交易", "Run Paper Quant Trade")}</button>
           </form>
           <div class="mini-stat-grid compact-grid trading-risk-grid">
-            <div class="mini-stat"><span>Mode</span><strong>{escape(str(config.get("mode", "paper")))}</strong></div>
-            <div class="mini-stat"><span>Enabled</span><strong>{escape(str(config.get("enabled", "")))}</strong></div>
-            <div class="mini-stat"><span>Score</span><strong>{float(config.get("score_threshold", 0) or 0):.1f}</strong></div>
+            <div class="mini-stat"><span>{t("模式", "Mode")}</span><strong>{escape(_display_value(config.get("mode", "paper"), active_lang))}</strong></div>
+            <div class="mini-stat"><span>{t("启用", "Enabled")}</span><strong>{escape(_display_value(config.get("enabled", ""), active_lang))}</strong></div>
+            <div class="mini-stat"><span>{t("评分阈值", "Score")}</span><strong>{float(config.get("score_threshold", 0) or 0):.1f}</strong></div>
             <div class="mini-stat"><span>Order Qty</span><strong>{float(config.get("quote_order_qty", 0) or 0):.2f}</strong></div>
           </div>
           {f'<div class="notice notice-success">{escape(message)}</div>' if message else ""}
         """
         panels = "".join(
             [
-                _terminal_panel("模拟账户执行", "用策略信号源完成一轮 paper 自动交易。", command, wide=True),
-                _terminal_panel("持仓状态", "本地模拟账户持仓。", _trading_position_rows(positions), wide=True),
-                _terminal_panel("交易日志", "自动交易执行、跳过、阻断和下单事件。", _trading_event_rows(events), wide=True),
+                _terminal_panel(t("模拟账户执行", "Paper Account Execution"), t("用策略信号源完成一轮 paper 自动交易。", "Complete one paper auto-trading run from the strategy signal source."), command, wide=True),
+                _terminal_panel(t("持仓状态", "Position State"), t("本地模拟账户持仓。", "Local paper account positions."), _trading_position_rows(positions, active_lang), wide=True),
+                _terminal_panel(t("交易日志", "Trading Logs"), t("自动交易执行、跳过、阻断和下单事件。", "Automated trading execution, skip, block, and order events."), _trading_event_rows(events, active_lang), wide=True),
             ]
         )
     else:
         panels = "".join(
             [
                 _terminal_panel(
-                    "执行前风控",
+                    t("执行前风控", "Pre-trade Risk Gate"),
                     str(risk["summary"]),
                     f"""
                     <div class="terminal-risk-board">
-                      <div class="mini-stat"><span>Status</span><strong>{escape(str(risk["status"]))}</strong></div>
-                      <div class="mini-stat"><span>Risk Score</span><strong>{float(risk["risk_score"]):.1f}</strong></div>
-                      <div class="mini-stat"><span>Allowed</span><strong>{len(risk["allowed_symbols"])}</strong></div>
-                      <div class="mini-stat"><span>Blocked</span><strong>{len(risk["blocked_symbols"])}</strong></div>
+                      <div class="mini-stat"><span>{t("状态", "Status")}</span><strong>{escape(_display_value(risk["status"], active_lang))}</strong></div>
+                      <div class="mini-stat"><span>{t("风险分", "Risk Score")}</span><strong>{float(risk["risk_score"]):.1f}</strong></div>
+                      <div class="mini-stat"><span>{t("允许", "Allowed")}</span><strong>{len(risk["allowed_symbols"])}</strong></div>
+                      <div class="mini-stat"><span>{t("阻断", "Blocked")}</span><strong>{len(risk["blocked_symbols"])}</strong></div>
                     </div>
-                    {_terminal_rows([{"symbol": symbol, "reason": reason} for symbol, reason in dict(risk["blocked_symbols"]).items()], [("Symbol", "symbol"), ("Reason", "reason")])}
+                    {_terminal_rows([{"symbol": symbol, "reason": reason} for symbol, reason in dict(risk["blocked_symbols"]).items()], [(t("标的", "Symbol"), "symbol"), (t("原因", "Reason"), "reason")], lang=active_lang)}
                     """,
                     wide=True,
                 ),
-                _terminal_panel("风险规则", "执行层硬性约束和保护条件。", _terminal_rows(platform["risk_rules"], [("Rule", "name"), ("Status", "status"), ("Threshold", "threshold"), ("Action", "action")]), wide=True),
+                _terminal_panel(t("风险规则", "Risk Rules"), t("执行层硬性约束和保护条件。", "Hard execution constraints and guardrails."), _terminal_rows(platform["risk_rules"], [(t("规则", "Rule"), "name"), (t("状态", "Status"), "status"), (t("阈值", "Threshold"), "threshold"), (t("动作", "Action"), "action")], lang=active_lang), wide=True),
             ]
         )
 
     hero_right = f"""
-      {_terminal_card("扫描标的", str(int(snapshot["scanned_symbols"])), "signal source", "cyan")}
-      {_terminal_card("策略命中", str(len(strategy_hits)), "candidate pool", "green")}
-      {_terminal_card("执行风控", str(risk["status"]).upper(), f'risk {float(risk["risk_score"]):.1f}', "amber")}
+      {_terminal_card(t("扫描标的", "Scanned Symbols"), str(int(snapshot["scanned_symbols"])), t("信号源", "signal source"), "cyan")}
+      {_terminal_card(t("策略命中", "Strategy Hits"), str(len(strategy_hits)), t("候选池", "candidate pool"), "green")}
+      {_terminal_card(t("执行风控", "Execution Risk"), _display_value(risk["status"], active_lang).upper(), f'{t("风险分", "risk")} {float(risk["risk_score"]):.1f}', "amber")}
     """
     return _layout(
         page_title=f"AI Trade {title}",
@@ -530,13 +732,16 @@ def render_terminal_module_page(
         hero_title=title,
         hero_text=subtitle,
         hero_right=hero_right,
-        content=_terminal_shell(module, panels),
+        content=_terminal_shell(module, panels, active_lang),
+        lang=active_lang,
+        current_path=f"/terminal/{module}",
     )
 
 
-def _trading_position_rows(positions: list[dict[str, object]]) -> str:
+def _trading_position_rows(positions: list[dict[str, object]], lang: str = "zh") -> str:
+    t = lambda zh, en: _text(lang, zh, en)
     if not positions:
-        return '<p class="helper-text">当前没有自动交易持仓。</p>'
+        return f'<p class="helper-text">{escape(t("当前没有自动交易持仓。", "No automated trading positions are open."))}</p>'
     rows = []
     for position in positions:
         rows.append(
@@ -549,40 +754,41 @@ def _trading_position_rows(positions: list[dict[str, object]]) -> str:
               <td>{float(position["score"]):.1f} / {escape(str(position["grade"]))}</td>
               <td>{float(position["stop_price"]):.8f}</td>
               <td>{float(position["take_profit_price"]):.8f}</td>
-              <td>{escape(str(position["mode"]))}</td>
+              <td>{escape(_display_value(position["mode"], lang))}</td>
             </tr>
             """
         )
     return f"""
       <table class="data-table">
         <tr>
-          <th>Symbol</th>
+          <th>{t("标的", "Symbol")}</th>
           <th>Qty</th>
-          <th>Entry</th>
-          <th>Notional</th>
-          <th>Signal</th>
-          <th>Stop</th>
-          <th>Take Profit</th>
-          <th>Mode</th>
+          <th>{t("开仓价", "Entry")}</th>
+          <th>{t("名义金额", "Notional")}</th>
+          <th>{t("信号", "Signal")}</th>
+          <th>{t("止损", "Stop")}</th>
+          <th>{t("止盈", "Take Profit")}</th>
+          <th>{t("模式", "Mode")}</th>
         </tr>
         <tbody>{''.join(rows)}</tbody>
       </table>
     """
 
 
-def _trading_event_rows(events: list[dict[str, object]]) -> str:
+def _trading_event_rows(events: list[dict[str, object]], lang: str = "zh") -> str:
+    t = lambda zh, en: _text(lang, zh, en)
     if not events:
-        return '<p class="helper-text">还没有本次执行事件。点击运行后会显示买入、卖出或跳过原因。</p>'
+        return f'<p class="helper-text">{escape(t("还没有本次执行事件。点击运行后会显示买入、卖出或跳过原因。", "No execution events yet. Run the engine to see buys, sells, skips, and block reasons."))}</p>'
     rows = []
     for event in events:
         rows.append(
             f"""
             <tr>
               <td>{escape(str(event["created_at"]))}</td>
-              <td>{escape(str(event["action"]))}</td>
+              <td>{escape(_display_value(event["action"], lang))}</td>
               <td>{escape(str(event["symbol"]))}</td>
-              <td>{escape(str(event["status"]))}</td>
-              <td>{escape(str(event["message"]))}</td>
+              <td>{escape(_display_value(event["status"], lang))}</td>
+              <td>{escape(_display_value(event["message"], lang))}</td>
               <td>{'' if event.get("score") is None else f'{float(event["score"]):.1f}'}</td>
               <td>{'' if event.get("quote_notional") is None else f'{float(event["quote_notional"]):.2f}'}</td>
             </tr>
@@ -591,13 +797,13 @@ def _trading_event_rows(events: list[dict[str, object]]) -> str:
     return f"""
       <table class="data-table">
         <tr>
-          <th>Time</th>
-          <th>Action</th>
-          <th>Symbol</th>
-          <th>Status</th>
-          <th>Message</th>
-          <th>Score</th>
-          <th>Notional</th>
+          <th>{t("时间", "Time")}</th>
+          <th>{t("动作", "Action")}</th>
+          <th>{t("标的", "Symbol")}</th>
+          <th>{t("状态", "Status")}</th>
+          <th>{t("消息", "Message")}</th>
+          <th>{t("评分", "Score")}</th>
+          <th>{t("名义金额", "Notional")}</th>
         </tr>
         <tbody>{''.join(rows)}</tbody>
       </table>
@@ -609,65 +815,71 @@ def render_trading_page(
     config: dict[str, object],
     positions: list[dict[str, object]],
     events: list[dict[str, object]],
+    lang: str = "zh",
 ) -> str:
+    active_lang = normalize_language(lang)
+    t = lambda zh, en: _text(active_lang, zh, en)
     exposure = sum(float(position["quote_notional"]) for position in positions)
     hero_right = f"""
       <div class="stat-card">
-        <span>Auto Engine</span>
-        <strong>{"On" if config["enabled"] else "Off"}</strong>
-        <small>{escape(str(config["mode"]))} mode</small>
+        <span>{t("自动引擎", "Auto Engine")}</span>
+        <strong>{t("开启", "On") if config["enabled"] else t("关闭", "Off")}</strong>
+        <small>{escape(_display_value(config["mode"], active_lang))} {t("模式", "mode")}</small>
       </div>
       <div class="stat-card">
-        <span>Open Positions</span>
+        <span>{t("当前持仓", "Open Positions")}</span>
         <strong>{len(positions)}</strong>
-        <small>max {int(config["max_open_positions"])}</small>
+        <small>{t("上限", "max")} {int(config["max_open_positions"])}</small>
       </div>
       <div class="stat-card">
-        <span>Exposure</span>
+        <span>{t("账户敞口", "Exposure")}</span>
         <strong>{exposure:.0f}</strong>
-        <small>limit {float(config["max_total_quote_exposure"]):.0f}</small>
+        <small>{t("上限", "limit")} {float(config["max_total_quote_exposure"]):.0f}</small>
       </div>
     """
     content = f"""
       <section class="control-panel">
-        <form method="post" action="/trading/run" class="trading-command">
+        <form method="post" action="{_url('/trading/run', active_lang)}" class="trading-command">
+          {_hidden_lang_input(active_lang)}
           <div>
-            <h2>Execution Loop</h2>
-            <p class="helper-text">运行一次会扫描当前市场、检查止盈止损、再按分数阈值打开新仓。paper 模式只写入本地持仓；live 模式会被环境变量和 order/test 双重保护。</p>
+            <h2>{t("执行循环", "Execution Loop")}</h2>
+            <p class="helper-text">{t("运行一次会扫描当前市场、检查止盈止损、再按分数阈值打开新仓。paper 模式只写入本地持仓；live 模式会被环境变量和 order/test 双重保护。", "One run scans the current market, checks stop loss and take profit, then opens new positions by score threshold. Paper mode only writes local positions; live mode is guarded by environment confirmation and order/test.")}</p>
           </div>
-          <button type="submit">运行一次自动交易</button>
+          <button type="submit">{t("运行一次自动交易", "Run Auto Trade Once")}</button>
         </form>
         <div class="mini-stat-grid compact-grid trading-risk-grid">
-          <div class="mini-stat"><span>Score Threshold</span><strong>{float(config["score_threshold"]):.1f}</strong></div>
-          <div class="mini-stat"><span>Order Qty</span><strong>{float(config["quote_order_qty"]):.2f}</strong></div>
-          <div class="mini-stat"><span>Stop Loss</span><strong>{float(config["stop_loss_pct"]):.1f}%</strong></div>
-          <div class="mini-stat"><span>Take Profit</span><strong>{float(config["take_profit_pct"]):.1f}%</strong></div>
+          <div class="mini-stat"><span>{t("评分阈值", "Score Threshold")}</span><strong>{float(config["score_threshold"]):.1f}</strong></div>
+          <div class="mini-stat"><span>{t("单笔金额", "Order Qty")}</span><strong>{float(config["quote_order_qty"]):.2f}</strong></div>
+          <div class="mini-stat"><span>{t("止损", "Stop Loss")}</span><strong>{float(config["stop_loss_pct"]):.1f}%</strong></div>
+          <div class="mini-stat"><span>{t("止盈", "Take Profit")}</span><strong>{float(config["take_profit_pct"]):.1f}%</strong></div>
         </div>
       </section>
 
       <section class="section-block">
         <div class="section-heading">
-          <h2>Positions</h2>
-          <p>自动交易状态保存在本机 <code>data/trading_state.json</code>。</p>
+          <h2>{t("持仓", "Positions")}</h2>
+          <p>{t("自动交易状态保存在本机", "Auto trading state is stored locally at")} <code>data/trading_state.json</code>。</p>
         </div>
-        <article class="portfolio-card table-shell">{_trading_position_rows(positions)}</article>
+        <article class="portfolio-card table-shell">{_trading_position_rows(positions, active_lang)}</article>
       </section>
 
       <section class="section-block">
         <div class="section-heading">
-          <h2>Execution Events</h2>
-          <p>本次运行的下单、风控和跳过原因。</p>
+          <h2>{t("执行事件", "Execution Events")}</h2>
+          <p>{t("本次运行的下单、风控和跳过原因。", "Orders, risk checks, and skip reasons from this run.")}</p>
         </div>
-        <article class="backtest-card table-shell">{_trading_event_rows(events)}</article>
+        <article class="backtest-card table-shell">{_trading_event_rows(events, active_lang)}</article>
       </section>
     """
     return _layout(
         page_title="AI Trade Auto Execution",
         active_page="trading",
-        hero_title="把预测信号接入自动量化执行循环。",
-        hero_text="系统会根据实时评分、量能、买盘压力和持仓风控生成订单意图，并在 paper 或受保护的 live 模式下执行。",
+        hero_title=t("把预测信号接入自动量化执行循环。", "Connect predictive signals to the automated quant execution loop."),
+        hero_text=t("系统会根据实时评分、量能、买盘压力和持仓风控生成订单意图，并在 paper 或受保护的 live 模式下执行。", "The system converts live score, volume, buy pressure, and position risk into order intent, then executes in paper mode or guarded live mode."),
         hero_right=hero_right,
         content=content,
+        lang=active_lang,
+        current_path="/trading",
     )
 
 
@@ -678,7 +890,10 @@ def render_settings_page(
     message: str | None,
     error: str | None,
     import_payload_text: str | None,
+    lang: str = "zh",
 ) -> str:
+    active_lang = normalize_language(lang)
+    t = lambda zh, en: _text(active_lang, zh, en)
     notices = []
     if message:
         notices.append(f'<div class="notice notice-success">{escape(message)}</div>')
@@ -690,39 +905,40 @@ def render_settings_page(
     hero_right = f"""
       <div class="stat-card">
         <span>Binance Auth</span>
-        <strong>{"On" if status["binance_auth_configured"] else "Off"}</strong>
+        <strong>{t("开启", "On") if status["binance_auth_configured"] else t("关闭", "Off")}</strong>
         <small>{escape(str(status["binance_auth_label"]))}</small>
       </div>
       <div class="stat-card">
         <span>OKX Auth</span>
-        <strong>{"On" if status["okx_auth_configured"] else "Off"}</strong>
-        <small>cross-exchange ready</small>
+        <strong>{t("开启", "On") if status["okx_auth_configured"] else t("关闭", "Off")}</strong>
+        <small>{t("跨交易所就绪", "cross-exchange ready")}</small>
       </div>
       <div class="stat-card">
         <span>X / Reddit</span>
-        <strong>{"On" if status["x_auth_configured"] else "Mixed"}</strong>
-        <small>{int(status["tracked_account_count"])} tracked accounts</small>
+        <strong>{t("开启", "On") if status["x_auth_configured"] else t("混合", "Mixed")}</strong>
+        <small>{int(status["tracked_account_count"])} {t("个跟踪账号", "tracked accounts")}</small>
       </div>
       <div class="stat-card">
         <span>Storage</span>
         <strong>{escape(str(status["storage_mode"]))}</strong>
-        <small>{"已启用口令保护" if str(status["storage_mode"]) == "Encrypted" else "配置保存到本地 JSON"}</small>
+        <small>{t("已启用口令保护", "passphrase protection enabled") if str(status["storage_mode"]) == "Encrypted" else t("配置保存到本地 JSON", "config saved to local JSON")}</small>
       </div>
       <div class="stat-card">
         <span>Auto Trade</span>
-        <strong>{"On" if status["autotrade_enabled"] else "Off"}</strong>
-        <small>{escape(str(status["autotrade_mode"]))} execution</small>
+        <strong>{t("开启", "On") if status["autotrade_enabled"] else t("关闭", "Off")}</strong>
+        <small>{escape(_display_value(status["autotrade_mode"], active_lang))} {t("执行", "execution")}</small>
       </div>
       <div class="stat-card">
         <span>Intelligence</span>
-        <strong>{"On" if status["intelligence_enabled"] else "Off"}</strong>
-        <small>{"LLM enabled" if status["llm_enabled"] else "local rules"}</small>
+        <strong>{t("开启", "On") if status["intelligence_enabled"] else t("关闭", "Off")}</strong>
+        <small>{t("大模型启用", "LLM enabled") if status["llm_enabled"] else t("本地规则", "local rules")}</small>
       </div>
     """
     content = f"""
       <section class="control-panel">
         {"".join(notices)}
-        <form method="post" action="/settings" class="backtest-form">
+        <form method="post" action="{_url('/settings', active_lang)}" class="backtest-form">
+          {_hidden_lang_input(active_lang)}
           <div class="settings-heading full-span">
             <h2>Access</h2>
             <p>密钥通过 POST 提交，不会出现在 URL。留空表示保持当前值。</p>
@@ -844,7 +1060,8 @@ def render_settings_page(
               <a class="action-link" href="/api/settings/export?include_secrets=1">导出完整配置</a>
             </div>
           </div>
-          <form method="post" action="/settings/import" class="settings-transfer-card import-form">
+          <form method="post" action="{_url('/settings/import', active_lang)}" class="settings-transfer-card import-form">
+            {_hidden_lang_input(active_lang)}
             <div class="settings-heading">
               <h2>Config Import</h2>
               <p>支持粘贴导出的模板 JSON。若模板中的密钥为空，当前已保存的密钥会自动保留。</p>
@@ -864,10 +1081,12 @@ def render_settings_page(
     return _layout(
         page_title="Runtime Settings",
         active_page="settings",
-        hero_title="把数据源、情报源和策略参数都收进一个运行时配置面板。",
-        hero_text="密钥、Twitter 监控账号、扫描默认值和回测默认策略都可以在这里改。保存后，扫描页和回测页会直接吃新的默认配置。",
+        hero_title=t("把数据源、情报源和策略参数都收进一个运行时配置面板。", "Manage data sources, intelligence sources, and strategy parameters in one runtime console."),
+        hero_text=t("密钥、Twitter 监控账号、扫描默认值和回测默认策略都可以在这里改。保存后，扫描页和回测页会直接吃新的默认配置。", "Configure credentials, Twitter tracked accounts, scan defaults, and backtest strategy defaults. Saved changes are applied directly across the system."),
         hero_right=hero_right,
         content=content,
+        lang=active_lang,
+        current_path="/settings",
     )
 
 
@@ -1161,7 +1380,10 @@ def render_backtest_page(
     portfolio_reports: list[dict[str, object]],
     error: str | None,
     presets: list[dict[str, object]],
+    lang: str = "zh",
 ) -> str:
+    active_lang = normalize_language(lang)
+    t = lambda zh, en: _text(active_lang, zh, en)
     archive_value = escape(str(params["archives"]))
     current_preset = get_backtest_preset(str(params["preset"]))
     preset_options = "".join(_option(str(preset["preset_id"]), str(params["preset"])) for preset in presets)
@@ -1169,12 +1391,12 @@ def render_backtest_page(
       <div class="stat-card">
         <span>Series Reports</span>
         <strong>{len(series_reports)}</strong>
-        <small>单币种回测</small>
+        <small>{t("单币种回测", "single-symbol backtests")}</small>
       </div>
       <div class="stat-card">
         <span>Portfolio Reports</span>
         <strong>{len(portfolio_reports)}</strong>
-        <small>组合结果</small>
+        <small>{t("组合结果", "portfolio results")}</small>
       </div>
       <div class="stat-card">
         <span>Lookback</span>
@@ -1198,6 +1420,7 @@ def render_backtest_page(
       <section class="control-panel">
         {error_html}
         <form method="get" action="/backtest" class="backtest-form">
+          {_hidden_lang_input(active_lang)}
           <label><span>Preset</span><select name="preset">{preset_options}</select></label>
           <div class="preset-note">
             <strong>{escape(current_preset.label)}</strong>
@@ -1267,8 +1490,10 @@ def render_backtest_page(
     return _layout(
         page_title="Binance Signal Backtest",
         active_page="backtest",
-        hero_title="把本地 Binance 历史 K 线直接拉进页面里回测。",
-        hero_text="同一页里调整分数阈值、止盈止损、滑点模型和组合仓位约束，直接看单币种与组合结果。",
+        hero_title=t("把本地 Binance 历史 K 线直接拉进页面里回测。", "Run backtests directly from local Binance historical kline archives."),
+        hero_text=t("同一页里调整分数阈值、止盈止损、滑点模型和组合仓位约束，直接看单币种与组合结果。", "Tune score thresholds, stop loss, take profit, slippage model, and portfolio exposure constraints on one page."),
         hero_right=hero_right,
         content=content,
+        lang=active_lang,
+        current_path="/backtest",
     )
