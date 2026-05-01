@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import io
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from contextlib import redirect_stdout
 from unittest.mock import Mock, patch
@@ -16,6 +17,7 @@ from trade_signal_app.main import (
     _build_runtime_config,
     _export_runtime_config_template,
     _import_runtime_config_template,
+    _run_trading_once,
     _split_archives,
     main,
     parse_args,
@@ -23,7 +25,8 @@ from trade_signal_app.main import (
 )
 from trade_signal_app.presets import list_backtest_presets
 from trade_signal_app.runtime_config import RuntimeConfig
-from trade_signal_app.views import render_backtest_page, render_settings_page, render_terminal_page, render_trading_page
+from trade_signal_app.trading import TradingStateStore
+from trade_signal_app.views import render_backtest_page, render_settings_page, render_terminal_module_page, render_terminal_page, render_trading_page
 
 
 def _build_archive(path: Path) -> None:
@@ -408,6 +411,56 @@ class MainTests(unittest.TestCase):
         self.assertIn("功能实现状态", html)
         self.assertIn("交易账户概览", html)
         self.assertIn("策略目录", html)
+        self.assertIn('href="/terminal/market"', html)
+        self.assertIn('href="/terminal/community"', html)
+        self.assertIn('href="/terminal/trading"', html)
+
+    def test_render_terminal_module_page_exposes_paper_trading_action(self) -> None:
+        html = render_terminal_module_page(
+            snapshot={
+                "generated_at": "2026-04-28T00:00:00+00:00",
+                "scanned_symbols": 12,
+                "returned_signals": 4,
+                "intel_items": [{"source": "binance", "symbol": "BTCUSDT", "title": "Key market update", "category": "market", "severity": 88.0, "sentiment": 0.4}],
+                "twitter_accounts": [{"username": "lookonchain", "focus": "链上异动", "mode": "blend", "weight_pct": 35.0, "status": "configured"}],
+                "onchain_events": [{"chain": "bitcoin", "symbol": "BTCUSDT", "event_type": "whale", "amount_usd": 9_000_000.0, "direction": "outflow", "severity": 82.0}],
+                "spreads": [{"symbol": "BTCUSDT", "spot_exchange": "BINANCE", "futures_exchange": "BINANCE-PERP", "spot_price": 100.0, "futures_price": 100.2, "spread_bps": 20.0, "direction": "basis"}],
+                "strategy_hits": [{"symbol": "BTCUSDT", "strategy": "auto_score_breakout", "score": 82.0, "grade": "A", "action": "watch", "reasons": ["趋势结构改善"]}],
+                "llm_insight": {"provider": "local", "model": "rules", "status": "ok", "summary": "综合监控正常。"},
+                "execution_risk": {
+                    "status": "clear",
+                    "risk_score": 22.0,
+                    "allowed_symbols": ["BTCUSDT"],
+                    "blocked_symbols": {},
+                    "summary": "执行前风控：允许 1 个候选。",
+                },
+                "platform": {
+                    "generated_at": "2026-04-28T00:00:00+00:00",
+                    "components": [],
+                    "accounts": [{"exchange": "BINANCE", "mode": "paper", "status": "paper_ready", "open_positions": 0, "quote_exposure": 0.0}],
+                    "strategies": [{"strategy_id": "auto_score_breakout", "name": "综合评分突破", "status": "watch_only", "trigger": "score >= 75.0", "execution": "paper/live 市价买入", "risk_controls": ["risk_gate"]}],
+                    "risk_rules": [{"name": "最大持仓数", "status": "active", "threshold": "3", "action": "拒绝新开仓"}],
+                    "recent_events": [],
+                },
+            },
+            module="trading",
+            trading_status={
+                "config": {
+                    "enabled": False,
+                    "mode": "paper",
+                    "quote_order_qty": 25.0,
+                    "score_threshold": 75.0,
+                },
+                "open_positions": [],
+                "events": [],
+            },
+            message="模拟量化交易已执行",
+        )
+
+        self.assertIn("模拟账户执行", html)
+        self.assertIn('action="/terminal/trading/run"', html)
+        self.assertIn("运行模拟量化交易", html)
+        self.assertIn('class="active" href="/terminal/trading"', html)
 
     def test_render_trading_page_includes_execution_controls(self) -> None:
         html = render_trading_page(
@@ -433,6 +486,44 @@ class MainTests(unittest.TestCase):
         self.assertIn("运行一次自动交易", html)
         self.assertIn("Positions", html)
         self.assertIn("Execution Events", html)
+
+    def test_forced_paper_trading_run_uses_signal_source_when_autotrade_disabled(self) -> None:
+        signal = SimpleNamespace(
+            symbol="BTCUSDT",
+            score=84.0,
+            grade="A",
+            reasons=["EMA20/EMA50 多头排列", "MACD 动能转强"],
+            ticker=SimpleNamespace(
+                last_price=100.0,
+                price_change_percent=2.1,
+                quote_volume=20_000_000.0,
+            ),
+            indicators=SimpleNamespace(
+                volume_ratio=1.6,
+                buy_pressure_ratio=0.63,
+                ema_spread_pct=1.2,
+            ),
+        )
+        scanner = SimpleNamespace(
+            scan=lambda: (SimpleNamespace(scanned_symbols=10, returned_signals=1), [signal]),
+        )
+        config = RuntimeConfig()
+        config.autotrade_defaults.enabled = False
+        config.autotrade_defaults.mode = "live"
+        config.autotrade_defaults.quote_order_qty = 25.0
+        config.autotrade_defaults.score_threshold = 75.0
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            with (
+                patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, scanner)),
+                patch("trade_signal_app.main._trading_store", return_value=store),
+            ):
+                payload = _run_trading_once(force_paper=True)
+
+        self.assertTrue(payload["enabled"])
+        self.assertEqual(payload["mode"], "paper")
+        self.assertEqual(payload["events"][0]["status"], "paper_filled")
+        self.assertEqual(payload["open_positions"][0]["symbol"], "BTCUSDT")
 
     def test_build_runtime_config_parses_runtime_form(self) -> None:
         current = RuntimeConfig()

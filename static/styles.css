@@ -443,7 +443,7 @@ a {
   gap: 8px;
 }
 
-.terminal-menu span {
+.terminal-menu a {
   min-height: 38px;
   display: flex;
   align-items: center;
@@ -451,11 +451,17 @@ a {
   border-radius: 8px;
   color: var(--muted);
   font-weight: 700;
+  text-decoration: none;
 }
 
-.terminal-menu span.active {
+.terminal-menu a.active {
   color: #061012;
   background: linear-gradient(135deg, var(--cyan), var(--green));
+}
+
+.terminal-menu a:hover {
+  color: var(--ink);
+  background: rgba(80, 215, 232, 0.08);
 }
 
 .terminal-main {

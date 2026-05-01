@@ -298,6 +298,62 @@ def _terminal_system_layers() -> str:
     )
 
 
+_TERMINAL_NAV_ITEMS = [
+    ("overview", "控制台", "/terminal"),
+    ("market", "交易市场", "/terminal/market"),
+    ("community", "社区情报", "/terminal/community"),
+    ("onchain", "链上监控", "/terminal/onchain"),
+    ("basis", "价差分析", "/terminal/basis"),
+    ("strategies", "策略命中", "/terminal/strategies"),
+    ("trading", "自动交易", "/terminal/trading"),
+    ("risk", "风险控制", "/terminal/risk"),
+]
+
+
+def _terminal_sidebar(active_module: str) -> str:
+    links = []
+    for module_id, label, href in _TERMINAL_NAV_ITEMS:
+        active = ' class="active"' if module_id == active_module else ""
+        links.append(f'<a{active} href="{escape(href)}">{escape(label)}</a>')
+    return f"""
+      <aside class="terminal-sidebar">
+        <div class="terminal-brand-block">
+          <strong>BINANCE</strong>
+          <span>OKX Ready</span>
+        </div>
+        <nav class="terminal-menu" aria-label="Terminal modules">
+          {"".join(links)}
+        </nav>
+      </aside>
+    """
+
+
+def _terminal_panel(title: str, subtitle: str, body: str, *, wide: bool = False) -> str:
+    panel_class = "terminal-panel wide" if wide else "terminal-panel"
+    return f"""
+      <article class="{panel_class}">
+        <div class="section-heading">
+          <h2>{escape(title)}</h2>
+          <p>{escape(subtitle)}</p>
+        </div>
+        {body}
+      </article>
+    """
+
+
+def _terminal_shell(active_module: str, body: str) -> str:
+    return f"""
+      <section class="terminal-shell">
+        {_terminal_sidebar(active_module)}
+        <div class="terminal-main">
+          <section class="terminal-grid">
+            {body}
+          </section>
+        </div>
+      </section>
+    """
+
+
 def render_terminal_page(snapshot: dict[str, object]) -> str:
     intel_items = snapshot["intel_items"]
     twitter_accounts = snapshot["twitter_accounts"]
@@ -313,127 +369,36 @@ def render_terminal_page(snapshot: dict[str, object]) -> str:
       {_terminal_card("执行风控", str(risk["status"]).upper(), f'risk {float(risk["risk_score"]):.1f}', "amber")}
       {_terminal_card("可执行候选", str(len(risk["allowed_symbols"])), f'blocked {len(risk["blocked_symbols"])}', "green")}
     """
-    content = f"""
-      <section class="terminal-shell">
-        <aside class="terminal-sidebar">
-          <div class="terminal-brand-block">
-            <strong>BINANCE</strong>
-            <span>OKX Ready</span>
-          </div>
-          <div class="terminal-menu">
-            <span class="active">控制台</span>
-            <span>交易市场</span>
-            <span>社区情报</span>
-            <span>链上监控</span>
-            <span>价差分析</span>
-            <span>策略命中</span>
-            <span>自动交易</span>
-            <span>风险控制</span>
-          </div>
-        </aside>
-        <div class="terminal-main">
-          <section class="terminal-grid">
-            <article class="terminal-panel wide">
-              <div class="section-heading">
-                <h2>系统架构</h2>
-                <p>交易所、社区、链上、策略与执行层统一监控。</p>
-              </div>
-              <div class="terminal-layers">{_terminal_system_layers()}</div>
-            </article>
-            <article class="terminal-panel wide">
-              <div class="section-heading">
-                <h2>功能实现状态</h2>
-                <p>架构组件、API 入口和配置状态。</p>
-              </div>
-              {_terminal_rows(platform["components"], [("Layer", "layer"), ("Name", "name"), ("Status", "status"), ("Capability", "capability"), ("Endpoint", "endpoint")])}
-            </article>
-            <article class="terminal-panel">
-              <div class="section-heading">
-                <h2>交易账户概览</h2>
-                <p>模拟交易和真实交易账户状态。</p>
-              </div>
-              {_terminal_rows(platform["accounts"], [("Exchange", "exchange"), ("Mode", "mode"), ("Status", "status"), ("Positions", "open_positions"), ("Exposure", "quote_exposure")])}
-            </article>
-            <article class="terminal-panel">
-              <div class="section-heading">
-                <h2>大模型分析</h2>
-                <p>{escape(str(llm["provider"]))} / {escape(str(llm["model"]))} / {escape(str(llm["status"]))}</p>
-              </div>
-              <p class="terminal-insight">{escape(str(llm["summary"]))}</p>
-            </article>
-            <article class="terminal-panel">
-              <div class="section-heading">
-                <h2>执行前风控</h2>
-                <p>{escape(str(risk["summary"]))}</p>
-              </div>
-              <div class="terminal-risk-board">
-                <div class="mini-stat"><span>Status</span><strong>{escape(str(risk["status"]))}</strong></div>
-                <div class="mini-stat"><span>Risk Score</span><strong>{float(risk["risk_score"]):.1f}</strong></div>
-                <div class="mini-stat"><span>Allowed</span><strong>{len(risk["allowed_symbols"])}</strong></div>
-                <div class="mini-stat"><span>Blocked</span><strong>{len(risk["blocked_symbols"])}</strong></div>
-              </div>
-              {_terminal_rows([{"symbol": symbol, "reason": reason} for symbol, reason in dict(risk["blocked_symbols"]).items()], [("Symbol", "symbol"), ("Reason", "reason")])}
-            </article>
-            <article class="terminal-panel">
-              <div class="section-heading">
-                <h2>交易所与热门情报</h2>
-                <p>公告、新闻、社区热度与信号引擎聚合。</p>
-              </div>
-              {_terminal_rows(intel_items, [("Source", "source"), ("Symbol", "symbol"), ("Title", "title"), ("Severity", "severity")])}
-            </article>
-            <article class="terminal-panel">
-              <div class="section-heading">
-                <h2>Twitter 账户监控</h2>
-                <p>运行配置中的 tracked accounts。</p>
-              </div>
-              {_terminal_rows(twitter_accounts, [("Account", "username"), ("Focus", "focus"), ("Mode", "mode"), ("Status", "status")])}
-            </article>
-            <article class="terminal-panel">
-              <div class="section-heading">
-                <h2>链上异动</h2>
-                <p>大额转账、交易所流入流出和量能代理。</p>
-              </div>
-              {_terminal_rows(onchain_events, [("Chain", "chain"), ("Symbol", "symbol"), ("Type", "event_type"), ("USD", "amount_usd"), ("Direction", "direction")])}
-            </article>
-            <article class="terminal-panel">
-              <div class="section-heading">
-                <h2>现货 / 合约价差</h2>
-                <p>用于套利、对冲和资金费率观察。</p>
-              </div>
-              {_terminal_rows(spreads, [("Symbol", "symbol"), ("Spot", "spot_exchange"), ("Futures", "futures_exchange"), ("Spread bps", "spread_bps"), ("Direction", "direction")])}
-            </article>
-            <article class="terminal-panel wide">
-              <div class="section-heading">
-                <h2>策略命中</h2>
-                <p>自动交易前的候选池和执行意图。</p>
-              </div>
-              {_terminal_rows(strategy_hits, [("Symbol", "symbol"), ("Strategy", "strategy"), ("Score", "score"), ("Grade", "grade"), ("Action", "action"), ("Reasons", "reasons")])}
-            </article>
-            <article class="terminal-panel">
-              <div class="section-heading">
-                <h2>策略目录</h2>
-                <p>已实现策略、触发条件和执行方式。</p>
-              </div>
-              {_terminal_rows(platform["strategies"], [("ID", "strategy_id"), ("Name", "name"), ("Status", "status"), ("Trigger", "trigger"), ("Execution", "execution")])}
-            </article>
-            <article class="terminal-panel">
-              <div class="section-heading">
-                <h2>风险规则</h2>
-                <p>执行层硬性约束和保护条件。</p>
-              </div>
-              {_terminal_rows(platform["risk_rules"], [("Rule", "name"), ("Status", "status"), ("Threshold", "threshold"), ("Action", "action")])}
-            </article>
-            <article class="terminal-panel wide">
-              <div class="section-heading">
-                <h2>交易日志</h2>
-                <p>自动交易执行、跳过、阻断和下单事件。</p>
-              </div>
-              {_terminal_rows(platform["recent_events"], [("Time", "created_at"), ("Action", "action"), ("Symbol", "symbol"), ("Status", "status"), ("Message", "message")])}
-            </article>
-          </section>
-        </div>
-      </section>
-    """
+    panels = "".join(
+        [
+            _terminal_panel("系统架构", "交易所、社区、链上、策略与执行层统一监控。", f'<div class="terminal-layers">{_terminal_system_layers()}</div>', wide=True),
+            _terminal_panel("功能实现状态", "架构组件、API 入口和配置状态。", _terminal_rows(platform["components"], [("Layer", "layer"), ("Name", "name"), ("Status", "status"), ("Capability", "capability"), ("Endpoint", "endpoint")]), wide=True),
+            _terminal_panel("交易账户概览", "模拟交易和真实交易账户状态。", _terminal_rows(platform["accounts"], [("Exchange", "exchange"), ("Mode", "mode"), ("Status", "status"), ("Positions", "open_positions"), ("Exposure", "quote_exposure")])),
+            _terminal_panel("大模型分析", f'{escape(str(llm["provider"]))} / {escape(str(llm["model"]))} / {escape(str(llm["status"]))}', f'<p class="terminal-insight">{escape(str(llm["summary"]))}</p>'),
+            _terminal_panel(
+                "执行前风控",
+                str(risk["summary"]),
+                f"""
+                <div class="terminal-risk-board">
+                  <div class="mini-stat"><span>Status</span><strong>{escape(str(risk["status"]))}</strong></div>
+                  <div class="mini-stat"><span>Risk Score</span><strong>{float(risk["risk_score"]):.1f}</strong></div>
+                  <div class="mini-stat"><span>Allowed</span><strong>{len(risk["allowed_symbols"])}</strong></div>
+                  <div class="mini-stat"><span>Blocked</span><strong>{len(risk["blocked_symbols"])}</strong></div>
+                </div>
+                {_terminal_rows([{"symbol": symbol, "reason": reason} for symbol, reason in dict(risk["blocked_symbols"]).items()], [("Symbol", "symbol"), ("Reason", "reason")])}
+                """,
+            ),
+            _terminal_panel("交易所与热门情报", "公告、新闻、社区热度与信号引擎聚合。", _terminal_rows(intel_items, [("Source", "source"), ("Symbol", "symbol"), ("Title", "title"), ("Severity", "severity")])),
+            _terminal_panel("Twitter 账户监控", "运行配置中的 tracked accounts。", _terminal_rows(twitter_accounts, [("Account", "username"), ("Focus", "focus"), ("Mode", "mode"), ("Status", "status")])),
+            _terminal_panel("链上异动", "大额转账、交易所流入流出和量能代理。", _terminal_rows(onchain_events, [("Chain", "chain"), ("Symbol", "symbol"), ("Type", "event_type"), ("USD", "amount_usd"), ("Direction", "direction")])),
+            _terminal_panel("现货 / 合约价差", "用于套利、对冲和资金费率观察。", _terminal_rows(spreads, [("Symbol", "symbol"), ("Spot", "spot_exchange"), ("Futures", "futures_exchange"), ("Spread bps", "spread_bps"), ("Direction", "direction")])),
+            _terminal_panel("策略命中", "自动交易前的候选池和执行意图。", _terminal_rows(strategy_hits, [("Symbol", "symbol"), ("Strategy", "strategy"), ("Score", "score"), ("Grade", "grade"), ("Action", "action"), ("Reasons", "reasons")]), wide=True),
+            _terminal_panel("策略目录", "已实现策略、触发条件和执行方式。", _terminal_rows(platform["strategies"], [("ID", "strategy_id"), ("Name", "name"), ("Status", "status"), ("Trigger", "trigger"), ("Execution", "execution")])),
+            _terminal_panel("风险规则", "执行层硬性约束和保护条件。", _terminal_rows(platform["risk_rules"], [("Rule", "name"), ("Status", "status"), ("Threshold", "threshold"), ("Action", "action")])),
+            _terminal_panel("交易日志", "自动交易执行、跳过、阻断和下单事件。", _terminal_rows(platform["recent_events"], [("Time", "created_at"), ("Action", "action"), ("Symbol", "symbol"), ("Status", "status"), ("Message", "message")]), wide=True),
+        ]
+    )
+    content = _terminal_shell("overview", panels)
     return _layout(
         page_title="AI Trade Command Center",
         active_page="terminal",
@@ -441,6 +406,131 @@ def render_terminal_page(snapshot: dict[str, object]) -> str:
         hero_text="将关键交易所信息、热门社区情报、Twitter 账号、链上异动、现货合约价差和策略命中集中分析，并可交给自动交易引擎执行。",
         hero_right=hero_right,
         content=content,
+    )
+
+
+def render_terminal_module_page(
+    *,
+    snapshot: dict[str, object],
+    module: str,
+    trading_status: dict[str, object] | None = None,
+    message: str | None = None,
+) -> str:
+    intel_items = snapshot["intel_items"]
+    twitter_accounts = snapshot["twitter_accounts"]
+    onchain_events = snapshot["onchain_events"]
+    spreads = snapshot["spreads"]
+    strategy_hits = snapshot["strategy_hits"]
+    risk = snapshot["execution_risk"]
+    platform = snapshot["platform"]
+    trading_status = trading_status or {"config": {}, "open_positions": [], "events": []}
+
+    module_titles = {
+        "market": ("交易市场", "交易所关键情报、热门标的和信号引擎结果。"),
+        "community": ("社区情报", "Twitter/X tracked accounts、社区热度和行业信息源。"),
+        "onchain": ("链上监控", "链上大额异动、交易所流入流出和风险代理。"),
+        "basis": ("价差分析", "现货、合约和跨市场 basis 机会。"),
+        "strategies": ("策略命中", "策略目录、命中候选和自动执行意图。"),
+        "trading": ("自动交易", "模拟账户、策略信号源和执行事件。"),
+        "risk": ("风险控制", "执行前风控、阻断原因和硬性风险规则。"),
+    }
+    title, subtitle = module_titles.get(module, module_titles["market"])
+
+    if module == "market":
+        panels = "".join(
+            [
+                _terminal_panel("交易所与热门情报", "公告、新闻、市场热度与信号引擎聚合。", _terminal_rows(intel_items, [("Source", "source"), ("Symbol", "symbol"), ("Title", "title"), ("Severity", "severity"), ("Sentiment", "sentiment")]), wide=True),
+                _terminal_panel("现货 / 合约价差", "价差异常会参与执行前风控。", _terminal_rows(spreads, [("Symbol", "symbol"), ("Spot", "spot_exchange"), ("Spot Price", "spot_price"), ("Futures", "futures_exchange"), ("Futures Price", "futures_price"), ("Spread bps", "spread_bps")]), wide=True),
+            ]
+        )
+    elif module == "community":
+        panels = "".join(
+            [
+                _terminal_panel("Twitter 账户监控", "运行配置中的 tracked accounts 和抓取状态。", _terminal_rows(twitter_accounts, [("Account", "username"), ("Focus", "focus"), ("Mode", "mode"), ("Weight", "weight_pct"), ("Status", "status")]), wide=True),
+                _terminal_panel("社区/交易所情报", "X、Reddit、本地新闻、Telegram 与信号引擎信息统一入池。", _terminal_rows(intel_items, [("Source", "source"), ("Symbol", "symbol"), ("Category", "category"), ("Title", "title"), ("Severity", "severity")]), wide=True),
+            ]
+        )
+    elif module == "onchain":
+        panels = "".join(
+            [
+                _terminal_panel("链上异动", "CSV 接入或量能代理生成的大额转账与流入流出事件。", _terminal_rows(onchain_events, [("Chain", "chain"), ("Symbol", "symbol"), ("Type", "event_type"), ("USD", "amount_usd"), ("Direction", "direction"), ("Severity", "severity")]), wide=True),
+                _terminal_panel("链上风控阻断", "高严重度交易所流入会阻断自动开仓。", _terminal_rows([{"symbol": symbol, "reason": reason} for symbol, reason in dict(risk["blocked_symbols"]).items()], [("Symbol", "symbol"), ("Reason", "reason")]), wide=True),
+            ]
+        )
+    elif module == "basis":
+        panels = "".join(
+            [
+                _terminal_panel("现货 / 合约价差", "用于套利、对冲、资金费率观察和异常价差阻断。", _terminal_rows(spreads, [("Symbol", "symbol"), ("Spot", "spot_exchange"), ("Spot Price", "spot_price"), ("Futures", "futures_exchange"), ("Futures Price", "futures_price"), ("Spread bps", "spread_bps"), ("Direction", "direction")]), wide=True),
+                _terminal_panel("价差执行提示", "极端 basis 不直接下单，会进入风控复核。", _terminal_rows(platform["risk_rules"], [("Rule", "name"), ("Status", "status"), ("Threshold", "threshold"), ("Action", "action")]), wide=True),
+            ]
+        )
+    elif module == "strategies":
+        panels = "".join(
+            [
+                _terminal_panel("策略命中", "自动交易前的候选池和执行意图。", _terminal_rows(strategy_hits, [("Symbol", "symbol"), ("Strategy", "strategy"), ("Score", "score"), ("Grade", "grade"), ("Action", "action"), ("Reasons", "reasons")]), wide=True),
+                _terminal_panel("策略目录", "已实现策略、触发条件、执行方式和风控依赖。", _terminal_rows(platform["strategies"], [("ID", "strategy_id"), ("Name", "name"), ("Status", "status"), ("Trigger", "trigger"), ("Execution", "execution"), ("Risk", "risk_controls")]), wide=True),
+            ]
+        )
+    elif module == "trading":
+        config = trading_status["config"]
+        positions = trading_status["open_positions"]
+        events = trading_status["events"]
+        command = f"""
+          <form method="post" action="/terminal/trading/run" class="trading-command terminal-action-form">
+            <div>
+              <h2>模拟账户执行</h2>
+              <p class="helper-text">使用当前策略信号源和执行前风控，强制以 paper 模式运行一次。不会提交真实订单。</p>
+            </div>
+            <button type="submit">运行模拟量化交易</button>
+          </form>
+          <div class="mini-stat-grid compact-grid trading-risk-grid">
+            <div class="mini-stat"><span>Mode</span><strong>{escape(str(config.get("mode", "paper")))}</strong></div>
+            <div class="mini-stat"><span>Enabled</span><strong>{escape(str(config.get("enabled", "")))}</strong></div>
+            <div class="mini-stat"><span>Score</span><strong>{float(config.get("score_threshold", 0) or 0):.1f}</strong></div>
+            <div class="mini-stat"><span>Order Qty</span><strong>{float(config.get("quote_order_qty", 0) or 0):.2f}</strong></div>
+          </div>
+          {f'<div class="notice notice-success">{escape(message)}</div>' if message else ""}
+        """
+        panels = "".join(
+            [
+                _terminal_panel("模拟账户执行", "用策略信号源完成一轮 paper 自动交易。", command, wide=True),
+                _terminal_panel("持仓状态", "本地模拟账户持仓。", _trading_position_rows(positions), wide=True),
+                _terminal_panel("交易日志", "自动交易执行、跳过、阻断和下单事件。", _trading_event_rows(events), wide=True),
+            ]
+        )
+    else:
+        panels = "".join(
+            [
+                _terminal_panel(
+                    "执行前风控",
+                    str(risk["summary"]),
+                    f"""
+                    <div class="terminal-risk-board">
+                      <div class="mini-stat"><span>Status</span><strong>{escape(str(risk["status"]))}</strong></div>
+                      <div class="mini-stat"><span>Risk Score</span><strong>{float(risk["risk_score"]):.1f}</strong></div>
+                      <div class="mini-stat"><span>Allowed</span><strong>{len(risk["allowed_symbols"])}</strong></div>
+                      <div class="mini-stat"><span>Blocked</span><strong>{len(risk["blocked_symbols"])}</strong></div>
+                    </div>
+                    {_terminal_rows([{"symbol": symbol, "reason": reason} for symbol, reason in dict(risk["blocked_symbols"]).items()], [("Symbol", "symbol"), ("Reason", "reason")])}
+                    """,
+                    wide=True,
+                ),
+                _terminal_panel("风险规则", "执行层硬性约束和保护条件。", _terminal_rows(platform["risk_rules"], [("Rule", "name"), ("Status", "status"), ("Threshold", "threshold"), ("Action", "action")]), wide=True),
+            ]
+        )
+
+    hero_right = f"""
+      {_terminal_card("扫描标的", str(int(snapshot["scanned_symbols"])), "signal source", "cyan")}
+      {_terminal_card("策略命中", str(len(strategy_hits)), "candidate pool", "green")}
+      {_terminal_card("执行风控", str(risk["status"]).upper(), f'risk {float(risk["risk_score"]):.1f}', "amber")}
+    """
+    return _layout(
+        page_title=f"AI Trade {title}",
+        active_page="terminal",
+        hero_title=title,
+        hero_text=subtitle,
+        hero_right=hero_right,
+        content=_terminal_shell(module, panels),
     )
 
 

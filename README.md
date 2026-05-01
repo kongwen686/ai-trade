@@ -74,6 +74,14 @@
 
 - 实时扫描：`http://127.0.0.1:8000/`
 - 智能总控台：`http://127.0.0.1:8000/terminal`
+- 总控台模块：
+  - `http://127.0.0.1:8000/terminal/market`
+  - `http://127.0.0.1:8000/terminal/community`
+  - `http://127.0.0.1:8000/terminal/onchain`
+  - `http://127.0.0.1:8000/terminal/basis`
+  - `http://127.0.0.1:8000/terminal/strategies`
+  - `http://127.0.0.1:8000/terminal/trading`
+  - `http://127.0.0.1:8000/terminal/risk`
 - 历史回测：`http://127.0.0.1:8000/backtest`
 - 运行配置：`http://127.0.0.1:8000/settings`
 - 自动量化：`http://127.0.0.1:8000/trading`
@@ -84,8 +92,10 @@
 - 平台策略 API：`http://127.0.0.1:8000/api/platform/strategies`
 - 平台风控 API：`http://127.0.0.1:8000/api/platform/risk`
 - 平台日志 API：`http://127.0.0.1:8000/api/platform/logs`
+- 总控台模块 API：`http://127.0.0.1:8000/api/terminal/modules/{market|community|onchain|basis|strategies|trading|risk}`
 - 回测 API：`http://127.0.0.1:8000/api/backtest`
 - 自动交易 API：`POST http://127.0.0.1:8000/api/trading/run`
+- 模拟交易 API：`POST http://127.0.0.1:8000/api/trading/paper/run`
 
 ## 快速开始
 
@@ -249,7 +259,9 @@ trade-signal-autotrade --loop --interval-seconds 300
 
 ## 智能总控台与外部情报
 
-`/terminal` 会把平台架构、功能实现状态、交易所信息、热门社区情报、Twitter/X 账号、链上异动、现货/合约价差、策略命中、自动交易意图、账户概览和风控规则放在同一个总控台里。
+`/terminal` 会把平台架构、功能实现状态、交易所信息、热门社区情报、Twitter/X 账号、链上异动、现货/合约价差、策略命中、自动交易意图、账户概览和风控规则放在同一个总控台里。左侧模块菜单均为可点击入口，每个模块都有独立页面和对应 API。
+
+`/terminal/trading` 提供模拟账户执行入口，会强制使用 `paper` 模式运行一次策略信号源、执行前风控和自动交易引擎，不会提交真实订单。
 
 本地数据源采用 CSV 插拔，复制示例文件即可启用：
 

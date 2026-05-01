@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,7 +28,7 @@ from .runtime_config import AutoTradeDefaults, BacktestDefaults, IntelligenceDef
 from .strategy import EntryRuleConfig, ExecutionConfig, ExitRuleConfig
 from .trading import AutoTrader, TradingEvent, TradingPosition, TradingRunReport, TradingStateStore
 from .ui import format_backtest_report, format_portfolio_report, format_signal_row
-from .views import render_backtest_page, render_index_page, render_settings_page, render_terminal_page, render_trading_page
+from .views import render_backtest_page, render_index_page, render_settings_page, render_terminal_module_page, render_terminal_page, render_trading_page
 
 RUNTIME_CONFIG_PATH = BASE_DIR / "data" / "runtime_config.json"
 TRADING_STATE_PATH = BASE_DIR / "data" / "trading_state.json"
@@ -246,12 +246,20 @@ def _trading_status_payload() -> dict[str, object]:
     }
 
 
-def _run_trading_once() -> dict[str, object]:
+def _run_trading_once(*, force_paper: bool = False) -> dict[str, object]:
     runtime_config, scanner = APP_STATE.snapshot()
     risk_snapshot = IntelligenceHub(scanner=scanner, runtime_config=runtime_config, settings=SETTINGS).snapshot()
     blocked_symbols = risk_snapshot.execution_risk.blocked_symbols
     trader = AutoTrader(scanner=scanner, state_store=_trading_store(), blocked_symbols=blocked_symbols)
-    return _serialize_trading_report(trader.run_once(runtime_config.autotrade_defaults))
+    autotrade_config = runtime_config.autotrade_defaults
+    if force_paper:
+        autotrade_config = replace(
+            autotrade_config,
+            enabled=True,
+            mode="paper",
+            order_test_only=True,
+        )
+    return _serialize_trading_report(trader.run_once(autotrade_config))
 
 
 def _serialize_intelligence_snapshot(snapshot: IntelligenceSnapshot) -> dict[str, object]:
@@ -276,6 +284,57 @@ def _terminal_payload() -> dict[str, object]:
         **_serialize_intelligence_snapshot(hub.snapshot()),
         "platform": _platform_payload(),
     }
+
+
+def _terminal_module_payload(module: str) -> dict[str, object]:
+    snapshot = _terminal_payload()
+    platform = snapshot["platform"]
+    risk = snapshot["execution_risk"]
+    if module == "market":
+        return {
+            "module": module,
+            "intel_items": snapshot["intel_items"],
+            "spreads": snapshot["spreads"],
+            "strategy_hits": snapshot["strategy_hits"],
+        }
+    if module == "community":
+        return {
+            "module": module,
+            "twitter_accounts": snapshot["twitter_accounts"],
+            "intel_items": snapshot["intel_items"],
+        }
+    if module == "onchain":
+        return {
+            "module": module,
+            "onchain_events": snapshot["onchain_events"],
+            "blocked_symbols": risk["blocked_symbols"],
+        }
+    if module == "basis":
+        return {
+            "module": module,
+            "spreads": snapshot["spreads"],
+            "risk_rules": platform["risk_rules"],
+        }
+    if module == "strategies":
+        return {
+            "module": module,
+            "strategy_hits": snapshot["strategy_hits"],
+            "strategies": platform["strategies"],
+        }
+    if module == "trading":
+        return {
+            "module": module,
+            "trading": _trading_status_payload(),
+            "accounts": platform["accounts"],
+            "recent_events": platform["recent_events"],
+        }
+    if module == "risk":
+        return {
+            "module": module,
+            "execution_risk": risk,
+            "risk_rules": platform["risk_rules"],
+        }
+    raise ValueError("未知总控台模块。")
 
 
 def _import_runtime_config_template(form: dict[str, list[str]]) -> RuntimeConfig:
@@ -668,9 +727,28 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_text(html, content_type="text/html; charset=utf-8")
                 return
 
+            if parsed.path.startswith("/terminal/"):
+                module = parsed.path.removeprefix("/terminal/").strip("/")
+                if module in {"market", "community", "onchain", "basis", "strategies", "trading", "risk"}:
+                    html = render_terminal_module_page(
+                        snapshot=_terminal_payload(),
+                        module=module,
+                        trading_status=_trading_status_payload() if module == "trading" else None,
+                    )
+                    self._send_text(html, content_type="text/html; charset=utf-8")
+                    return
+
             if parsed.path == "/api/terminal/snapshot":
                 self._send_text(
                     json.dumps(_terminal_payload(), ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            if parsed.path.startswith("/api/terminal/modules/"):
+                module = parsed.path.removeprefix("/api/terminal/modules/").strip("/")
+                self._send_text(
+                    json.dumps(_terminal_module_payload(module), ensure_ascii=False, indent=2),
                     content_type="application/json; charset=utf-8",
                 )
                 return
@@ -882,8 +960,30 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_text(html, content_type="text/html; charset=utf-8")
                 return
 
+            if parsed.path == "/terminal/trading/run":
+                payload = _run_trading_once(force_paper=True)
+                filled = sum(1 for event in payload["events"] if event["status"] == "paper_filled")
+                blocked = sum(1 for event in payload["events"] if event["status"] in {"risk_blocked", "blocked", "rejected"})
+                message = f"模拟量化交易已执行：成交事件 {filled} 个，阻断/拒绝 {blocked} 个。"
+                html = render_terminal_module_page(
+                    snapshot=_terminal_payload(),
+                    module="trading",
+                    trading_status=_trading_status_payload(),
+                    message=message,
+                )
+                self._send_text(html, content_type="text/html; charset=utf-8")
+                return
+
             if parsed.path == "/api/trading/run":
                 payload = _run_trading_once()
+                self._send_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            if parsed.path == "/api/trading/paper/run":
+                payload = _run_trading_once(force_paper=True)
                 self._send_text(
                     json.dumps(payload, ensure_ascii=False, indent=2),
                     content_type="application/json; charset=utf-8",
