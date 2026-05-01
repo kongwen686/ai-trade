@@ -1422,6 +1422,10 @@ body {
   grid-template-columns: 170px minmax(0, 1fr);
 }
 
+.terminal-shell-single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .terminal-sidebar {
   background: rgba(8, 20, 34, 0.88);
 }

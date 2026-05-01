@@ -464,7 +464,8 @@ class MainTests(unittest.TestCase):
         self.assertIn("模拟账户执行", html)
         self.assertIn('action="/terminal/trading/run"', html)
         self.assertIn("运行模拟量化交易", html)
-        self.assertIn('class="active" href="/terminal/trading"', html)
+        self.assertIn('class="sidebar-link active" href="/terminal/trading"', html)
+        self.assertNotIn("terminal-sidebar", html)
 
     def test_render_trading_page_includes_execution_controls(self) -> None:
         html = render_trading_page(

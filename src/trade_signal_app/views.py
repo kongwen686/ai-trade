@@ -204,12 +204,14 @@ def _top_nav(active_page: str, lang: str) -> str:
     return "".join(links)
 
 
-def _sidebar_group(title: str, links: list[tuple[str, str]], lang: str, active_page: str) -> str:
+def _sidebar_group(title: str, links: list[tuple[str, str]], lang: str, active_page: str, current_path: str) -> str:
     items = []
+    current_path = current_path.split("?", 1)[0] or "/"
     for label, href in links:
         path = href.split("?", 1)[0]
         is_active = (
-            (active_page == "terminal" and path == "/terminal")
+            path == current_path
+            or (active_page == "terminal" and current_path == "/terminal" and path == "/terminal")
             or (active_page == "scan" and path == "/")
             or (active_page == "backtest" and path == "/backtest")
             or (active_page == "trading" and path == "/trading")
@@ -225,7 +227,7 @@ def _sidebar_group(title: str, links: list[tuple[str, str]], lang: str, active_p
     """
 
 
-def _app_sidebar(active_page: str, lang: str) -> str:
+def _app_sidebar(active_page: str, lang: str, current_path: str) -> str:
     return f"""
       <aside class="app-sidebar">
         <a class="sidebar-brand" href="{escape(_url('/terminal', lang))}">
@@ -239,25 +241,25 @@ def _app_sidebar(active_page: str, lang: str) -> str:
           {_sidebar_group(_text(lang, "核心导航", "Core Navigation"), [
               (_text(lang, "工作台", "Workspace"), "/terminal"),
               (_text(lang, "信号扫描", "Signal Scanner"), "/"),
-          ], lang, active_page)}
+          ], lang, active_page, current_path)}
           {_sidebar_group(_text(lang, "数据中心", "Data Center"), [
               (_text(lang, "数据概览", "Data Overview"), "/terminal/market"),
               (_text(lang, "社区情报", "Community Intel"), "/terminal/community"),
               (_text(lang, "链上监控", "On-chain Monitor"), "/terminal/onchain"),
               (_text(lang, "价差分析", "Basis Analysis"), "/terminal/basis"),
-          ], lang, active_page)}
+          ], lang, active_page, current_path)}
           {_sidebar_group(_text(lang, "策略研究", "Strategy Research"), [
               (_text(lang, "策略命中", "Strategy Hits"), "/terminal/strategies"),
               (_text(lang, "回测分析", "Backtesting"), "/backtest"),
-          ], lang, active_page)}
+          ], lang, active_page, current_path)}
           {_sidebar_group(_text(lang, "交易执行", "Trade Execution"), [
               (_text(lang, "自动交易", "Auto Trading"), "/trading"),
               (_text(lang, "模拟账户", "Paper Account"), "/terminal/trading"),
               (_text(lang, "风险控制", "Risk Control"), "/terminal/risk"),
-          ], lang, active_page)}
+          ], lang, active_page, current_path)}
           {_sidebar_group(_text(lang, "系统管理", "System Admin"), [
               (_text(lang, "系统配置", "System Config"), "/settings"),
-          ], lang, active_page)}
+          ], lang, active_page, current_path)}
         </nav>
         <div class="sidebar-footer">
           <span>{_text(lang, "系统状态", "System Status")}</span>
@@ -326,7 +328,7 @@ def _layout(
   </head>
   <body>
     <main class="app-shell">
-      {_app_sidebar(active_page, active_lang)}
+      {_app_sidebar(active_page, active_lang, current_path)}
       <section class="workspace">
         <header class="platform-header">
           <nav class="top-nav" aria-label="Primary">
@@ -587,36 +589,6 @@ def _terminal_system_layers(lang: str = "zh") -> str:
     )
 
 
-_TERMINAL_NAV_ITEMS: list[tuple[str, str, str, str]] = [
-    ("overview", "控制台", "Overview", "/terminal"),
-    ("market", "交易市场", "Markets", "/terminal/market"),
-    ("community", "社区情报", "Community Intel", "/terminal/community"),
-    ("onchain", "链上监控", "On-chain Monitor", "/terminal/onchain"),
-    ("basis", "价差分析", "Basis Analysis", "/terminal/basis"),
-    ("strategies", "策略命中", "Strategy Hits", "/terminal/strategies"),
-    ("trading", "自动交易", "Auto Trading", "/terminal/trading"),
-    ("risk", "风险控制", "Risk Control", "/terminal/risk"),
-]
-
-
-def _terminal_sidebar(active_module: str, lang: str = "zh") -> str:
-    links = []
-    for module_id, zh_label, en_label, href in _TERMINAL_NAV_ITEMS:
-        active = ' class="active"' if module_id == active_module else ""
-        links.append(f'<a{active} href="{escape(_url(href, lang))}">{escape(_text(lang, zh_label, en_label))}</a>')
-    return f"""
-      <aside class="terminal-sidebar">
-        <div class="terminal-brand-block">
-          <strong>BINANCE</strong>
-          <span>{escape(_text(lang, "OKX 就绪", "OKX Ready"))}</span>
-        </div>
-        <nav class="terminal-menu" aria-label="Terminal modules">
-          {"".join(links)}
-        </nav>
-      </aside>
-    """
-
-
 def _terminal_panel(title: str, subtitle: str, body: str, *, wide: bool = False) -> str:
     panel_class = "terminal-panel wide" if wide else "terminal-panel"
     return f"""
@@ -632,8 +604,7 @@ def _terminal_panel(title: str, subtitle: str, body: str, *, wide: bool = False)
 
 def _terminal_shell(active_module: str, body: str, lang: str = "zh") -> str:
     return f"""
-      <section class="terminal-shell">
-        {_terminal_sidebar(active_module, lang)}
+      <section class="terminal-shell terminal-shell-single" data-module="{escape(active_module)}" data-lang="{escape(normalize_language(lang))}">
         <div class="terminal-main">
           <section class="terminal-grid">
             {body}
