@@ -54,11 +54,37 @@ class TradingTests(unittest.TestCase):
                     score_threshold=75.0,
                 )
             )
+            stored_events = store.load_events()
 
         self.assertEqual(len(report.open_positions), 1)
         self.assertEqual(report.open_positions[0].symbol, "BTCUSDT")
         self.assertEqual(report.events[0].status, "paper_filled")
+        self.assertEqual(stored_events[0].status, "paper_filled")
         self.assertEqual(scanner.gateway.buy_calls, [])
+
+    def test_risk_blocked_symbol_does_not_open_position(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            scanner = FakeScanner([_signal()])
+            trader = AutoTrader(
+                scanner=scanner,
+                state_store=store,
+                blocked_symbols={"BTCUSDT": "链上高严重度交易所流入"},
+            )
+
+            report = trader.run_once(
+                AutoTradeDefaults(
+                    enabled=True,
+                    mode="paper",
+                    quote_order_qty=50.0,
+                    score_threshold=75.0,
+                )
+            )
+            stored_events = store.load_events()
+
+        self.assertEqual(len(report.open_positions), 0)
+        self.assertEqual(report.events[0].status, "risk_blocked")
+        self.assertEqual(stored_events[0].status, "risk_blocked")
 
     def test_live_run_is_blocked_without_confirmation_env(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

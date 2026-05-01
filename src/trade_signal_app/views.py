@@ -12,6 +12,7 @@ def _option(value: str, selected: str) -> str:
 
 
 def _layout(*, page_title: str, active_page: str, hero_title: str, hero_text: str, hero_right: str, content: str) -> str:
+    terminal_active = "nav-link active" if active_page == "terminal" else "nav-link"
     scan_active = "nav-link active" if active_page == "scan" else "nav-link"
     backtest_active = "nav-link active" if active_page == "backtest" else "nav-link"
     trading_active = "nav-link active" if active_page == "trading" else "nav-link"
@@ -20,6 +21,7 @@ def _layout(*, page_title: str, active_page: str, hero_title: str, hero_text: st
         "scan": "SIGNAL DESK",
         "backtest": "STRATEGY LAB",
         "trading": "AUTO TRADE",
+        "terminal": "COMMAND CENTER",
         "settings": "OPS CONSOLE",
     }.get(
         active_page,
@@ -48,6 +50,7 @@ def _layout(*, page_title: str, active_page: str, hero_title: str, hero_text: st
           </span>
         </a>
         <nav class="top-nav" aria-label="Primary">
+          <a class="{terminal_active}" href="/terminal"><span>Command</span><small>总控台</small></a>
           <a class="{scan_active}" href="/"><span>Signal Desk</span><small>实时扫描</small></a>
           <a class="{backtest_active}" href="/backtest"><span>Strategy Lab</span><small>历史回测</small></a>
           <a class="{trading_active}" href="/trading"><span>Auto Trade</span><small>自动量化</small></a>
@@ -244,6 +247,203 @@ def render_index_page(
     )
 
 
+def _terminal_card(title: str, value: str, subtitle: str, accent: str = "") -> str:
+    return f"""
+      <article class="terminal-kpi {escape(accent)}">
+        <span>{escape(title)}</span>
+        <strong>{escape(value)}</strong>
+        <small>{escape(subtitle)}</small>
+      </article>
+    """
+
+
+def _terminal_rows(items: list[dict[str, object]], columns: list[tuple[str, str]]) -> str:
+    if not items:
+        return '<p class="helper-text">暂无数据。配置本地 CSV 或外部数据源后会自动显示。</p>'
+    header = "".join(f"<th>{escape(label)}</th>" for label, _ in columns)
+    rows = []
+    for item in items:
+        cells = "".join(f"<td>{escape(_format_cell(item.get(key)))}</td>" for _, key in columns)
+        rows.append(f"<tr>{cells}</tr>")
+    return f'<table class="data-table terminal-table"><tr>{header}</tr><tbody>{"".join(rows)}</tbody></table>'
+
+
+def _format_cell(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        if abs(value) >= 1000:
+            return f"{value:,.2f}"
+        return f"{value:.2f}"
+    if isinstance(value, list):
+        return " / ".join(str(item) for item in value[:3])
+    return str(value)
+
+
+def _terminal_system_layers() -> str:
+    layers = [
+        ("接入层", "Binance API", "OKX Ready", "Twitter/X", "On-chain CSV", "OpenAI"),
+        ("策略层", "信号评分", "趋势突破", "量价压力", "跨市价差", "策略命中"),
+        ("执行层", "Paper", "Live Guard", "order/test", "仓位状态", "风控阈值"),
+        ("数据层", "行情", "社区情报", "链上异动", "持仓", "交易日志"),
+    ]
+    return "".join(
+        f"""
+        <div class="terminal-layer">
+          <strong>{escape(name)}</strong>
+          {"".join(f"<span>{escape(item)}</span>" for item in items)}
+        </div>
+        """
+        for name, *items in layers
+    )
+
+
+def render_terminal_page(snapshot: dict[str, object]) -> str:
+    intel_items = snapshot["intel_items"]
+    twitter_accounts = snapshot["twitter_accounts"]
+    onchain_events = snapshot["onchain_events"]
+    spreads = snapshot["spreads"]
+    strategy_hits = snapshot["strategy_hits"]
+    llm = snapshot["llm_insight"]
+    risk = snapshot["execution_risk"]
+    platform = snapshot["platform"]
+    hero_right = f"""
+      {_terminal_card("扫描标的", str(int(snapshot["scanned_symbols"])), "Binance Spot Universe", "cyan")}
+      {_terminal_card("策略命中", str(len(strategy_hits)), "score / volume / pressure", "green")}
+      {_terminal_card("执行风控", str(risk["status"]).upper(), f'risk {float(risk["risk_score"]):.1f}', "amber")}
+      {_terminal_card("可执行候选", str(len(risk["allowed_symbols"])), f'blocked {len(risk["blocked_symbols"])}', "green")}
+    """
+    content = f"""
+      <section class="terminal-shell">
+        <aside class="terminal-sidebar">
+          <div class="terminal-brand-block">
+            <strong>BINANCE</strong>
+            <span>OKX Ready</span>
+          </div>
+          <div class="terminal-menu">
+            <span class="active">控制台</span>
+            <span>交易市场</span>
+            <span>社区情报</span>
+            <span>链上监控</span>
+            <span>价差分析</span>
+            <span>策略命中</span>
+            <span>自动交易</span>
+            <span>风险控制</span>
+          </div>
+        </aside>
+        <div class="terminal-main">
+          <section class="terminal-grid">
+            <article class="terminal-panel wide">
+              <div class="section-heading">
+                <h2>系统架构</h2>
+                <p>交易所、社区、链上、策略与执行层统一监控。</p>
+              </div>
+              <div class="terminal-layers">{_terminal_system_layers()}</div>
+            </article>
+            <article class="terminal-panel wide">
+              <div class="section-heading">
+                <h2>功能实现状态</h2>
+                <p>架构组件、API 入口和配置状态。</p>
+              </div>
+              {_terminal_rows(platform["components"], [("Layer", "layer"), ("Name", "name"), ("Status", "status"), ("Capability", "capability"), ("Endpoint", "endpoint")])}
+            </article>
+            <article class="terminal-panel">
+              <div class="section-heading">
+                <h2>交易账户概览</h2>
+                <p>模拟交易和真实交易账户状态。</p>
+              </div>
+              {_terminal_rows(platform["accounts"], [("Exchange", "exchange"), ("Mode", "mode"), ("Status", "status"), ("Positions", "open_positions"), ("Exposure", "quote_exposure")])}
+            </article>
+            <article class="terminal-panel">
+              <div class="section-heading">
+                <h2>大模型分析</h2>
+                <p>{escape(str(llm["provider"]))} / {escape(str(llm["model"]))} / {escape(str(llm["status"]))}</p>
+              </div>
+              <p class="terminal-insight">{escape(str(llm["summary"]))}</p>
+            </article>
+            <article class="terminal-panel">
+              <div class="section-heading">
+                <h2>执行前风控</h2>
+                <p>{escape(str(risk["summary"]))}</p>
+              </div>
+              <div class="terminal-risk-board">
+                <div class="mini-stat"><span>Status</span><strong>{escape(str(risk["status"]))}</strong></div>
+                <div class="mini-stat"><span>Risk Score</span><strong>{float(risk["risk_score"]):.1f}</strong></div>
+                <div class="mini-stat"><span>Allowed</span><strong>{len(risk["allowed_symbols"])}</strong></div>
+                <div class="mini-stat"><span>Blocked</span><strong>{len(risk["blocked_symbols"])}</strong></div>
+              </div>
+              {_terminal_rows([{"symbol": symbol, "reason": reason} for symbol, reason in dict(risk["blocked_symbols"]).items()], [("Symbol", "symbol"), ("Reason", "reason")])}
+            </article>
+            <article class="terminal-panel">
+              <div class="section-heading">
+                <h2>交易所与热门情报</h2>
+                <p>公告、新闻、社区热度与信号引擎聚合。</p>
+              </div>
+              {_terminal_rows(intel_items, [("Source", "source"), ("Symbol", "symbol"), ("Title", "title"), ("Severity", "severity")])}
+            </article>
+            <article class="terminal-panel">
+              <div class="section-heading">
+                <h2>Twitter 账户监控</h2>
+                <p>运行配置中的 tracked accounts。</p>
+              </div>
+              {_terminal_rows(twitter_accounts, [("Account", "username"), ("Focus", "focus"), ("Mode", "mode"), ("Status", "status")])}
+            </article>
+            <article class="terminal-panel">
+              <div class="section-heading">
+                <h2>链上异动</h2>
+                <p>大额转账、交易所流入流出和量能代理。</p>
+              </div>
+              {_terminal_rows(onchain_events, [("Chain", "chain"), ("Symbol", "symbol"), ("Type", "event_type"), ("USD", "amount_usd"), ("Direction", "direction")])}
+            </article>
+            <article class="terminal-panel">
+              <div class="section-heading">
+                <h2>现货 / 合约价差</h2>
+                <p>用于套利、对冲和资金费率观察。</p>
+              </div>
+              {_terminal_rows(spreads, [("Symbol", "symbol"), ("Spot", "spot_exchange"), ("Futures", "futures_exchange"), ("Spread bps", "spread_bps"), ("Direction", "direction")])}
+            </article>
+            <article class="terminal-panel wide">
+              <div class="section-heading">
+                <h2>策略命中</h2>
+                <p>自动交易前的候选池和执行意图。</p>
+              </div>
+              {_terminal_rows(strategy_hits, [("Symbol", "symbol"), ("Strategy", "strategy"), ("Score", "score"), ("Grade", "grade"), ("Action", "action"), ("Reasons", "reasons")])}
+            </article>
+            <article class="terminal-panel">
+              <div class="section-heading">
+                <h2>策略目录</h2>
+                <p>已实现策略、触发条件和执行方式。</p>
+              </div>
+              {_terminal_rows(platform["strategies"], [("ID", "strategy_id"), ("Name", "name"), ("Status", "status"), ("Trigger", "trigger"), ("Execution", "execution")])}
+            </article>
+            <article class="terminal-panel">
+              <div class="section-heading">
+                <h2>风险规则</h2>
+                <p>执行层硬性约束和保护条件。</p>
+              </div>
+              {_terminal_rows(platform["risk_rules"], [("Rule", "name"), ("Status", "status"), ("Threshold", "threshold"), ("Action", "action")])}
+            </article>
+            <article class="terminal-panel wide">
+              <div class="section-heading">
+                <h2>交易日志</h2>
+                <p>自动交易执行、跳过、阻断和下单事件。</p>
+              </div>
+              {_terminal_rows(platform["recent_events"], [("Time", "created_at"), ("Action", "action"), ("Symbol", "symbol"), ("Status", "status"), ("Message", "message")])}
+            </article>
+          </section>
+        </div>
+      </section>
+    """
+    return _layout(
+        page_title="AI Trade Command Center",
+        active_page="terminal",
+        hero_title="交易所、社区、链上、价差和策略执行的统一总控台。",
+        hero_text="将关键交易所信息、热门社区情报、Twitter 账号、链上异动、现货合约价差和策略命中集中分析，并可交给自动交易引擎执行。",
+        hero_right=hero_right,
+        content=content,
+    )
+
+
 def _trading_position_rows(positions: list[dict[str, object]]) -> str:
     if not positions:
         return '<p class="helper-text">当前没有自动交易持仓。</p>'
@@ -404,6 +604,11 @@ def render_settings_page(
         <small>{escape(str(status["binance_auth_label"]))}</small>
       </div>
       <div class="stat-card">
+        <span>OKX Auth</span>
+        <strong>{"On" if status["okx_auth_configured"] else "Off"}</strong>
+        <small>cross-exchange ready</small>
+      </div>
+      <div class="stat-card">
         <span>X / Reddit</span>
         <strong>{"On" if status["x_auth_configured"] else "Mixed"}</strong>
         <small>{int(status["tracked_account_count"])} tracked accounts</small>
@@ -418,6 +623,11 @@ def render_settings_page(
         <strong>{"On" if status["autotrade_enabled"] else "Off"}</strong>
         <small>{escape(str(status["autotrade_mode"]))} execution</small>
       </div>
+      <div class="stat-card">
+        <span>Intelligence</span>
+        <strong>{"On" if status["intelligence_enabled"] else "Off"}</strong>
+        <small>{"LLM enabled" if status["llm_enabled"] else "local rules"}</small>
+      </div>
     """
     content = f"""
       <section class="control-panel">
@@ -431,10 +641,26 @@ def render_settings_page(
           <label><span>Binance API Secret</span><input type="password" name="binance_api_secret" value="" placeholder="留空保持当前" autocomplete="new-password" /></label>
           <label><span>Binance RecvWindow</span><input type="number" step="1" min="1" name="binance_recv_window_ms" value="{float(params['binance_recv_window_ms']):.0f}" /></label>
           <label class="inline-check"><input type="checkbox" name="clear_binance_auth" /><span>Clear Binance auth</span></label>
+          <label><span>OKX API Key</span><input type="password" name="okx_api_key" value="" placeholder="留空保持当前" autocomplete="new-password" /></label>
+          <label><span>OKX API Secret</span><input type="password" name="okx_api_secret" value="" placeholder="留空保持当前" autocomplete="new-password" /></label>
+          <label><span>OKX Passphrase</span><input type="password" name="okx_api_passphrase" value="" placeholder="留空保持当前" autocomplete="new-password" /></label>
+          <label class="inline-check"><input type="checkbox" name="clear_okx_auth" /><span>Clear OKX auth</span></label>
           <label><span>X Bearer Token</span><input type="password" name="x_bearer_token" value="" placeholder="留空保持当前" autocomplete="new-password" /></label>
           <label><span>Community Provider</span><select name="community_provider">{''.join(_option(item, str(params['community_provider'])) for item in ['auto', 'x', 'csv', 'news', 'telegram', 'reddit', 'x,csv', 'x,news', 'x,telegram', 'x,reddit', 'csv,news', 'csv,telegram', 'csv,reddit', 'news,telegram', 'news,reddit', 'telegram,reddit', 'x,csv,news', 'x,csv,telegram', 'x,csv,reddit', 'x,news,telegram', 'x,news,reddit', 'x,telegram,reddit', 'csv,news,telegram', 'csv,news,reddit', 'csv,telegram,reddit', 'news,telegram,reddit', 'x,csv,news,telegram', 'x,csv,news,reddit', 'x,csv,telegram,reddit', 'x,news,telegram,reddit', 'csv,news,telegram,reddit', 'x,csv,news,telegram,reddit'])}</select></label>
           <label><span>X API Base URL</span><input type="text" name="x_api_base_url" value="{escape(str(params['x_api_base_url']))}" /></label>
           <label class="inline-check"><input type="checkbox" name="clear_x_auth" /><span>Clear X auth</span></label>
+
+          <div class="settings-heading full-span">
+            <h2>Intelligence & LLM</h2>
+            <p>总控台会聚合交易所情报、Twitter 账号、链上异动、现货/合约价差和策略命中。未配置 OpenAI 时使用本地规则分析。</p>
+          </div>
+          <label class="inline-check"><input type="checkbox" name="intelligence_enabled" {"checked" if params["intelligence_enabled"] else ""} /><span>Enable intelligence center</span></label>
+          <label class="inline-check"><input type="checkbox" name="intelligence_llm_enabled" {"checked" if params["intelligence_llm_enabled"] else ""} /><span>Enable LLM analysis</span></label>
+          <label><span>OpenAI API Key</span><input type="password" name="openai_api_key" value="" placeholder="留空保持当前" autocomplete="new-password" /></label>
+          <label><span>OpenAI Model</span><input type="text" name="intelligence_openai_model" value="{escape(str(params['intelligence_openai_model']))}" /></label>
+          <label><span>Min Intel Severity</span><input type="number" step="0.1" min="0" max="100" name="intelligence_min_intel_severity" value="{float(params['intelligence_min_intel_severity']):.1f}" /></label>
+          <label><span>Min Spread bps</span><input type="number" step="0.1" min="0" name="intelligence_min_spread_bps" value="{float(params['intelligence_min_spread_bps']):.1f}" /></label>
+          <label><span>Whale Threshold USD</span><input type="number" step="100000" min="0" name="intelligence_whale_transfer_threshold_usd" value="{float(params['intelligence_whale_transfer_threshold_usd']):.0f}" /></label>
 
           <div class="settings-heading full-span">
             <h2>Twitter Intel</h2>

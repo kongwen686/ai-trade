@@ -1,0 +1,4 @@
+chain,symbol,event_type,amount_usd,direction,severity,tx_hash
+bitcoin,BTCUSDT,whale_transfer,12500000,exchange_outflow,88,example-btc-tx
+ethereum,ETHUSDT,stablecoin_mint,8200000,liquidity_expansion,74,example-eth-tx
+solana,SOLUSDT,large_transfer,5300000,exchange_inflow,69,example-sol-tx

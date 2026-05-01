@@ -59,22 +59,45 @@ class TradingStateStore:
         self.path = path
 
     def load(self) -> list[TradingPosition]:
-        if not self.path.exists():
-            return []
-        payload = json.loads(self.path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            return []
+        payload = self._load_payload()
         positions = payload.get("positions", [])
         if not isinstance(positions, list):
             return []
         return [self._position_from_dict(item) for item in positions if isinstance(item, dict)]
 
+    def load_events(self) -> list[TradingEvent]:
+        payload = self._load_payload()
+        events = payload.get("events", [])
+        if not isinstance(events, list):
+            return []
+        return [self._event_from_dict(item) for item in events if isinstance(item, dict)]
+
+    def _load_payload(self) -> dict[str, object]:
+        if not self.path.exists():
+            return {}
+        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return {}
+        return payload
+
     def save(self, positions: list[TradingPosition]) -> None:
+        existing_events = self.load_events()
+        self._write_state(positions, existing_events)
+
+    def append_events(self, events: list[TradingEvent], *, limit: int = 200) -> None:
+        if not events:
+            return
+        positions = self.load()
+        existing_events = self.load_events()
+        self._write_state(positions, [*existing_events, *events][-limit:])
+
+    def _write_state(self, positions: list[TradingPosition], events: list[TradingEvent]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "kind": "trading_state",
             "version": 1,
             "positions": [self._position_to_dict(position) for position in positions],
+            "events": [self._event_to_dict(event) for event in events],
         }
         self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -100,11 +123,41 @@ class TradingStateStore:
         payload["opened_at"] = position.opened_at.isoformat()
         return payload
 
+    @staticmethod
+    def _event_from_dict(payload: dict[str, object]) -> TradingEvent:
+        created_at = payload.get("created_at")
+        return TradingEvent(
+            action=str(payload.get("action", "")),
+            symbol=str(payload.get("symbol", "")),
+            mode=str(payload.get("mode", "paper")),
+            status=str(payload.get("status", "")),
+            message=str(payload.get("message", "")),
+            score=float(payload["score"]) if payload.get("score") is not None else None,
+            price=float(payload["price"]) if payload.get("price") is not None else None,
+            quantity=float(payload["quantity"]) if payload.get("quantity") is not None else None,
+            quote_notional=float(payload["quote_notional"]) if payload.get("quote_notional") is not None else None,
+            created_at=datetime.fromisoformat(str(created_at)) if created_at else datetime.now(timezone.utc),
+            response=payload.get("response") if isinstance(payload.get("response"), dict) else None,
+        )
+
+    @staticmethod
+    def _event_to_dict(event: TradingEvent) -> dict[str, object]:
+        payload = asdict(event)
+        payload["created_at"] = event.created_at.isoformat()
+        return payload
+
 
 class AutoTrader:
-    def __init__(self, *, scanner: SignalScanner, state_store: TradingStateStore) -> None:
+    def __init__(
+        self,
+        *,
+        scanner: SignalScanner,
+        state_store: TradingStateStore,
+        blocked_symbols: dict[str, str] | None = None,
+    ) -> None:
         self.scanner = scanner
         self.state_store = state_store
+        self.blocked_symbols = blocked_symbols or {}
 
     def run_once(self, config: AutoTradeDefaults) -> TradingRunReport:
         positions = self.state_store.load()
@@ -125,6 +178,7 @@ class AutoTrader:
                     message="自动交易未启用，仅完成信号扫描和仓位检查。",
                 )
             )
+            self.state_store.append_events(events)
             return TradingRunReport(
                 enabled=False,
                 mode=config.mode,
@@ -147,6 +201,7 @@ class AutoTrader:
                 )
             )
             self.state_store.save(positions)
+            self.state_store.append_events(events)
             return TradingRunReport(
                 enabled=True,
                 mode=config.mode,
@@ -172,6 +227,19 @@ class AutoTrader:
                 break
             if signal.symbol in open_symbols or signal.symbol in recent_symbols:
                 continue
+            if signal.symbol in self.blocked_symbols:
+                events.append(
+                    TradingEvent(
+                        action="SKIP",
+                        symbol=signal.symbol,
+                        mode=config.mode,
+                        status="risk_blocked",
+                        message=self.blocked_symbols[signal.symbol],
+                        score=signal.score,
+                        price=signal.ticker.last_price,
+                    )
+                )
+                continue
             if signal.score < config.score_threshold:
                 continue
             if signal.indicators.volume_ratio < config.min_volume_ratio:
@@ -187,6 +255,7 @@ class AutoTrader:
                 exposure += position.quote_notional
 
         self.state_store.save(positions)
+        self.state_store.append_events(events)
         return TradingRunReport(
             enabled=True,
             mode=config.mode,

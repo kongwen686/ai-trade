@@ -4,17 +4,19 @@
 [![License](https://img.shields.io/github/license/kongwen686/ai-trade)](./LICENSE)
 [![Repo](https://img.shields.io/badge/repo-public-1f8f57)](https://github.com/kongwen686/ai-trade)
 
-本项目是一个面向 Binance Spot 市场的本地交易信号与回测工作台。
+本项目是一个面向数字货币市场的本地量化交易工作台。
 
-它不负责自动下单，而是把这几件事放进同一套工具里：
+它把研究、监控、回测、模拟交易和受保护的实盘执行放进同一套工具里：
 
 - 实时扫描高流动性币种
 - 计算技术指标并打分
 - 接入 X/Twitter 舆情与指定情报账号
 - 用 Binance 历史 K 线做策略回测
-- 在 Web 界面里直接配置密钥、情报源和策略参数
+- 基于预测分数自动筛选策略命中并执行模拟交易
+- 在实盘保护条件满足时调用 Binance Spot 下单接口
+- 在 Web 界面里直接配置交易所密钥、情报源和策略参数
 
-如果你想要的是一个“可研究、可筛选、可验证”的本地信号系统，而不是黑盒喊单机器人，这个项目就是为这个方向写的。
+如果你想要的是一个“可研究、可筛选、可验证、可控执行”的本地量化系统，而不是黑盒喊单机器人，这个项目就是为这个方向写的。
 
 ## 功能概览
 
@@ -36,6 +38,21 @@
   - 本地 Telegram 情报 CSV 聚合
   - Reddit 公开搜索舆情
   - 社媒查询别名
+- 智能总控台
+  - 平台能力总览：接入层、策略层、执行层、数据层、风控层
+  - 交易所关键情报与热门信息监控
+  - Twitter/X tracked accounts 配置画像
+  - 链上大额异动和交易所流入 / 流出监控
+  - 现货 / 合约价差与跨市场 basis 分析
+  - 策略命中、自动交易候选和风控意图聚合
+  - Binance / OKX 账户接入状态与策略目录
+  - 支持 OpenAI Responses API 做综合指标分析，未配置时自动使用本地规则
+- 自动量化交易
+  - 根据综合评分、量能、买盘压力和智能风控生成候选
+  - 支持本地 paper 模拟交易
+  - 支持 Binance Spot live 市价单
+  - 支持 `order/test` 先校验订单参数
+  - 支持持仓持久化、止损、止盈、冷却、最大持仓和最大敞口
 - 历史回测
   - Binance public-data ZIP 读取
   - 单币种回测
@@ -47,8 +64,8 @@
   - 页面级权益对比图和 JSON / CSV 结果导出
   - 内建参数预设与策略组合模板
 - 运行配置
-  - Web 页面直接配置 Binance key、X token、情报账号和策略默认值
-- 保存后自动应用到扫描页和回测页
+  - Web 页面直接配置 Binance key、OKX key、X token、OpenAI key、情报账号和策略默认值
+  - 保存后自动应用到扫描页、总控台、自动交易页和回测页
   - 支持配置模板 JSON 导出 / 导入
 
 ## Web 入口
@@ -56,10 +73,17 @@
 启动后默认地址：
 
 - 实时扫描：`http://127.0.0.1:8000/`
+- 智能总控台：`http://127.0.0.1:8000/terminal`
 - 历史回测：`http://127.0.0.1:8000/backtest`
 - 运行配置：`http://127.0.0.1:8000/settings`
 - 自动量化：`http://127.0.0.1:8000/trading`
 - 扫描 API：`http://127.0.0.1:8000/api/scan`
+- 智能总控台 API：`http://127.0.0.1:8000/api/terminal/snapshot`
+- 平台能力 API：`http://127.0.0.1:8000/api/platform/capabilities`
+- 平台账户 API：`http://127.0.0.1:8000/api/platform/accounts`
+- 平台策略 API：`http://127.0.0.1:8000/api/platform/strategies`
+- 平台风控 API：`http://127.0.0.1:8000/api/platform/risk`
+- 平台日志 API：`http://127.0.0.1:8000/api/platform/logs`
 - 回测 API：`http://127.0.0.1:8000/api/backtest`
 - 自动交易 API：`POST http://127.0.0.1:8000/api/trading/run`
 
@@ -222,6 +246,35 @@ PYTHONPATH=src python3 -m trade_signal_app.autotrade --loop --interval-seconds 3
 ```bash
 trade-signal-autotrade --loop --interval-seconds 300
 ```
+
+## 智能总控台与外部情报
+
+`/terminal` 会把平台架构、功能实现状态、交易所信息、热门社区情报、Twitter/X 账号、链上异动、现货/合约价差、策略命中、自动交易意图、账户概览和风控规则放在同一个总控台里。
+
+本地数据源采用 CSV 插拔，复制示例文件即可启用：
+
+- `data/exchange_intel.example.csv` -> `data/exchange_intel.csv`
+- `data/onchain_events.example.csv` -> `data/onchain_events.csv`
+- `data/futures_basis.example.csv` -> `data/futures_basis.csv`
+
+对应环境变量：
+
+```bash
+export EXCHANGE_INTEL_CSV="data/exchange_intel.csv"
+export ONCHAIN_EVENTS_CSV="data/onchain_events.csv"
+export FUTURES_BASIS_CSV="data/futures_basis.csv"
+```
+
+大模型分析默认关闭。启用后会调用 OpenAI Responses API：
+
+```bash
+export OPENAI_API_KEY="your-openai-api-key"
+export OPENAI_MODEL="gpt-5.4"
+```
+
+也可以在 `/settings` 中配置 OpenAI Key、模型、情报严重度、最小价差和链上大额阈值。未配置 OpenAI Key 或调用失败时，系统会自动使用本地规则分析，不影响总控台运行。
+
+OKX 当前用于接入状态、账户配置、跨交易所监控和现货 / 合约价差观察；自动实盘下单走 Binance Spot 执行通道。实盘模式需要同时满足 API key、`AI_TRADE_LIVE_CONFIRM` 和关闭 `order/test` 保护。
 
 启用示例：
 

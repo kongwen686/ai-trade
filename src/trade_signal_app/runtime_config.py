@@ -13,7 +13,15 @@ from .config import AppSettings
 RUNTIME_CONFIG_TEMPLATE_VERSION = 1
 RUNTIME_CONFIG_ENCRYPTED_KIND = "runtime_config_encrypted"
 RUNTIME_CONFIG_ENCRYPTED_VERSION = 1
-SECRET_FIELDS = ("binance_api_key", "binance_api_secret", "x_bearer_token")
+SECRET_FIELDS = (
+    "binance_api_key",
+    "binance_api_secret",
+    "okx_api_key",
+    "okx_api_secret",
+    "okx_api_passphrase",
+    "x_bearer_token",
+    "openai_api_key",
+)
 
 
 def _pbkdf2_key_material(passphrase: str, salt: bytes) -> bytes:
@@ -140,10 +148,24 @@ class AutoTradeDefaults:
 
 
 @dataclass
+class IntelligenceDefaults:
+    enabled: bool = True
+    llm_enabled: bool = False
+    openai_api_key: str = ""
+    openai_model: str = "gpt-5.4"
+    min_intel_severity: float = 60.0
+    min_spread_bps: float = 12.0
+    whale_transfer_threshold_usd: float = 5_000_000.0
+
+
+@dataclass
 class RuntimeConfig:
     binance_api_key: str = ""
     binance_api_secret: str = ""
     binance_recv_window_ms: float = 5000.0
+    okx_api_key: str = ""
+    okx_api_secret: str = ""
+    okx_api_passphrase: str = ""
     community_provider: str = "auto"
     x_bearer_token: str = ""
     x_api_base_url: str = "https://api.x.com"
@@ -157,9 +179,12 @@ class RuntimeConfig:
     reddit_recent_window_hours: int = 24
     reddit_max_results: int = 25
     reddit_user_agent: str = "trade-signal-app/0.2"
+    openai_api_key: str = ""
+    openai_model: str = "gpt-5.4"
     scan_defaults: ScanDefaults = field(default_factory=ScanDefaults)
     backtest_defaults: BacktestDefaults = field(default_factory=BacktestDefaults)
     autotrade_defaults: AutoTradeDefaults = field(default_factory=AutoTradeDefaults)
+    intelligence_defaults: IntelligenceDefaults = field(default_factory=IntelligenceDefaults)
 
     @classmethod
     def default_from_settings(cls, settings: AppSettings) -> "RuntimeConfig":
@@ -167,6 +192,9 @@ class RuntimeConfig:
             binance_api_key=settings.binance_api_key,
             binance_api_secret=settings.binance_api_secret,
             binance_recv_window_ms=settings.binance_recv_window_ms,
+            okx_api_key=settings.okx_api_key,
+            okx_api_secret=settings.okx_api_secret,
+            okx_api_passphrase=settings.okx_api_passphrase,
             community_provider=settings.community_provider,
             x_bearer_token=settings.x_bearer_token,
             x_api_base_url=settings.x_api_base_url,
@@ -177,6 +205,8 @@ class RuntimeConfig:
             reddit_recent_window_hours=settings.reddit_recent_window_hours,
             reddit_max_results=settings.reddit_max_results,
             reddit_user_agent=settings.reddit_user_agent,
+            openai_api_key=settings.openai_api_key,
+            openai_model=settings.openai_model,
             scan_defaults=ScanDefaults(
                 quote_asset=settings.quote_asset,
                 interval=settings.interval,
@@ -192,10 +222,14 @@ class RuntimeConfig:
         scan_payload = payload.get("scan_defaults")
         backtest_payload = payload.get("backtest_defaults")
         autotrade_payload = payload.get("autotrade_defaults")
+        intelligence_payload = payload.get("intelligence_defaults")
         return cls(
             binance_api_key=str(payload.get("binance_api_key", defaults.binance_api_key)),
             binance_api_secret=str(payload.get("binance_api_secret", defaults.binance_api_secret)),
             binance_recv_window_ms=float(payload.get("binance_recv_window_ms", defaults.binance_recv_window_ms)),
+            okx_api_key=str(payload.get("okx_api_key", defaults.okx_api_key)),
+            okx_api_secret=str(payload.get("okx_api_secret", defaults.okx_api_secret)),
+            okx_api_passphrase=str(payload.get("okx_api_passphrase", defaults.okx_api_passphrase)),
             community_provider=str(payload.get("community_provider", defaults.community_provider)),
             x_bearer_token=str(payload.get("x_bearer_token", defaults.x_bearer_token)),
             x_api_base_url=str(payload.get("x_api_base_url", defaults.x_api_base_url)),
@@ -215,6 +249,8 @@ class RuntimeConfig:
             reddit_recent_window_hours=int(payload.get("reddit_recent_window_hours", defaults.reddit_recent_window_hours)),
             reddit_max_results=int(payload.get("reddit_max_results", defaults.reddit_max_results)),
             reddit_user_agent=str(payload.get("reddit_user_agent", defaults.reddit_user_agent)),
+            openai_api_key=str(payload.get("openai_api_key", defaults.openai_api_key)),
+            openai_model=str(payload.get("openai_model", defaults.openai_model)),
             scan_defaults=ScanDefaults(
                 **{
                     **asdict(defaults.scan_defaults),
@@ -233,6 +269,14 @@ class RuntimeConfig:
                     **(autotrade_payload if isinstance(autotrade_payload, dict) else {}),
                 }
             ),
+            intelligence_defaults=IntelligenceDefaults(
+                **{
+                    **asdict(defaults.intelligence_defaults),
+                    **(intelligence_payload if isinstance(intelligence_payload, dict) else {}),
+                    "openai_api_key": str(payload.get("openai_api_key", defaults.openai_api_key)),
+                    "openai_model": str(payload.get("openai_model", defaults.openai_model)),
+                }
+            ),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -243,6 +287,9 @@ class RuntimeConfig:
         if not include_secrets:
             for field_name in SECRET_FIELDS:
                 payload[field_name] = ""
+            intelligence_payload = payload.get("intelligence_defaults")
+            if isinstance(intelligence_payload, dict):
+                intelligence_payload["openai_api_key"] = ""
         return {
             "kind": "runtime_config_template",
             "version": RUNTIME_CONFIG_TEMPLATE_VERSION,

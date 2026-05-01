@@ -62,7 +62,7 @@ a {
 
 .platform-header {
   display: grid;
-  grid-template-columns: minmax(210px, 0.6fr) minmax(520px, 1.55fr) minmax(150px, 0.42fr);
+  grid-template-columns: minmax(210px, 0.55fr) minmax(650px, 1.6fr) minmax(150px, 0.4fr);
   gap: 14px;
   align-items: stretch;
   margin-bottom: 16px;
@@ -127,7 +127,7 @@ a {
 
 .top-nav {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -397,6 +397,166 @@ a {
 
 .trading-risk-grid {
   margin-top: 16px;
+}
+
+.terminal-shell {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  gap: 16px;
+}
+
+.terminal-sidebar,
+.terminal-panel,
+.terminal-kpi {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(17, 20, 22, 0.88);
+  box-shadow: var(--shadow);
+}
+
+.terminal-sidebar {
+  padding: 14px;
+  align-self: start;
+}
+
+.terminal-brand-block {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.terminal-brand-block strong {
+  color: var(--amber);
+  font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  font-size: 1.4rem;
+}
+
+.terminal-brand-block span {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.terminal-menu {
+  display: grid;
+  gap: 8px;
+}
+
+.terminal-menu span {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  padding: 9px 10px;
+  border-radius: 8px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.terminal-menu span.active {
+  color: #061012;
+  background: linear-gradient(135deg, var(--cyan), var(--green));
+}
+
+.terminal-main {
+  min-width: 0;
+}
+
+.terminal-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.terminal-panel {
+  min-width: 0;
+  padding: 16px;
+  overflow-x: auto;
+}
+
+.terminal-panel.wide {
+  grid-column: 1 / -1;
+}
+
+.terminal-layers {
+  display: grid;
+  gap: 12px;
+}
+
+.terminal-layer {
+  display: grid;
+  grid-template-columns: 110px repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(236, 244, 239, 0.04);
+}
+
+.terminal-layer strong {
+  color: var(--amber);
+}
+
+.terminal-layer span {
+  display: inline-flex;
+  justify-content: center;
+  min-height: 34px;
+  padding: 8px;
+  border-radius: 8px;
+  color: var(--ink);
+  background: rgba(80, 215, 232, 0.08);
+  border: 1px solid var(--line);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.terminal-kpi {
+  display: grid;
+  align-content: center;
+  min-height: 86px;
+  padding: 14px;
+}
+
+.terminal-kpi span,
+.terminal-kpi small {
+  color: var(--muted);
+}
+
+.terminal-kpi strong {
+  display: block;
+  margin: 4px 0;
+  font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  font-size: 1.85rem;
+}
+
+.terminal-kpi.green strong {
+  color: var(--green);
+}
+
+.terminal-kpi.amber strong {
+  color: var(--amber);
+}
+
+.terminal-kpi.cyan strong {
+  color: var(--cyan);
+}
+
+.terminal-table td {
+  max-width: 300px;
+}
+
+.terminal-insight {
+  margin: 0;
+  color: var(--ink);
+  line-height: 1.7;
+}
+
+.terminal-risk-board {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
 }
 
 .backtest-form .full-span {
@@ -877,6 +1037,10 @@ a {
   .filters,
   .backtest-form,
   .trading-command,
+  .terminal-shell,
+  .terminal-grid,
+  .terminal-layer,
+  .terminal-risk-board,
   .mini-stat-grid,
   .compact-grid {
     grid-template-columns: 1fr;

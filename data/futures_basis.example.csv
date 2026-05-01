@@ -1,0 +1,4 @@
+symbol,spot_exchange,futures_exchange,spot_price,futures_price,spread_bps,direction
+BTCUSDT,BINANCE,BINANCE-PERP,68739.90,68864.10,18.07,long_spot_short_perp
+ETHUSDT,BINANCE,OKX-SWAP,3456.78,3465.12,24.13,long_spot_short_perp
+SOLUSDT,BINANCE,BINANCE-PERP,167.34,166.92,-25.10,short_spot_long_perp

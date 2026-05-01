@@ -23,7 +23,7 @@ from trade_signal_app.main import (
 )
 from trade_signal_app.presets import list_backtest_presets
 from trade_signal_app.runtime_config import RuntimeConfig
-from trade_signal_app.views import render_backtest_page, render_settings_page, render_trading_page
+from trade_signal_app.views import render_backtest_page, render_settings_page, render_terminal_page, render_trading_page
 
 
 def _build_archive(path: Path) -> None:
@@ -236,6 +236,7 @@ class MainTests(unittest.TestCase):
                 "reddit_recent_window_hours": 24,
                 "reddit_max_results": 25,
                 "reddit_user_agent": "trade-signal-app/0.2",
+                "openai_model": "gpt-5.4",
                 "x_account_mode": "blend",
                 "x_account_weight_pct": 35.0,
                 "x_tracked_accounts": ["lookonchain", "wu_blockchain"],
@@ -256,6 +257,12 @@ class MainTests(unittest.TestCase):
                 "autotrade_take_profit_pct": 9.0,
                 "autotrade_cooldown_minutes": 240,
                 "autotrade_order_test_only": True,
+                "intelligence_enabled": True,
+                "intelligence_llm_enabled": False,
+                "intelligence_openai_model": "gpt-5.4",
+                "intelligence_min_intel_severity": 60.0,
+                "intelligence_min_spread_bps": 12.0,
+                "intelligence_whale_transfer_threshold_usd": 5_000_000.0,
                 "backtest_archives": "data/spot/monthly/klines/*/4h/*.zip",
                 "backtest_preset": "balanced_swing",
                 "backtest_lookback_bars": 240,
@@ -292,11 +299,14 @@ class MainTests(unittest.TestCase):
             status={
                 "binance_auth_configured": True,
                 "binance_auth_label": "API key + secret 已配置",
+                "okx_auth_configured": False,
                 "x_auth_configured": True,
                 "tracked_account_count": 2,
                 "storage_mode": "Encrypted",
                 "autotrade_enabled": False,
                 "autotrade_mode": "paper",
+                "intelligence_enabled": True,
+                "llm_enabled": False,
             },
             message="运行配置已保存。",
             error=None,
@@ -305,6 +315,7 @@ class MainTests(unittest.TestCase):
 
         self.assertIn("Runtime Settings", html)
         self.assertIn("Binance API Key", html)
+        self.assertIn("OKX API Key", html)
         self.assertIn("Twitter Intel", html)
         self.assertIn("Tracked Accounts", html)
         self.assertIn("Backtest Defaults", html)
@@ -315,8 +326,88 @@ class MainTests(unittest.TestCase):
         self.assertIn("Reddit User-Agent", html)
         self.assertIn("Default Preset", html)
         self.assertIn("Auto Trade Defaults", html)
+        self.assertIn("Intelligence & LLM", html)
         self.assertIn("Encrypted", html)
         self.assertIn("RUNTIME_CONFIG_PASSPHRASE", html)
+
+    def test_render_terminal_page_includes_intelligence_sections(self) -> None:
+        html = render_terminal_page(
+            {
+                "generated_at": "2026-04-28T00:00:00+00:00",
+                "scanned_symbols": 12,
+                "returned_signals": 4,
+                "intel_items": [{"source": "binance", "symbol": "BTCUSDT", "title": "Key market update", "severity": 88.0}],
+                "twitter_accounts": [{"username": "lookonchain", "focus": "链上异动", "mode": "blend", "status": "configured"}],
+                "onchain_events": [{"chain": "bitcoin", "symbol": "BTCUSDT", "event_type": "whale", "amount_usd": 9_000_000.0, "direction": "outflow"}],
+                "spreads": [{"symbol": "BTCUSDT", "spot_exchange": "BINANCE", "futures_exchange": "BINANCE-PERP", "spread_bps": 18.0, "direction": "basis"}],
+                "strategy_hits": [{"symbol": "BTCUSDT", "strategy": "auto_score_breakout", "score": 82.0, "grade": "A", "action": "watch", "reasons": ["趋势结构改善"]}],
+                "llm_insight": {"provider": "local", "model": "rules", "status": "ok", "summary": "综合监控正常。"},
+                "execution_risk": {
+                    "status": "clear",
+                    "risk_score": 22.0,
+                    "allowed_symbols": ["BTCUSDT"],
+                    "blocked_symbols": {},
+                    "summary": "执行前风控：允许 1 个候选。",
+                },
+                "platform": {
+                    "generated_at": "2026-04-28T00:00:00+00:00",
+                    "components": [
+                        {
+                            "layer": "接入层",
+                            "name": "Binance API",
+                            "status": "ready",
+                            "capability": "现货行情、账户费率、实盘市价单",
+                            "endpoint": "/api/scan",
+                        }
+                    ],
+                    "accounts": [
+                        {
+                            "exchange": "BINANCE",
+                            "mode": "paper",
+                            "status": "paper_ready",
+                            "open_positions": 0,
+                            "quote_exposure": 0.0,
+                        }
+                    ],
+                    "strategies": [
+                        {
+                            "strategy_id": "auto_score_breakout",
+                            "name": "综合评分突破",
+                            "status": "watch_only",
+                            "trigger": "score >= 75.0",
+                            "execution": "paper/live 市价买入",
+                        }
+                    ],
+                    "risk_rules": [
+                        {
+                            "name": "最大持仓数",
+                            "status": "active",
+                            "threshold": "3",
+                            "action": "拒绝新开仓",
+                        }
+                    ],
+                    "recent_events": [
+                        {
+                            "created_at": "2026-04-28T00:00:00+00:00",
+                            "action": "watch",
+                            "symbol": "BTCUSDT",
+                            "status": "skipped",
+                            "message": "risk gate clear",
+                        }
+                    ],
+                },
+            }
+        )
+
+        self.assertIn("AI Trade Command Center", html)
+        self.assertIn("交易所与热门情报", html)
+        self.assertIn("链上异动", html)
+        self.assertIn("现货 / 合约价差", html)
+        self.assertIn("策略命中", html)
+        self.assertIn("执行前风控", html)
+        self.assertIn("功能实现状态", html)
+        self.assertIn("交易账户概览", html)
+        self.assertIn("策略目录", html)
 
     def test_render_trading_page_includes_execution_controls(self) -> None:
         html = render_trading_page(
@@ -347,6 +438,9 @@ class MainTests(unittest.TestCase):
         current = RuntimeConfig()
         current.binance_api_key = "keep-key"
         current.binance_api_secret = "keep-secret"
+        current.okx_api_key = "keep-okx-key"
+        current.okx_api_secret = "keep-okx-secret"
+        current.okx_api_passphrase = "keep-okx-pass"
         current.x_bearer_token = "keep-x-token"
 
         with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(current, None)):
@@ -382,6 +476,13 @@ class MainTests(unittest.TestCase):
                     "autotrade_take_profit_pct": ["8"],
                     "autotrade_cooldown_minutes": ["180"],
                     "autotrade_order_test_only": ["on"],
+                    "intelligence_enabled": ["on"],
+                    "intelligence_llm_enabled": ["on"],
+                    "openai_api_key": ["test-openai-key"],
+                    "intelligence_openai_model": ["gpt-5.4"],
+                    "intelligence_min_intel_severity": ["68"],
+                    "intelligence_min_spread_bps": ["15"],
+                    "intelligence_whale_transfer_threshold_usd": ["7000000"],
                     "backtest_archives": ["/tmp/example.zip"],
                     "backtest_preset": ["portfolio_rotation"],
                     "backtest_lookback_bars": ["120"],
@@ -419,6 +520,9 @@ class MainTests(unittest.TestCase):
 
         self.assertEqual(config.binance_api_key, "keep-key")
         self.assertEqual(config.binance_api_secret, "keep-secret")
+        self.assertEqual(config.okx_api_key, "keep-okx-key")
+        self.assertEqual(config.okx_api_secret, "keep-okx-secret")
+        self.assertEqual(config.okx_api_passphrase, "keep-okx-pass")
         self.assertEqual(config.x_bearer_token, "keep-x-token")
         self.assertEqual(config.x_account_mode, "blend")
         self.assertEqual(config.x_tracked_accounts, ["@lookonchain", "wu_blockchain"])
@@ -430,6 +534,10 @@ class MainTests(unittest.TestCase):
         self.assertTrue(config.autotrade_defaults.enabled)
         self.assertEqual(config.autotrade_defaults.quote_order_qty, 30.0)
         self.assertEqual(config.autotrade_defaults.max_open_positions, 2)
+        self.assertTrue(config.intelligence_defaults.enabled)
+        self.assertTrue(config.intelligence_defaults.llm_enabled)
+        self.assertEqual(config.intelligence_defaults.openai_api_key, "test-openai-key")
+        self.assertEqual(config.intelligence_defaults.min_spread_bps, 15.0)
         self.assertEqual(config.backtest_defaults.fee_source, "account")
         self.assertTrue(config.backtest_defaults.no_binance_discount)
         self.assertTrue(config.backtest_defaults.no_kdj_confirmation)
@@ -438,6 +546,9 @@ class MainTests(unittest.TestCase):
         current = RuntimeConfig()
         current.binance_api_key = "keep-key"
         current.binance_api_secret = "keep-secret"
+        current.okx_api_key = "keep-okx-key"
+        current.okx_api_secret = "keep-okx-secret"
+        current.okx_api_passphrase = "keep-okx-pass"
         current.x_bearer_token = "keep-token"
 
         with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(current, None)):
@@ -451,6 +562,9 @@ class MainTests(unittest.TestCase):
 
         self.assertEqual(imported.binance_api_key, "keep-key")
         self.assertEqual(imported.binance_api_secret, "keep-secret")
+        self.assertEqual(imported.okx_api_key, "keep-okx-key")
+        self.assertEqual(imported.okx_api_secret, "keep-okx-secret")
+        self.assertEqual(imported.okx_api_passphrase, "keep-okx-pass")
         self.assertEqual(imported.x_bearer_token, "keep-token")
         self.assertEqual(imported.scan_defaults.quote_asset, "FDUSD")
 
@@ -458,6 +572,9 @@ class MainTests(unittest.TestCase):
         current = RuntimeConfig()
         current.binance_api_key = "keep-key"
         current.binance_api_secret = "keep-secret"
+        current.okx_api_key = "keep-okx-key"
+        current.okx_api_secret = "keep-okx-secret"
+        current.okx_api_passphrase = "keep-okx-pass"
         current.x_bearer_token = "keep-token"
 
         with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(current, None)):
@@ -465,6 +582,9 @@ class MainTests(unittest.TestCase):
 
         self.assertEqual(payload["config"]["binance_api_key"], "")
         self.assertEqual(payload["config"]["binance_api_secret"], "")
+        self.assertEqual(payload["config"]["okx_api_key"], "")
+        self.assertEqual(payload["config"]["okx_api_secret"], "")
+        self.assertEqual(payload["config"]["okx_api_passphrase"], "")
         self.assertEqual(payload["config"]["x_bearer_token"], "")
 
     def test_backtest_export_csv_contains_core_rows(self) -> None:

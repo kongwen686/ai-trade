@@ -21,12 +21,14 @@ from .backtest import (
     run_portfolio_backtest,
 )
 from .config import BASE_DIR, SETTINGS
+from .intelligence import IntelligenceHub, IntelligenceSnapshot
+from .platform import build_platform_snapshot
 from .presets import apply_backtest_preset, list_backtest_presets
-from .runtime_config import AutoTradeDefaults, BacktestDefaults, RuntimeConfig, ScanDefaults
+from .runtime_config import AutoTradeDefaults, BacktestDefaults, IntelligenceDefaults, RuntimeConfig, ScanDefaults
 from .strategy import EntryRuleConfig, ExecutionConfig, ExitRuleConfig
 from .trading import AutoTrader, TradingEvent, TradingPosition, TradingRunReport, TradingStateStore
 from .ui import format_backtest_report, format_portfolio_report, format_signal_row
-from .views import render_backtest_page, render_index_page, render_settings_page, render_trading_page
+from .views import render_backtest_page, render_index_page, render_settings_page, render_terminal_page, render_trading_page
 
 RUNTIME_CONFIG_PATH = BASE_DIR / "data" / "runtime_config.json"
 TRADING_STATE_PATH = BASE_DIR / "data" / "trading_state.json"
@@ -115,8 +117,10 @@ def _backtest_params_from_config(config: RuntimeConfig) -> dict[str, object]:
 def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
     backtest = _backtest_params_from_config(config)
     autotrade = config.autotrade_defaults
+    intelligence = config.intelligence_defaults
     return {
         "binance_recv_window_ms": config.binance_recv_window_ms,
+        "okx_auth_configured": bool(config.okx_api_key and config.okx_api_secret and config.okx_api_passphrase),
         "community_provider": config.community_provider,
         "x_api_base_url": config.x_api_base_url,
         "x_recent_window_hours": config.x_recent_window_hours,
@@ -126,6 +130,7 @@ def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "reddit_recent_window_hours": config.reddit_recent_window_hours,
         "reddit_max_results": config.reddit_max_results,
         "reddit_user_agent": config.reddit_user_agent,
+        "openai_model": config.openai_model,
         "x_account_mode": config.x_account_mode,
         "x_account_weight_pct": config.x_account_weight_pct,
         "x_tracked_accounts": config.x_tracked_accounts,
@@ -146,6 +151,12 @@ def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "autotrade_take_profit_pct": autotrade.take_profit_pct,
         "autotrade_cooldown_minutes": autotrade.cooldown_minutes,
         "autotrade_order_test_only": autotrade.order_test_only,
+        "intelligence_enabled": intelligence.enabled,
+        "intelligence_llm_enabled": intelligence.llm_enabled,
+        "intelligence_openai_model": intelligence.openai_model,
+        "intelligence_min_intel_severity": intelligence.min_intel_severity,
+        "intelligence_min_spread_bps": intelligence.min_spread_bps,
+        "intelligence_whale_transfer_threshold_usd": intelligence.whale_transfer_threshold_usd,
         **{f"backtest_{key}": value for key, value in backtest.items()},
     }
 
@@ -154,11 +165,14 @@ def _settings_status_from_config(config: RuntimeConfig) -> dict[str, object]:
     return {
         "binance_auth_configured": bool(config.binance_api_key and config.binance_api_secret),
         "binance_auth_label": "API key + secret 已配置" if config.binance_api_key and config.binance_api_secret else "未配置",
+        "okx_auth_configured": bool(config.okx_api_key and config.okx_api_secret and config.okx_api_passphrase),
         "x_auth_configured": bool(config.x_bearer_token),
         "tracked_account_count": len(config.x_tracked_accounts),
         "storage_mode": APP_STATE.storage_mode_label(),
         "autotrade_enabled": config.autotrade_defaults.enabled,
         "autotrade_mode": config.autotrade_defaults.mode,
+        "intelligence_enabled": config.intelligence_defaults.enabled,
+        "llm_enabled": config.intelligence_defaults.llm_enabled,
     }
 
 
@@ -222,18 +236,46 @@ def _serialize_trading_report(report: TradingRunReport) -> dict[str, object]:
 
 def _trading_status_payload() -> dict[str, object]:
     runtime_config, _ = APP_STATE.snapshot()
-    positions = _trading_store().load()
+    store = _trading_store()
+    positions = store.load()
+    events = store.load_events()
     return {
         "config": _to_jsonable(runtime_config.autotrade_defaults),
         "open_positions": [_serialize_trading_position(position) for position in positions],
-        "events": [],
+        "events": [_serialize_trading_event(event) for event in events[-30:]],
     }
 
 
 def _run_trading_once() -> dict[str, object]:
     runtime_config, scanner = APP_STATE.snapshot()
-    trader = AutoTrader(scanner=scanner, state_store=_trading_store())
+    risk_snapshot = IntelligenceHub(scanner=scanner, runtime_config=runtime_config, settings=SETTINGS).snapshot()
+    blocked_symbols = risk_snapshot.execution_risk.blocked_symbols
+    trader = AutoTrader(scanner=scanner, state_store=_trading_store(), blocked_symbols=blocked_symbols)
     return _serialize_trading_report(trader.run_once(runtime_config.autotrade_defaults))
+
+
+def _serialize_intelligence_snapshot(snapshot: IntelligenceSnapshot) -> dict[str, object]:
+    return _to_jsonable(snapshot)
+
+
+def _platform_payload() -> dict[str, object]:
+    runtime_config, _ = APP_STATE.snapshot()
+    store = _trading_store()
+    snapshot = build_platform_snapshot(
+        config=runtime_config,
+        positions=store.load(),
+        events=store.load_events(),
+    )
+    return _to_jsonable(snapshot)
+
+
+def _terminal_payload() -> dict[str, object]:
+    runtime_config, scanner = APP_STATE.snapshot()
+    hub = IntelligenceHub(scanner=scanner, runtime_config=runtime_config, settings=SETTINGS)
+    return {
+        **_serialize_intelligence_snapshot(hub.snapshot()),
+        "platform": _platform_payload(),
+    }
 
 
 def _import_runtime_config_template(form: dict[str, list[str]]) -> RuntimeConfig:
@@ -479,6 +521,9 @@ def _build_runtime_config(form: dict[str, list[str]]) -> RuntimeConfig:
     current_config, _ = APP_STATE.snapshot()
     keep_binance_key = current_config.binance_api_key
     keep_binance_secret = current_config.binance_api_secret
+    keep_okx_key = current_config.okx_api_key
+    keep_okx_secret = current_config.okx_api_secret
+    keep_okx_passphrase = current_config.okx_api_passphrase
     keep_x_bearer_token = current_config.x_bearer_token
     if _parse_bool_flag(form, "clear_binance_auth"):
         keep_binance_key = ""
@@ -490,6 +535,20 @@ def _build_runtime_config(form: dict[str, list[str]]) -> RuntimeConfig:
         candidate = _get_first(form, "binance_api_secret", "").strip()
         if candidate:
             keep_binance_secret = candidate
+    if _parse_bool_flag(form, "clear_okx_auth"):
+        keep_okx_key = ""
+        keep_okx_secret = ""
+        keep_okx_passphrase = ""
+    else:
+        candidate = _get_first(form, "okx_api_key", "").strip()
+        if candidate:
+            keep_okx_key = candidate
+        candidate = _get_first(form, "okx_api_secret", "").strip()
+        if candidate:
+            keep_okx_secret = candidate
+        candidate = _get_first(form, "okx_api_passphrase", "").strip()
+        if candidate:
+            keep_okx_passphrase = candidate
     if _parse_bool_flag(form, "clear_x_auth"):
         keep_x_bearer_token = ""
     else:
@@ -501,6 +560,9 @@ def _build_runtime_config(form: dict[str, list[str]]) -> RuntimeConfig:
         binance_api_key=keep_binance_key,
         binance_api_secret=keep_binance_secret,
         binance_recv_window_ms=_parse_float_value(_get_first(form, "binance_recv_window_ms", str(current_config.binance_recv_window_ms)), "Binance RecvWindow"),
+        okx_api_key=keep_okx_key,
+        okx_api_secret=keep_okx_secret,
+        okx_api_passphrase=keep_okx_passphrase,
         community_provider=_get_first(form, "community_provider", current_config.community_provider).strip() or "auto",
         x_bearer_token=keep_x_bearer_token,
         x_api_base_url=_get_first(form, "x_api_base_url", current_config.x_api_base_url).strip() or current_config.x_api_base_url,
@@ -514,6 +576,8 @@ def _build_runtime_config(form: dict[str, list[str]]) -> RuntimeConfig:
         x_account_mode=_get_first(form, "x_account_mode", current_config.x_account_mode).strip() or current_config.x_account_mode,
         x_account_weight_pct=_parse_float_value(_get_first(form, "x_account_weight_pct", str(current_config.x_account_weight_pct)), "Account Weight"),
         x_tracked_accounts=_parse_multiline_list(_get_first(form, "x_tracked_accounts", "\n".join(current_config.x_tracked_accounts))),
+        openai_api_key=_get_first(form, "openai_api_key", "").strip() or current_config.openai_api_key,
+        openai_model=_get_first(form, "intelligence_openai_model", current_config.openai_model).strip() or current_config.openai_model,
         scan_defaults=ScanDefaults(
             quote_asset=_get_first(form, "scan_quote_asset", current_config.scan_defaults.quote_asset).strip().upper() or current_config.scan_defaults.quote_asset,
             interval=_get_first(form, "scan_interval", current_config.scan_defaults.interval).strip() or current_config.scan_defaults.interval,
@@ -534,6 +598,15 @@ def _build_runtime_config(form: dict[str, list[str]]) -> RuntimeConfig:
             take_profit_pct=_parse_float_value(_get_first(form, "autotrade_take_profit_pct", str(current_config.autotrade_defaults.take_profit_pct)), "Auto Trade Take Profit"),
             cooldown_minutes=_parse_int_value(_get_first(form, "autotrade_cooldown_minutes", str(current_config.autotrade_defaults.cooldown_minutes)), "Auto Trade Cooldown"),
             order_test_only=_parse_bool_flag(form, "autotrade_order_test_only"),
+        ),
+        intelligence_defaults=IntelligenceDefaults(
+            enabled=_parse_bool_flag(form, "intelligence_enabled"),
+            llm_enabled=_parse_bool_flag(form, "intelligence_llm_enabled"),
+            openai_api_key=_get_first(form, "openai_api_key", "").strip() or current_config.openai_api_key,
+            openai_model=_get_first(form, "intelligence_openai_model", current_config.openai_model).strip() or current_config.openai_model,
+            min_intel_severity=_parse_float_value(_get_first(form, "intelligence_min_intel_severity", str(current_config.intelligence_defaults.min_intel_severity)), "Intelligence Min Severity"),
+            min_spread_bps=_parse_float_value(_get_first(form, "intelligence_min_spread_bps", str(current_config.intelligence_defaults.min_spread_bps)), "Intelligence Min Spread"),
+            whale_transfer_threshold_usd=_parse_float_value(_get_first(form, "intelligence_whale_transfer_threshold_usd", str(current_config.intelligence_defaults.whale_transfer_threshold_usd)), "Whale Transfer Threshold"),
         ),
         backtest_defaults=BacktestDefaults(
             preset=_get_first(form, "backtest_preset", current_config.backtest_defaults.preset).strip() or "custom",
@@ -589,6 +662,58 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_text(html, content_type="text/html; charset=utf-8")
                 return
 
+            if parsed.path == "/terminal":
+                payload = _terminal_payload()
+                html = render_terminal_page(payload)
+                self._send_text(html, content_type="text/html; charset=utf-8")
+                return
+
+            if parsed.path == "/api/terminal/snapshot":
+                self._send_text(
+                    json.dumps(_terminal_payload(), ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            if parsed.path == "/api/platform/capabilities":
+                self._send_text(
+                    json.dumps(_platform_payload(), ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            if parsed.path == "/api/platform/accounts":
+                payload = _platform_payload()
+                self._send_text(
+                    json.dumps({"accounts": payload["accounts"]}, ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            if parsed.path == "/api/platform/strategies":
+                payload = _platform_payload()
+                self._send_text(
+                    json.dumps({"strategies": payload["strategies"]}, ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            if parsed.path == "/api/platform/risk":
+                payload = _platform_payload()
+                self._send_text(
+                    json.dumps({"risk_rules": payload["risk_rules"]}, ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            if parsed.path == "/api/platform/logs":
+                payload = _platform_payload()
+                self._send_text(
+                    json.dumps({"events": payload["recent_events"]}, ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
             if parsed.path == "/api/scan":
                 payload, _ = _scan_payload(query)
                 self._send_text(
@@ -614,7 +739,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 html = render_trading_page(
                     config=payload["config"],
                     positions=payload["open_positions"],
-                    events=[],
+                    events=payload["events"],
                 )
                 self._send_text(html, content_type="text/html; charset=utf-8")
                 return

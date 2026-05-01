@@ -54,6 +54,11 @@ class AppState:
             binance_api_key=config.binance_api_key,
             binance_api_secret=config.binance_api_secret,
             binance_recv_window_ms=config.binance_recv_window_ms,
+            okx_api_key=config.okx_api_key,
+            okx_api_secret=config.okx_api_secret,
+            okx_api_passphrase=config.okx_api_passphrase,
+            openai_api_key=config.openai_api_key,
+            openai_model=config.openai_model,
         )
         gateway = BinanceSpotGateway(
             ttl_seconds=effective_settings.scan_ttl_seconds,

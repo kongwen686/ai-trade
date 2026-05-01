@@ -65,7 +65,11 @@ class RuntimeConfigTests(unittest.TestCase):
         config = RuntimeConfig()
         config.binance_api_key = "binance-key"
         config.binance_api_secret = "binance-secret"
+        config.okx_api_key = "okx-key"
+        config.okx_api_secret = "okx-secret"
+        config.okx_api_passphrase = "okx-pass"
         config.x_bearer_token = "x-token"
+        config.openai_api_key = "openai-key"
 
         payload = config.to_template_payload()
 
@@ -73,14 +77,23 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertFalse(payload["include_secrets"])
         self.assertEqual(payload["config"]["binance_api_key"], "")
         self.assertEqual(payload["config"]["binance_api_secret"], "")
+        self.assertEqual(payload["config"]["okx_api_key"], "")
+        self.assertEqual(payload["config"]["okx_api_secret"], "")
+        self.assertEqual(payload["config"]["okx_api_passphrase"], "")
         self.assertEqual(payload["config"]["x_bearer_token"], "")
+        self.assertEqual(payload["config"]["openai_api_key"], "")
+        self.assertEqual(payload["config"]["intelligence_defaults"]["openai_api_key"], "")
 
     def test_template_import_preserves_current_secrets_when_missing(self) -> None:
         settings = AppSettings()
         current = RuntimeConfig()
         current.binance_api_key = "keep-key"
         current.binance_api_secret = "keep-secret"
+        current.okx_api_key = "keep-okx-key"
+        current.okx_api_secret = "keep-okx-secret"
+        current.okx_api_passphrase = "keep-okx-pass"
         current.x_bearer_token = "keep-token"
+        current.openai_api_key = "keep-openai"
 
         imported = RuntimeConfig.from_template_payload(
             {
@@ -89,7 +102,11 @@ class RuntimeConfigTests(unittest.TestCase):
                 "config": {
                     "binance_api_key": "",
                     "binance_api_secret": "",
+                    "okx_api_key": "",
+                    "okx_api_secret": "",
+                    "okx_api_passphrase": "",
                     "x_bearer_token": "",
+                    "openai_api_key": "",
                     "scan_defaults": {"quote_asset": "FDUSD"},
                 },
             },
@@ -99,7 +116,11 @@ class RuntimeConfigTests(unittest.TestCase):
 
         self.assertEqual(imported.binance_api_key, "keep-key")
         self.assertEqual(imported.binance_api_secret, "keep-secret")
+        self.assertEqual(imported.okx_api_key, "keep-okx-key")
+        self.assertEqual(imported.okx_api_secret, "keep-okx-secret")
+        self.assertEqual(imported.okx_api_passphrase, "keep-okx-pass")
         self.assertEqual(imported.x_bearer_token, "keep-token")
+        self.assertEqual(imported.openai_api_key, "keep-openai")
         self.assertEqual(imported.scan_defaults.quote_asset, "FDUSD")
 
 
