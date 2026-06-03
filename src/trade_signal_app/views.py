@@ -41,6 +41,15 @@ def _language_switch(lang: str, current_path: str) -> str:
     """
 
 
+def _tool_icon(name: str) -> str:
+    icons = {
+        "snapshot": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16M7 4v16M17 4v16"/></svg>',
+        "settings": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"/><path d="m19.4 15-.7 1.3 1 2-1.4 1.4-2-1-1.3.7-.7 2.1h-2l-.7-2.1-1.3-.7-2 1-1.4-1.4 1-2-.7-1.3-2.1-.7v-2l2.1-.7.7-1.3-1-2 1.4-1.4 2 1 1.3-.7.7-2.1h2l.7 2.1 1.3.7 2-1 1.4 1.4-1 2 .7 1.3 2.1.7v2l-2.1.7Z"/></svg>',
+        "alerts": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4 3 20h18L12 4Z"/><path d="M12 9v5M12 17h.01"/></svg>',
+    }
+    return icons[name]
+
+
 _VALUE_LABELS = {
     "zh": {
         "ready": "就绪",
@@ -335,9 +344,10 @@ def _layout(
             {_top_nav(active_page, active_lang)}
           </nav>
           <div class="top-actions" aria-label="Runtime tools">
-            <a class="tool-button" href="{escape(_url('/api/terminal/snapshot', active_lang))}" title="Snapshot">S</a>
-            <a class="tool-button" href="{escape(_url('/settings', active_lang))}" title="Settings">C</a>
-            <span class="tool-button is-alert">3</span>
+            <a class="tool-button" href="{escape(_url('/api/terminal/snapshot', active_lang))}" title="Snapshot" aria-label="Snapshot">{_tool_icon("snapshot")}</a>
+            <a class="tool-button" href="{escape(_url('/settings', active_lang))}" title="Settings" aria-label="Settings">{_tool_icon("settings")}</a>
+            <span class="tool-button is-alert" title="Alerts" aria-label="3 alerts">{_tool_icon("alerts")}<em>3</em></span>
+            {_language_switch(active_lang, current_path)}
             <div class="user-chip">
               <span>quant_admin</span>
               <small>{_text(active_lang, "超级管理员", "Super Admin")}</small>

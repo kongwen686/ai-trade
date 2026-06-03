@@ -1113,9 +1113,9 @@ a {
 /* Quant terminal shell upgrade */
 body {
   background:
-    radial-gradient(circle at 14% 0%, rgba(32, 111, 255, 0.18), transparent 34%),
-    radial-gradient(circle at 94% 4%, rgba(71, 209, 140, 0.10), transparent 30%),
-    linear-gradient(135deg, #040810 0%, #07111d 46%, #061018 100%);
+    radial-gradient(circle at 10% 0%, rgba(32, 111, 255, 0.12), transparent 28%),
+    radial-gradient(circle at 96% 2%, rgba(71, 209, 140, 0.08), transparent 26%),
+    linear-gradient(135deg, #07090d 0%, #0a1218 48%, #09110f 100%);
 }
 
 .app-shell {
@@ -1131,8 +1131,8 @@ body {
   overflow-y: auto;
   border-right: 1px solid rgba(63, 116, 180, 0.28);
   background:
-    linear-gradient(180deg, rgba(8, 23, 43, 0.98), rgba(5, 13, 25, 0.98)),
-    linear-gradient(90deg, rgba(44, 132, 255, 0.10), transparent);
+    linear-gradient(180deg, rgba(8, 18, 30, 0.98), rgba(5, 12, 18, 0.98)),
+    linear-gradient(90deg, rgba(44, 132, 255, 0.08), transparent);
   box-shadow: 18px 0 45px rgba(0, 0, 0, 0.22);
 }
 
@@ -1267,7 +1267,7 @@ body {
 
 .workspace {
   min-width: 0;
-  padding: 0 14px 58px;
+  padding: 0 16px 58px;
 }
 
 .platform-header {
@@ -1279,9 +1279,9 @@ body {
   gap: 16px;
   align-items: stretch;
   margin: 0 0 14px;
-  min-height: 70px;
+  min-height: 64px;
   border-bottom: 1px solid rgba(63, 116, 180, 0.28);
-  background: rgba(4, 10, 18, 0.92);
+  background: rgba(6, 10, 15, 0.94);
   backdrop-filter: blur(18px);
 }
 
@@ -1290,13 +1290,13 @@ body {
   gap: 8px;
   align-items: center;
   overflow-x: auto;
-  padding: 10px 0;
+  padding: 8px 0;
 }
 
 .nav-link {
   position: relative;
-  min-width: 126px;
-  min-height: 48px;
+  min-width: 118px;
+  min-height: 46px;
   border: 0;
   border-radius: 0;
   box-shadow: none;
@@ -1326,12 +1326,12 @@ body {
   display: flex;
   gap: 10px;
   align-items: center;
-  padding: 10px 0;
+  padding: 8px 0;
 }
 
 .tool-button,
 .user-chip {
-  min-height: 42px;
+  min-height: 40px;
   border: 1px solid rgba(236, 244, 239, 0.10);
   border-radius: 8px;
   background: rgba(13, 27, 45, 0.75);
@@ -1339,17 +1339,49 @@ body {
 }
 
 .tool-button {
+  position: relative;
   display: grid;
   place-items: center;
-  width: 42px;
+  width: 40px;
   color: #9db5d1;
   text-decoration: none;
   font-weight: 800;
 }
 
+.tool-button svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tool-button em {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  font-style: normal;
+  font-size: 0.68rem;
+  line-height: 1;
+}
+
 .tool-button.is-alert {
   color: var(--red);
   background: rgba(239, 111, 105, 0.13);
+}
+
+.top-actions .language-switch {
+  margin-top: 0;
+  background: rgba(13, 27, 45, 0.75);
+}
+
+.top-actions .language-switch a {
+  min-width: 44px;
+  min-height: 32px;
+  display: inline-grid;
+  place-items: center;
 }
 
 .user-chip {
@@ -1368,8 +1400,9 @@ body {
 }
 
 .hero {
-  grid-template-columns: minmax(360px, 1fr) minmax(420px, 0.9fr);
+  grid-template-columns: minmax(360px, 0.95fr) minmax(520px, 1.05fr);
   gap: 12px;
+  margin-bottom: 14px;
 }
 
 .dashboard-hero .hero-copy,
@@ -1382,35 +1415,50 @@ body {
 .empty-state,
 .overview-card,
 .backtest-card,
-.portfolio-card {
+.portfolio-card,
+.benchmark-workbench,
+.benchmark-chart-panel,
+.benchmark-side-panel {
   border-color: rgba(63, 116, 180, 0.28);
   background:
-    linear-gradient(180deg, rgba(15, 35, 58, 0.90), rgba(9, 21, 36, 0.90)),
-    linear-gradient(135deg, rgba(45, 140, 255, 0.08), transparent);
-  box-shadow: 0 16px 45px rgba(0, 0, 0, 0.28);
+    linear-gradient(180deg, rgba(14, 28, 44, 0.92), rgba(9, 18, 28, 0.92)),
+    linear-gradient(135deg, rgba(45, 140, 255, 0.055), transparent);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.24);
 }
 
 .dashboard-hero .hero-copy {
-  padding: 18px;
+  padding: 18px 20px;
+}
+
+.dashboard-hero .hero-copy::after {
+  display: none;
 }
 
 .dashboard-hero h1 {
-  font-size: clamp(1.55rem, 2.5vw, 2.4rem);
-  line-height: 1.1;
+  max-width: 720px;
+  font-size: clamp(1.5rem, 2.1vw, 2.15rem);
+  line-height: 1.14;
+}
+
+.dashboard-hero .hero-text {
+  max-width: 760px;
+  margin-bottom: 14px;
+  font-size: 0.96rem;
 }
 
 .hero-meta {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
 }
 
 .stat-card {
-  min-height: 90px;
-  padding: 14px;
+  min-height: 84px;
+  padding: 12px 14px;
 }
 
 .stat-card strong {
   color: #8dbdff;
-  font-size: 1.85rem;
+  font-size: 1.62rem;
 }
 
 .stat-card:nth-child(2n) strong,
@@ -1444,6 +1492,16 @@ body {
   border-bottom: 1px solid rgba(236, 244, 239, 0.08);
 }
 
+.control-panel {
+  padding: 16px 18px;
+}
+
+.filters label,
+.backtest-form label,
+.import-form label {
+  color: #a7b6c5;
+}
+
 .data-table,
 .terminal-table {
   width: 100%;
@@ -1456,12 +1514,20 @@ body {
 }
 
 .data-table th {
+  position: sticky;
+  top: 64px;
+  z-index: 1;
   color: #8aa2bf;
   font-size: 0.75rem;
+  background: rgba(9, 18, 28, 0.96);
 }
 
 .data-table td {
   color: #d8e6f2;
+}
+
+.data-table tbody tr:hover td {
+  background: rgba(45, 140, 255, 0.045);
 }
 
 .filters input,
@@ -1469,6 +1535,7 @@ body {
 .backtest-form input,
 .filters select,
 .backtest-form select,
+.strategy-builder-input textarea,
 .import-form textarea {
   background: rgba(5, 14, 24, 0.92);
   border-color: rgba(86, 154, 255, 0.20);
@@ -1478,9 +1545,16 @@ body {
 .backtest-form button,
 .import-form button,
 .action-link,
-.trading-command button {
+.trading-command button,
+.strategy-builder-form button {
   color: #eef7ff;
   background: linear-gradient(135deg, #287bff, #20c997);
+}
+
+.platform-ribbon span,
+.chip {
+  min-height: 28px;
+  padding: 5px 9px;
 }
 
 .market-ticker {
@@ -1575,6 +1649,79 @@ body {
   .hero,
   .terminal-shell {
     grid-template-columns: 1fr;
+  }
+
+  .hero-meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 700px) {
+  .app-sidebar {
+    border-right: 0;
+    border-bottom: 1px solid rgba(63, 116, 180, 0.28);
+  }
+
+  .sidebar-brand {
+    min-height: 62px;
+    padding: 12px 16px;
+  }
+
+  .sidebar-nav {
+    display: flex;
+    gap: 10px;
+    overflow-x: auto;
+    padding: 10px;
+  }
+
+  .sidebar-group {
+    min-width: 158px;
+    padding: 4px;
+    border: 1px solid rgba(236, 244, 239, 0.08);
+    border-radius: 8px;
+    background: rgba(13, 27, 45, 0.48);
+  }
+
+  .sidebar-group-title {
+    min-height: 30px;
+    padding: 6px 8px;
+  }
+
+  .sidebar-link {
+    min-height: 32px;
+    padding: 7px 8px;
+    font-size: 0.84rem;
+  }
+
+  .sidebar-footer {
+    display: none;
+  }
+
+  .workspace {
+    padding: 0 10px 58px;
+  }
+
+  .platform-header {
+    gap: 6px;
+    min-height: auto;
+    padding-bottom: 6px;
+  }
+
+  .top-nav,
+  .top-actions {
+    overflow-x: auto;
+  }
+
+  .top-actions {
+    justify-content: flex-start;
+  }
+
+  .dashboard-hero .hero-copy {
+    padding: 16px;
+  }
+
+  .dashboard-hero h1 {
+    font-size: 1.62rem;
   }
 
   .hero-meta {
