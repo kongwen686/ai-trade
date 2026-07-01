@@ -44,27 +44,37 @@
   - Twitter/X tracked accounts 配置画像
   - 链上大额异动和交易所流入 / 流出监控
   - 现货 / 合约价差与跨市场 basis 分析
+  - 自然语言策略编译：把用户描述拆解为回测参数和 paper 自动交易参数
+  - 支持趋势跟随、均值回归、动量突破、再平衡、季节性和 basis 监控等策略语义
   - 策略命中、自动交易候选和风控意图聚合
   - Binance / OKX 账户接入状态与策略目录
-  - 支持 OpenAI Responses API 做综合指标分析，未配置时自动使用本地规则
+  - 支持 OpenAI、Anthropic、Gemini、DeepSeek、xAI、Mistral、Qwen、Kimi 等模型做综合指标分析，未配置时自动使用本地规则
+  - 交易账户概览展示当前敞口、已实现盈亏和平仓胜率
 - 自动量化交易
   - 根据综合评分、量能、买盘压力和智能风控生成候选
   - 支持本地 paper 模拟交易
   - 支持 Binance Spot live 市价单
   - 支持 `order/test` 先校验订单参数
   - 支持持仓持久化、止损、止盈、冷却、最大持仓和最大敞口
+  - 已持仓标的即使未进入本轮信号榜，也会补拉 ticker 最新价检查止损 / 止盈
+  - live 持仓不会在 paper 模式下被模拟平仓
+  - live 平仓必须满足 Auto Trade 已启用、`mode=live` 和 `AI_TRADE_LIVE_CONFIRM`
+  - 平仓事件记录退出原因、已实现盈亏和已实现盈亏百分比
 - 历史回测
   - Binance public-data ZIP 读取
   - 单币种回测
   - 多币种横截面组合回测
+  - Benchmark Workbench：策略权益、次优版本和买入持有基准同屏对比
+  - 已完成交易流水、AI 推理摘要和关键参数说明
   - 止损 / 止盈 / 最大持仓 bars
   - 手续费 / maker-taker / Binance 账户真实 commission
   - 固定滑点 / 动态滑点
   - 资金曲线 / 最大回撤 / Profit Factor
   - 页面级权益对比图和 JSON / CSV 结果导出
   - 内建参数预设与策略组合模板
+  - 加密资产等权再平衡溢价研究：比较定期再平衡组合和自然漂移组合
 - 运行配置
-  - Web 页面直接配置 Binance key、OKX key、X token、OpenAI key、情报账号和策略默认值
+  - Web 页面直接配置 Binance key、OKX key、X token、链上数据 key、LLM key、情报账号和策略默认值
   - 保存后自动应用到扫描页、总控台、自动交易页和回测页
   - 支持配置模板 JSON 导出 / 导入
 
@@ -85,6 +95,7 @@
 - 历史回测：`http://127.0.0.1:8000/backtest`
 - 运行配置：`http://127.0.0.1:8000/settings`
 - 自动量化：`http://127.0.0.1:8000/trading`
+- 本地健康检查 API：`http://127.0.0.1:8000/api/health`
 - 扫描 API：`http://127.0.0.1:8000/api/scan`
 - 智能总控台 API：`http://127.0.0.1:8000/api/terminal/snapshot`
 - 平台能力 API：`http://127.0.0.1:8000/api/platform/capabilities`
@@ -93,6 +104,7 @@
 - 平台风控 API：`http://127.0.0.1:8000/api/platform/risk`
 - 平台日志 API：`http://127.0.0.1:8000/api/platform/logs`
 - 总控台模块 API：`http://127.0.0.1:8000/api/terminal/modules/{market|community|onchain|basis|strategies|trading|risk}`
+- 自然语言策略编译 API：`POST http://127.0.0.1:8000/api/strategy/compile`
 - 回测 API：`http://127.0.0.1:8000/api/backtest`
 - 自动交易 API：`POST http://127.0.0.1:8000/api/trading/run`
 - 模拟交易 API：`POST http://127.0.0.1:8000/api/trading/paper/run`
@@ -159,6 +171,7 @@ python3 -m pip install -e .
 python3 -m trade_signal_app
 python3 -m trade_signal_app.backtest "data/spot/monthly/klines/*/4h/*.zip"
 python3 -m trade_signal_app.autotrade
+python3 -m trade_signal_app.autotrade --paper
 trade-signal-web
 trade-signal-backtest "data/spot/monthly/klines/*/4h/*.zip"
 trade-signal-autotrade
@@ -201,9 +214,13 @@ PYTHONPATH=src python3 -m trade_signal_app.backtest --version
 `/settings` 现在已经支持直接配置：
 
 - Binance API Key / Secret / RecvWindow
-- X/Twitter Bearer Token
+- 公开行情预设：Binance Public、OKX Public、CoinGecko Keyless
+- 链上数据预设：Open Multi-chain Keyless、DefiLlama Free、GeckoTerminal Keyless、本地 CSV
+- 可选链上数据 API Key / 自定义 Base URL
+- X/Twitter Provider、Bearer Token、Nitter RSS 或本地会话命令
 - Twitter 情报账号列表
 - 情报模式与权重
+- LLM Provider / API Key / Base URL / Model
 - 实时扫描默认参数
 - 历史回测默认参数
 - 配置模板 JSON 导出 / 导入
@@ -238,11 +255,16 @@ PYTHONPATH=src python3 -m trade_signal_app.backtest --version
 
 - 扫描当前市场信号
 - 检查已有持仓的止损 / 止盈
+- 对未进入本轮信号榜的持仓补拉 24h ticker 最新价
+- live 持仓必须在 live 模式下真实平仓，paper 模式只会记录阻断事件
+- 自动交易关闭或缺少 `AI_TRADE_LIVE_CONFIRM` 时，live 持仓触发止损 / 止盈也不会提交真实卖单
 - 按分数阈值、量比、买盘压力筛选新仓
 - 按单笔投入、最大持仓数、最大总敞口做风控
+- 平仓时记录退出原因、已实现盈亏和盈亏百分比
 - 在本地 `data/trading_state.json` 记录持仓状态
 
 默认模式是 `paper`，只模拟记录持仓，不会向 Binance 提交真实订单。
+模拟或实盘平仓事件会进入执行日志，并在 `/trading`、`/terminal/trading` 和 `/api/platform/accounts` 中汇总为账户表现指标。
 
 如需实盘，必须同时满足：
 
@@ -256,6 +278,15 @@ export AI_TRADE_LIVE_CONFIRM="I_UNDERSTAND_REAL_ORDERS"
 
 默认还会勾选 `Use Binance order/test`，这只校验订单参数，不会真实成交。只有关闭该选项，并满足上面的实盘确认后，系统才会调用 Binance Spot `POST /api/v3/order` 提交市价单。
 
+交易前可以先检查真实授权状态：
+
+- `GET /api/platform/exchange-auth`：调用 Binance 账户接口，返回 API 是否已认证、是否可交易、非零余额和报价资产可用余额；OKX 会明确显示为未配置或待接入 connector，不会被当作可自动交易通道。
+- `GET /api/trading/readiness`：返回当前自动交易模式、`AI_TRADE_LIVE_CONFIRM`、Binance 授权、交易权限、报价资产余额和阻断原因。
+- `GET /api/trading/status`：包含当前配置、readiness、持仓和执行事件。
+- `GET /api/health`：只做本地健康检查，不访问外部交易所，适合启动后确认配置文件、交易状态文件和本地 live 阻断项。
+
+当 `mode=live` 且关闭 `order/test` 准备真实成交时，系统会先检查 readiness。授权失败、缺少交易权限、缺少确认环境变量或报价资产余额不足时，会写入 `blocked` 事件并直接返回，不会继续扫描并尝试下单。
+
 自动运行示例：
 
 ```bash
@@ -266,6 +297,12 @@ PYTHONPATH=src python3 -m trade_signal_app.autotrade --loop --interval-seconds 3
 
 ```bash
 trade-signal-autotrade --loop --interval-seconds 300
+```
+
+命令行自动交易与 Web/API 使用同一个 readiness 和执行前风控入口。需要强制跑一轮模拟执行时可以加 `--paper`：
+
+```bash
+trade-signal-autotrade --paper
 ```
 
 ## 智能总控台与外部情报
@@ -288,14 +325,62 @@ export ONCHAIN_EVENTS_CSV="data/onchain_events.csv"
 export FUTURES_BASIS_CSV="data/futures_basis.csv"
 ```
 
-大模型分析默认关闭。启用后会调用 OpenAI Responses API：
+如果没有配置真实的 `onchain_events.csv` 或 `futures_basis.csv`，对应模块会返回空数据并在本地规则摘要中说明该风控源未参与阻断；系统不会再用成交量或技术指标合成“链上事件”或“合约价差”。策略命中仍来自实时 Binance 行情和指标扫描。
+
+大模型分析默认关闭。启用后会调用 `/settings` 中选择的 LLM Provider。系统内置 8 个主流供应商预设：
+
+- `openai`：OpenAI Responses API
+- `anthropic`：Anthropic Messages API
+- `google`：Gemini OpenAI-compatible endpoint
+- `deepseek`：DeepSeek OpenAI-compatible endpoint
+- `xai`：xAI OpenAI-compatible endpoint
+- `mistral`：Mistral chat completions endpoint
+- `qwen`：Alibaba DashScope OpenAI-compatible endpoint
+- `moonshot`：Moonshot Kimi OpenAI-compatible endpoint
+
+环境变量示例：
+
+```bash
+export LLM_PROVIDER="deepseek"
+export LLM_API_KEY="your-provider-api-key"
+export LLM_MODEL="deepseek-chat"
+```
+
+OpenAI 旧环境变量仍兼容：
 
 ```bash
 export OPENAI_API_KEY="your-openai-api-key"
-export OPENAI_MODEL="gpt-5.4"
+export OPENAI_MODEL="gpt-5.5"
 ```
 
-也可以在 `/settings` 中配置 OpenAI Key、模型、情报严重度、最小价差和链上大额阈值。未配置 OpenAI Key 或调用失败时，系统会自动使用本地规则分析，不影响总控台运行。
+也可以在 `/settings` 中配置 LLM Provider、API Key、Base URL、模型、情报严重度、最小价差和链上大额阈值。未配置 LLM Key 或调用失败时，系统会自动使用本地规则分析，不影响总控台运行。
+
+公开数据源预设：
+
+- Binance Public Market Data：公开行情无需 key；账户、费率和交易仍需要 Binance API Key / Secret。
+- OKX Public Market Data：公开产品、行情和 K 线无需 key；私有账户和交易仍需要 OKX Key / Secret / Passphrase。
+- CoinGecko Keyless：价格、市场和趋势数据无需 key，适合补充市场视图。
+- Open Multi-chain Keyless：组合 Blockstream、PublicNode、Solana public RPC、XRPL public RPC 和 Blockchair stats，默认覆盖 `BTC / ETH / DOGE / SOL / ZEC / XRP`。
+- DefiLlama Free API：TVL、DeFi、稳定币、收益、链数据无需 key。
+- GeckoTerminal Keyless：DEX 池子、链上 OHLCV 和交易数据无需 key。
+- Local CSV：读取 `data/onchain_events.csv`，适合个人自定义或离线链上数据。
+
+### 链上主流币监控
+
+`Open Multi-chain Keyless` 是当前默认链上监控预设。它不依赖付费 key，按链采用不同开放数据源：
+
+- `BTC`：Blockstream Esplora API，读取最新区块交易样本，识别大额原生 BTC 转账。
+- `ETH`：PublicNode Ethereum JSON-RPC，读取 latest block 交易，识别大额 ETH 转账。
+- `SOL`：Solana public JSON-RPC，读取 confirmed slot / block，估算大额 SOL 余额变化。
+- `XRP`：XRPL public JSON-RPC，读取 validated ledger Payment 交易。
+- `DOGE / ZEC`：Blockchair stats，读取 24h 交易数和 mempool 指标作为网络活跃度代理。
+
+处理方式：
+
+- 所有源会归一化成 `OnchainEvent`：`chain / symbol / event_type / amount_usd / direction / severity / tx_hash`。
+- 大额转账按 `Whale Threshold USD` 计算严重度，超过阈值会进入总控台链上异动。
+- 网络快照不会直接阻断交易，只作为风险分和链上活跃度提示。
+- 本地 `data/onchain_events.csv` 仍会叠加进入同一个事件流，方便你后续接入自建节点、Arkham、Etherscan、Helius、Moralis 或手工标注的钱包流向。
 
 OKX 当前用于接入状态、账户配置、跨交易所监控和现货 / 合约价差观察；自动实盘下单走 Binance Spot 执行通道。实盘模式需要同时满足 API key、`AI_TRADE_LIVE_CONFIRM` 和关闭 `order/test` 保护。
 
@@ -322,18 +407,64 @@ python3 -m trade_signal_app
 
 > 在当前这一批高流动性币种里，哪几个更像值得进一步观察或准备入场的候选。
 
+## 交易书籍与策略路线图
+
+项目会把交易书籍中的方法论转成可回测、可验证、可受控执行的工程清单，而不是直接照搬书中策略。
+
+- 学习/实现手册：[docs/research/trading-books-strategy-playbook.md](docs/research/trading-books-strategy-playbook.md)
+- 已接入策略语义：综合评分突破、量价压力、趋势跟随、区间突破、动量轮动、均值回归、等权再平衡、BTC 隔夜季节性、现货/合约 basis 监控
+- 仍处于研究阶段：配对交易、统计套利、carry/资金费率、波动率状态过滤、做市
+
+所有新增策略默认先进入 `research`、`watch_only` 或 `paper`，不会自动开启实盘。
+
 ## 社区热度与 Twitter 情报
 
 ### X / Twitter
 
-支持 X Developer Bearer Token。
+支持三挡 X / Twitter provider。`Community Provider` 里仍使用 `x` 代表 X/Twitter 数据源，具体采集方式由 `X Provider` 决定。
 
 可直接通过 `/settings` 填写，或者继续用环境变量：
 
 ```bash
+export X_PROVIDER="official_api"
 export X_BEARER_TOKEN="your-bearer-token"
 python3 -m trade_signal_app
 ```
+
+三挡 provider：
+
+- `official_api`
+  - 使用官方 X API Bearer Token
+  - 适合稳定、合规、可审计的数据采集
+- `nitter_rss`
+  - 使用自建或可信的 Nitter RSS 服务
+  - 需要配置 `X_NITTER_BASE_URL`，例如 `http://127.0.0.1:8788`
+  - 适合只读轮询公开搜索和指定账号 RSS
+- `session_scrape`
+  - 使用本机命令适配器采集
+  - 需要配置 `X_SESSION_COMMAND`，命令输出 JSON / JSONL / 文本行
+  - 支持 `{query}`、`{raw_query}`、`{limit}`、`{hours}` 占位符，例如：
+
+```bash
+export X_PROVIDER="session_scrape"
+export X_SESSION_COMMAND='twscrape search {query} --limit {limit}'
+```
+
+`session_scrape` 只调用本机已配置好的只读采集命令，应用本身不保存 X 密码、Cookie 或登录态；不要把该能力暴露给不可信用户提交命令。
+
+默认 `Tracked Accounts` 会内置一批已核验的高信号账号，覆盖链上异动、交易员观点、核心项目方、BTC 持仓大户和 ETF / 基金管理方。也可以用环境变量整体替换：
+
+```bash
+export X_TRACKED_ACCOUNTS="lookonchain,WuBlockchain,Grayscale,saylor,Strategy"
+```
+
+默认账号分组：
+
+- 链上 / 新闻 / 数据：`lookonchain`、`WuBlockchain`、`whale_alert`、`BTCtreasuries`、`arkham`、`glassnode`、`cryptoquant_com`、`ki_young_ju`、`SantimentData`、`tier10k`、`WatcherGuru`
+- ETF / 基金：`Grayscale`、`iShares`、`vaneck_us`、`ARKInvest`、`21shares_us`
+- BTC 持仓大户：`saylor`、`Strategy`
+- 核心项目方：`Bitcoin`、`ethereum`、`solana`、`BNBCHAIN`、`Ripple`、`chainlink`、`SuiNetwork`、`ton_blockchain`
+- 交易员 / 宏观观点：`CryptoCred`、`Pentosh1`、`DaanCrypto`、`scottmelker`、`BobLoukas`、`CryptoHayes`、`APompliano`
 
 支持模式：
 
@@ -385,8 +516,10 @@ python3 -m trade_signal_app
 
 ```text
 lookonchain
-wu_blockchain
-TheBlock__
+WuBlockchain
+Grayscale
+saylor
+Strategy
 ```
 
 ### CSV 社区分数
@@ -528,6 +661,8 @@ python3 -m trade_signal_app.backtest "data/spot/monthly/klines/*/4h/*.zip" \
 - `balanced_swing`
 - `breakout_aggressive`
 - `portfolio_rotation`
+- `crypto_rebalance_premium`
+- `btc_overnight_seasonality`
 - `btc_cycle_trend`
 - `btc_core_trading`
 - `btc_compounding_risk_off`
@@ -537,6 +672,22 @@ python3 -m trade_signal_app.backtest "data/spot/monthly/klines/*/4h/*.zip" \
 - 在 `/backtest` 里快速套用一组参数
 - 在 `/settings` 里把某个 preset 保存成默认回测模板
 - 通过 `GET /api/backtest/presets` 查看模板清单和参数
+
+`crypto_rebalance_premium` 来自对 Quant Wiki crypto 策略的 spot-only 改造：
+
+- 原始思想是定期把一篮子加密资产拉回等权，并与买入后自然漂移的组合对照
+- 本项目不做空漂移组合，直接输出等权再平衡组合、自然漂移组合和二者的 premium
+- 再平衡报告会计入手续费、滑点和 turnover，结果显示在 `/backtest` 的 `Rebalance Premium` 区块
+
+`btc_overnight_seasonality` 来自对 Quant Wiki Bitcoin 隔夜季节性策略的 spot-only 改造：
+
+- 研究 UTC 22:00 开多 BTC、持有 2 小时后退出的时间窗口
+- 适合用 `BTCUSDT 1h` 或更细周期数据验证；`4h` 数据通常无法精确命中 22:00 UTC
+- 结果作为普通 series backtest 展示，会计入手续费、滑点和资金曲线
+
+研究笔记：
+
+- [Crypto Rebalance Premium Adaptation](docs/research/crypto-rebalance-premium.md)
 
 其中 3 个 BTC 定向模板，是基于对公开 BTC 交易账户档案的研究思路提炼出来的：
 

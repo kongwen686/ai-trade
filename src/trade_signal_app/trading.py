@@ -39,6 +39,9 @@ class TradingEvent:
     price: float | None = None
     quantity: float | None = None
     quote_notional: float | None = None
+    realized_pnl: float | None = None
+    realized_pnl_pct: float | None = None
+    exit_reason: str = ""
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     response: dict[str, object] | None = None
 
@@ -136,6 +139,9 @@ class TradingStateStore:
             price=float(payload["price"]) if payload.get("price") is not None else None,
             quantity=float(payload["quantity"]) if payload.get("quantity") is not None else None,
             quote_notional=float(payload["quote_notional"]) if payload.get("quote_notional") is not None else None,
+            realized_pnl=float(payload["realized_pnl"]) if payload.get("realized_pnl") is not None else None,
+            realized_pnl_pct=float(payload["realized_pnl_pct"]) if payload.get("realized_pnl_pct") is not None else None,
+            exit_reason=str(payload.get("exit_reason", "")),
             created_at=datetime.fromisoformat(str(created_at)) if created_at else datetime.now(timezone.utc),
             response=payload.get("response") if isinstance(payload.get("response"), dict) else None,
         )
@@ -165,7 +171,10 @@ class AutoTrader:
         summary, signals = self.scanner.scan()
         now = datetime.now(timezone.utc)
 
-        latest_prices = {signal.symbol: signal.ticker.last_price for signal in signals}
+        latest_prices = self._latest_prices_for_positions(
+            positions,
+            {signal.symbol: signal.ticker.last_price for signal in signals},
+        )
         positions = self._evaluate_exits(positions, config, events, latest_prices)
         if not config.enabled:
             self.state_store.save(positions)
@@ -295,6 +304,31 @@ class AutoTrader:
             remaining.append(position)
         return remaining
 
+    def _latest_prices_for_positions(
+        self,
+        positions: list[TradingPosition],
+        signal_prices: dict[str, float],
+    ) -> dict[str, float]:
+        latest_prices = dict(signal_prices)
+        missing_symbols = {
+            position.symbol
+            for position in positions
+            if position.symbol not in latest_prices
+        }
+        if not missing_symbols:
+            return latest_prices
+        try:
+            ticker24hr_symbols = getattr(self.scanner.gateway, "ticker24hr_symbols", None)
+            if not callable(ticker24hr_symbols):
+                return latest_prices
+            for row in ticker24hr_symbols(sorted(missing_symbols)):
+                symbol = str(row.get("symbol", "")).upper()
+                if symbol in missing_symbols:
+                    latest_prices[symbol] = float(row["lastPrice"])
+        except Exception:  # noqa: BLE001
+            return latest_prices
+        return latest_prices
+
     def _open_position(self, signal, config: AutoTradeDefaults) -> tuple[TradingPosition, TradingEvent]:
         now = datetime.now(timezone.utc)
         price = signal.ticker.last_price
@@ -372,7 +406,12 @@ class AutoTrader:
         config: AutoTradeDefaults,
         exit_reason: str,
     ) -> TradingEvent:
-        if position.mode == "paper" or config.mode == "paper":
+        if position.mode == "paper":
+            exit_notional, realized_pnl, realized_pnl_pct = self._calculate_exit_pnl(
+                position=position,
+                exit_price=price,
+                executed_quantity=position.quantity,
+            )
             return TradingEvent(
                 action="SELL",
                 symbol=position.symbol,
@@ -381,7 +420,46 @@ class AutoTrader:
                 message=f"模拟卖出已记录：{exit_reason}。",
                 price=price,
                 quantity=position.quantity,
+                quote_notional=exit_notional,
+                realized_pnl=realized_pnl,
+                realized_pnl_pct=realized_pnl_pct,
+                exit_reason=exit_reason,
+            )
+        if config.mode != "live":
+            return TradingEvent(
+                action="SELL",
+                symbol=position.symbol,
+                mode=position.mode,
+                status="blocked",
+                message="live 持仓不能在 paper 模式下模拟平仓，请切回 live 模式或人工处理。",
+                price=price,
+                quantity=position.quantity,
                 quote_notional=position.quantity * price,
+                exit_reason=exit_reason,
+            )
+        if not config.enabled:
+            return TradingEvent(
+                action="SELL",
+                symbol=position.symbol,
+                mode=position.mode,
+                status="blocked",
+                message="自动交易未启用，live 持仓不会自动平仓。",
+                price=price,
+                quantity=position.quantity,
+                quote_notional=position.quantity * price,
+                exit_reason=exit_reason,
+            )
+        if not self._live_confirmed():
+            return TradingEvent(
+                action="SELL",
+                symbol=position.symbol,
+                mode=position.mode,
+                status="blocked",
+                message=f"live 平仓需要环境变量 AI_TRADE_LIVE_CONFIRM={LIVE_CONFIRM_VALUE}。",
+                price=price,
+                quantity=position.quantity,
+                quote_notional=position.quantity * price,
+                exit_reason=exit_reason,
             )
         try:
             response = self.scanner.gateway.order_market_sell(
@@ -400,7 +478,17 @@ class AutoTrader:
                 price=price,
                 quantity=position.quantity,
                 quote_notional=position.quantity * price,
+                exit_reason=exit_reason,
             )
+        response_payload = response if isinstance(response, dict) else {"raw": response}
+        executed_quantity = float(response_payload.get("executedQty") or position.quantity)
+        exit_notional = float(response_payload.get("cummulativeQuoteQty") or executed_quantity * price)
+        _, realized_pnl, realized_pnl_pct = self._calculate_exit_pnl(
+            position=position,
+            exit_price=price,
+            executed_quantity=executed_quantity,
+            exit_notional=exit_notional,
+        )
         return TradingEvent(
             action="SELL",
             symbol=position.symbol,
@@ -408,9 +496,12 @@ class AutoTrader:
             status="test_accepted" if config.order_test_only else "filled",
             message=f"Binance 市价卖出请求已提交：{exit_reason}。",
             price=price,
-            quantity=position.quantity,
-            quote_notional=position.quantity * price,
-            response=response if isinstance(response, dict) else {"raw": response},
+            quantity=executed_quantity,
+            quote_notional=exit_notional,
+            realized_pnl=None if config.order_test_only else realized_pnl,
+            realized_pnl_pct=None if config.order_test_only else realized_pnl_pct,
+            exit_reason=exit_reason,
+            response=response_payload,
         )
 
     @staticmethod
@@ -456,6 +547,24 @@ class AutoTrader:
         if "." in step_size:
             precision = len(step_size.rstrip("0").split(".")[-1])
         return round(math.floor(quantity / step) * step, precision)
+
+    @staticmethod
+    def _calculate_exit_pnl(
+        *,
+        position: TradingPosition,
+        exit_price: float,
+        executed_quantity: float,
+        exit_notional: float | None = None,
+    ) -> tuple[float, float, float]:
+        quantity = max(0.0, executed_quantity)
+        if exit_notional is None:
+            exit_notional = quantity * exit_price
+        entry_notional = position.quote_notional
+        if position.quantity > 0 and quantity != position.quantity:
+            entry_notional = position.quote_notional * (quantity / position.quantity)
+        realized_pnl = exit_notional - entry_notional
+        realized_pnl_pct = (realized_pnl / entry_notional) * 100 if entry_notional else 0.0
+        return exit_notional, realized_pnl, realized_pnl_pct
 
     @staticmethod
     def _position_from_order_response(

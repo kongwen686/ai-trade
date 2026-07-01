@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from http.client import HTTPException, IncompleteRead
 import hashlib
 import hmac
 import json
@@ -13,6 +14,10 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .models import Candlestick, MarketTicker, utc_datetime_from_epoch
+
+
+class BinancePublicAPIError(RuntimeError):
+    pass
 
 
 @dataclass
@@ -67,8 +72,23 @@ class BinanceSpotGateway:
         if query:
             url = f"{url}?{query}"
         request = Request(url, headers={"User-Agent": "trade-signal-app/0.1"})
-        with urlopen(request, timeout=self._timeout) as response:
-            return json.load(response)
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                with urlopen(request, timeout=self._timeout) as response:
+                    return json.load(response)
+            except HTTPError as exc:
+                detail = self._extract_http_error_detail(exc)
+                last_error = BinancePublicAPIError(f"HTTP {exc.code}" + (f"，{detail}" if detail else ""))
+                if attempt < 2:
+                    time.sleep(0.2 * (attempt + 1))
+                    continue
+            except (HTTPException, IncompleteRead, TimeoutError, URLError, OSError, json.JSONDecodeError) as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(0.2 * (attempt + 1))
+                    continue
+        raise BinancePublicAPIError(f"Binance public API 请求失败：{last_error}") from last_error
 
     def _signed_request_json(
         self,
@@ -137,6 +157,47 @@ class BinanceSpotGateway:
         data = self._get_json("/api/v3/ticker/24hr")
         return self._cache_set(cache_key, data)  # type: ignore[return-value]
 
+    def ticker24hr_symbols(self, symbols: list[str], *, chunk_size: int = 20) -> list[dict]:
+        rows: list[dict] = []
+        normalized = []
+        seen = set()
+        for symbol in symbols:
+            normalized_symbol = symbol.upper().strip()
+            if normalized_symbol and normalized_symbol not in seen:
+                normalized.append(normalized_symbol)
+                seen.add(normalized_symbol)
+        for index in range(0, len(normalized), chunk_size):
+            chunk = normalized[index : index + chunk_size]
+            if not chunk:
+                continue
+            rows.extend(self._ticker24hr_symbol_chunk(chunk))
+        return rows
+
+    def _ticker24hr_symbol_chunk(self, chunk: list[str]) -> list[dict]:
+        cache_key = "ticker24hr:" + ",".join(chunk)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+        try:
+            data = self._get_json("/api/v3/ticker/24hr", {"symbols": json.dumps(chunk, separators=(",", ":"))})
+        except BinancePublicAPIError:
+            if len(chunk) <= 1:
+                return []
+            midpoint = max(1, len(chunk) // 2)
+            return self._ticker24hr_symbol_chunk(chunk[:midpoint]) + self._ticker24hr_symbol_chunk(chunk[midpoint:])
+        if isinstance(data, dict):
+            chunk_rows = [data]
+        elif isinstance(data, list):
+            chunk_rows = data
+        else:
+            chunk_rows = []
+        self._cache_set(cache_key, chunk_rows)
+        return chunk_rows
+
+    def cached_ticker24hr(self) -> list[dict] | None:
+        cached = self._cache_get("ticker24hr")
+        return cached if isinstance(cached, list) else None
+
     def account(self, omit_zero_balances: bool = True) -> dict:
         cache_key = f"account:{int(omit_zero_balances)}"
         cached = self._cache_get(cache_key)
@@ -147,6 +208,57 @@ class BinanceSpotGateway:
             {"omitZeroBalances": str(omit_zero_balances).lower()},
         )
         return self._cache_set(cache_key, data)  # type: ignore[return-value]
+
+    def account_status(self, quote_assets: set[str] | None = None) -> dict[str, object]:
+        quote_assets = {asset.upper() for asset in (quote_assets or {"USDT", "USDC", "FDUSD", "BUSD"})}
+        if not self.has_user_data_auth():
+            return {
+                "exchange": "BINANCE",
+                "configured": False,
+                "authenticated": False,
+                "can_trade": False,
+                "status": "not_configured",
+                "message": "BINANCE_API_KEY / BINANCE_API_SECRET 未配置。",
+                "balances": [],
+                "quote_available": 0.0,
+            }
+        try:
+            account = self.account(omit_zero_balances=True)
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "exchange": "BINANCE",
+                "configured": True,
+                "authenticated": False,
+                "can_trade": False,
+                "status": "auth_failed",
+                "message": str(exc),
+                "balances": [],
+                "quote_available": 0.0,
+            }
+        balances = []
+        quote_available = 0.0
+        for item in account.get("balances", []):
+            if not isinstance(item, dict):
+                continue
+            asset = str(item.get("asset", "")).upper()
+            free = float(item.get("free") or 0.0)
+            locked = float(item.get("locked") or 0.0)
+            if free <= 0 and locked <= 0:
+                continue
+            balances.append({"asset": asset, "free": free, "locked": locked})
+            if asset in quote_assets:
+                quote_available += free
+        can_trade = bool(account.get("canTrade", False))
+        return {
+            "exchange": "BINANCE",
+            "configured": True,
+            "authenticated": True,
+            "can_trade": can_trade,
+            "status": "ready" if can_trade else "read_only",
+            "message": "Binance 账户已授权，可交易。" if can_trade else "Binance 账户已授权，但 API 权限不允许交易。",
+            "balances": balances,
+            "quote_available": quote_available,
+        }
 
     def account_commission(self, symbol: str) -> dict:
         cache_key = f"account_commission:{symbol.upper()}"
@@ -198,11 +310,16 @@ class BinanceSpotGateway:
         return self._signed_post_json(path, params)  # type: ignore[return-value]
 
     def klines(self, symbol: str, interval: str, limit: int) -> list[Candlestick]:
+        cache_key = f"klines:{symbol.upper()}:{interval}:{limit}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
         data = self._get_json(
             "/api/v3/klines",
             {"symbol": symbol, "interval": interval, "limit": limit},
         )
-        return [self._parse_kline(row) for row in data]
+        candles = [self._parse_kline(row) for row in data]
+        return self._cache_set(cache_key, candles)  # type: ignore[return-value]
 
     def map_klines(
         self,

@@ -5,11 +5,19 @@ import json
 import tempfile
 import unittest
 
-from trade_signal_app.config import AppSettings
+from trade_signal_app.config import AppSettings, DEFAULT_X_TRACKED_ACCOUNTS
 from trade_signal_app.runtime_config import RuntimeConfig, RuntimeConfigStore
 
 
 class RuntimeConfigTests(unittest.TestCase):
+    def test_default_from_settings_includes_curated_x_accounts(self) -> None:
+        config = RuntimeConfig.default_from_settings(AppSettings())
+
+        self.assertEqual(config.x_tracked_accounts, list(DEFAULT_X_TRACKED_ACCOUNTS))
+        self.assertIn("lookonchain", config.x_tracked_accounts)
+        self.assertIn("Grayscale", config.x_tracked_accounts)
+        self.assertIn("Strategy", config.x_tracked_accounts)
+
     def test_store_round_trip(self) -> None:
         settings = AppSettings()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -69,7 +77,10 @@ class RuntimeConfigTests(unittest.TestCase):
         config.okx_api_secret = "okx-secret"
         config.okx_api_passphrase = "okx-pass"
         config.x_bearer_token = "x-token"
+        config.onchain_api_key = "onchain-key"
+        config.llm_api_key = "llm-key"
         config.openai_api_key = "openai-key"
+        config.intelligence_defaults.llm_api_key = "nested-llm-key"
 
         payload = config.to_template_payload()
 
@@ -81,7 +92,10 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(payload["config"]["okx_api_secret"], "")
         self.assertEqual(payload["config"]["okx_api_passphrase"], "")
         self.assertEqual(payload["config"]["x_bearer_token"], "")
+        self.assertEqual(payload["config"]["onchain_api_key"], "")
+        self.assertEqual(payload["config"]["llm_api_key"], "")
         self.assertEqual(payload["config"]["openai_api_key"], "")
+        self.assertEqual(payload["config"]["intelligence_defaults"]["llm_api_key"], "")
         self.assertEqual(payload["config"]["intelligence_defaults"]["openai_api_key"], "")
 
     def test_template_import_preserves_current_secrets_when_missing(self) -> None:
@@ -93,6 +107,8 @@ class RuntimeConfigTests(unittest.TestCase):
         current.okx_api_secret = "keep-okx-secret"
         current.okx_api_passphrase = "keep-okx-pass"
         current.x_bearer_token = "keep-token"
+        current.onchain_api_key = "keep-onchain"
+        current.llm_api_key = "keep-llm"
         current.openai_api_key = "keep-openai"
 
         imported = RuntimeConfig.from_template_payload(
@@ -106,6 +122,8 @@ class RuntimeConfigTests(unittest.TestCase):
                     "okx_api_secret": "",
                     "okx_api_passphrase": "",
                     "x_bearer_token": "",
+                    "onchain_api_key": "",
+                    "llm_api_key": "",
                     "openai_api_key": "",
                     "scan_defaults": {"quote_asset": "FDUSD"},
                 },
@@ -120,6 +138,8 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(imported.okx_api_secret, "keep-okx-secret")
         self.assertEqual(imported.okx_api_passphrase, "keep-okx-pass")
         self.assertEqual(imported.x_bearer_token, "keep-token")
+        self.assertEqual(imported.onchain_api_key, "keep-onchain")
+        self.assertEqual(imported.llm_api_key, "keep-llm")
         self.assertEqual(imported.openai_api_key, "keep-openai")
         self.assertEqual(imported.scan_defaults.quote_asset, "FDUSD")
 

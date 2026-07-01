@@ -8,7 +8,9 @@ import json
 from urllib.request import Request, urlopen
 
 from .config import AppSettings
+from .data_services import get_llm_provider
 from .models import TradeSignal
+from .onchain import OpenMultiChainOnchainProvider
 from .runtime_config import IntelligenceDefaults, RuntimeConfig
 from .service import SignalScanner
 
@@ -96,20 +98,31 @@ class IntelligenceSnapshot:
     execution_risk: ExecutionRiskDecision
 
 
-class OpenAIInsightClient:
-    def __init__(self, *, api_key: str, model: str, timeout: int = 20) -> None:
+class LlmInsightClient:
+    def __init__(self, *, provider: str, api_key: str, model: str, base_url: str = "", timeout: int = 20) -> None:
+        self.provider = provider
         self.api_key = api_key
         self.model = model
+        preset = get_llm_provider(provider)
+        self.api_style = preset.api_style
+        self.base_url = (base_url or preset.base_url).rstrip("/")
         self.timeout = timeout
 
     def analyze(self, payload: dict[str, object]) -> str:
         if not self.api_key:
-            raise ValueError("OPENAI_API_KEY 未配置。")
+            raise ValueError("LLM API Key 未配置。")
         prompt = (
             "你是量化交易风控分析助手。基于以下 JSON 快照，输出中文，"
             "包含市场状态、主要机会、关键风险和自动交易建议。禁止承诺收益。\n\n"
             f"{json.dumps(payload, ensure_ascii=False)}"
         )
+        if self.api_style == "anthropic_messages":
+            return self._analyze_anthropic(prompt)
+        if self.api_style == "openai_responses":
+            return self._analyze_openai_responses(prompt)
+        return self._analyze_openai_chat(prompt)
+
+    def _analyze_openai_responses(self, prompt: str) -> str:
         body = json.dumps(
             {
                 "model": self.model,
@@ -119,7 +132,7 @@ class OpenAIInsightClient:
             ensure_ascii=False,
         ).encode("utf-8")
         request = Request(
-            "https://api.openai.com/v1/responses",
+            f"{self.base_url}/responses",
             data=body,
             method="POST",
             headers={
@@ -130,6 +143,51 @@ class OpenAIInsightClient:
         with urlopen(request, timeout=self.timeout) as response:
             data = json.load(response)
         return self._extract_output_text(data)
+
+    def _analyze_openai_chat(self, prompt: str) -> str:
+        body = json.dumps(
+            {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 500,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request = Request(
+            f"{self.base_url}/chat/completions",
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        with urlopen(request, timeout=self.timeout) as response:
+            data = json.load(response)
+        return self._extract_chat_text(data)
+
+    def _analyze_anthropic(self, prompt: str) -> str:
+        body = json.dumps(
+            {
+                "model": self.model,
+                "max_tokens": 500,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request = Request(
+            f"{self.base_url}/messages",
+            data=body,
+            method="POST",
+            headers={
+                "x-api-key": self.api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+        )
+        with urlopen(request, timeout=self.timeout) as response:
+            data = json.load(response)
+        return self._extract_anthropic_text(data)
 
     @staticmethod
     def _extract_output_text(payload: dict[str, object]) -> str:
@@ -149,6 +207,40 @@ class OpenAIInsightClient:
                     if text:
                         parts.append(text)
         return "\n".join(parts)
+
+    @staticmethod
+    def _extract_chat_text(payload: dict[str, object]) -> str:
+        choices = payload.get("choices", [])
+        if not isinstance(choices, list):
+            return ""
+        parts: list[str] = []
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message", {})
+            if isinstance(message, dict):
+                text = str(message.get("content", "")).strip()
+                if text:
+                    parts.append(text)
+        return "\n".join(parts)
+
+    @staticmethod
+    def _extract_anthropic_text(payload: dict[str, object]) -> str:
+        content = payload.get("content", [])
+        if not isinstance(content, list):
+            return ""
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text = str(item.get("text", "")).strip()
+                if text:
+                    parts.append(text)
+        return "\n".join(parts)
+
+
+class OpenAIInsightClient(LlmInsightClient):
+    def __init__(self, *, api_key: str, model: str, timeout: int = 20) -> None:
+        super().__init__(provider="openai", api_key=api_key, model=model, timeout=timeout)
 
 
 class IntelligenceHub:
@@ -237,21 +329,38 @@ class IntelligenceHub:
         return items
 
     def _build_twitter_accounts(self) -> list[TwitterAccountInsight]:
-        accounts = self.runtime_config.x_tracked_accounts or ["lookonchain", "wu_blockchain", "TheBlock__", "binance"]
+        accounts = self.runtime_config.x_tracked_accounts
         return [
             TwitterAccountInsight(
                 username=account.lstrip("@"),
                 mode=self.runtime_config.x_account_mode,
                 weight_pct=self.runtime_config.x_account_weight_pct,
                 focus=self._account_focus(account),
-                status="configured" if self.runtime_config.x_bearer_token else "token_missing",
+                status=self._x_provider_status(),
             )
             for account in accounts[:12]
         ]
 
+    def _x_provider_status(self) -> str:
+        if self.runtime_config.x_provider == "official_api":
+            return "configured" if self.runtime_config.x_bearer_token else "token_missing"
+        if self.runtime_config.x_provider == "nitter_rss":
+            return "configured" if self.runtime_config.x_nitter_base_url else "nitter_missing"
+        if self.runtime_config.x_provider == "session_scrape":
+            return "configured" if self.runtime_config.x_session_command else "session_command_missing"
+        return "provider_invalid"
+
     @staticmethod
     def _account_focus(account: str) -> str:
         lowered = account.lower()
+        if lowered in {"grayscale", "ishares", "vaneck_us", "arkinvest", "21shares_us"}:
+            return "ETF 与基金流向"
+        if lowered in {"saylor", "strategy", "btctreasuries"}:
+            return "BTC 持仓大户"
+        if lowered in {"bitcoin", "ethereum", "solana", "bnbchain", "ripple", "chainlink", "suinetwork", "ton_blockchain"}:
+            return "核心项目方"
+        if lowered in {"cryptocred", "pentosh1", "daancrypto", "scottmelker", "bobloukas", "cryptohayes", "apompliano"}:
+            return "交易员与宏观观点"
         if "chain" in lowered or "lookon" in lowered:
             return "链上异动"
         if "block" in lowered or "news" in lowered:
@@ -262,23 +371,32 @@ class IntelligenceHub:
 
     def _load_onchain_events(self, signals: list[TradeSignal]) -> list[OnchainEvent]:
         events = self._read_onchain_csv(self.settings.onchain_events_csv)
-        if not events:
-            events = [
-                OnchainEvent(
-                    chain="derived",
-                    symbol=signal.symbol,
-                    event_type="volume_impulse",
-                    amount_usd=signal.ticker.quote_volume * min(0.05, signal.indicators.volume_ratio / 100),
-                    direction="exchange_inflow" if signal.ticker.price_change_percent < 0 else "accumulation",
-                    severity=min(100.0, 45 + signal.indicators.volume_ratio * 20),
+        if self.runtime_config.onchain_data_preset == "open_multichain_keyless":
+            price_map = {signal.symbol.upper(): float(signal.ticker.last_price) for signal in signals}
+            try:
+                events.extend(
+                    OnchainEvent(
+                        chain=item.chain,
+                        symbol=item.symbol,
+                        event_type=item.event_type,
+                        amount_usd=item.amount_usd,
+                        direction=item.direction,
+                        severity=item.severity,
+                        tx_hash=item.tx_hash,
+                    )
+                    for item in OpenMultiChainOnchainProvider(
+                        whale_threshold_usd=self.config.whale_transfer_threshold_usd,
+                        base_url_override=self.runtime_config.onchain_api_base_url,
+                    ).fetch_events([signal.symbol for signal in signals], price_map)
                 )
-                for signal in signals
-                if signal.indicators.volume_ratio >= 1.2
-            ]
+            except Exception:  # noqa: BLE001
+                pass
         return [
             event
             for event in sorted(events, key=lambda candidate: candidate.severity, reverse=True)
-            if event.amount_usd >= self.config.whale_transfer_threshold_usd or event.severity >= 70
+            if event.amount_usd >= self.config.whale_transfer_threshold_usd
+            or event.severity >= 70
+            or (event.event_type == "network_snapshot" and event.severity >= 45)
         ][:10]
 
     @staticmethod
@@ -303,24 +421,6 @@ class IntelligenceHub:
 
     def _build_spreads(self, signals: list[TradeSignal]) -> list[SpreadOpportunity]:
         spreads = self._read_spread_csv(self.settings.futures_basis_csv)
-        if not spreads:
-            spreads = []
-            for signal in signals[:12]:
-                spot = signal.ticker.last_price
-                synthetic_basis = signal.ticker.price_change_percent * 0.0008 + signal.indicators.ema_spread_pct * 0.0005
-                futures = spot * (1 + synthetic_basis)
-                spread_bps = ((futures - spot) / spot) * 10_000 if spot else 0.0
-                spreads.append(
-                    SpreadOpportunity(
-                        symbol=signal.symbol,
-                        spot_exchange="BINANCE",
-                        futures_exchange="BINANCE-PERP",
-                        spot_price=spot,
-                        futures_price=futures,
-                        spread_bps=spread_bps,
-                        direction="long_spot_short_perp" if spread_bps > 0 else "short_spot_long_perp",
-                    )
-                )
         return [
             item
             for item in sorted(spreads, key=lambda candidate: abs(candidate.spread_bps), reverse=True)
@@ -429,20 +529,25 @@ class IntelligenceHub:
             "spreads": [asdict(item) for item in spreads[:6]],
             "strategy_hits": [asdict(item) for item in strategy_hits[:6]],
         }
-        if self.config.llm_enabled and self.config.openai_api_key:
+        provider = self.config.llm_provider or "openai"
+        api_key = self.config.llm_api_key or self.config.openai_api_key
+        model = self.config.llm_model or self.config.openai_model
+        if self.config.llm_enabled and api_key:
             try:
-                summary = OpenAIInsightClient(
-                    api_key=self.config.openai_api_key,
-                    model=self.config.openai_model,
+                summary = LlmInsightClient(
+                    provider=provider,
+                    api_key=api_key,
+                    model=model,
+                    base_url=self.config.llm_base_url,
                 ).analyze(payload)
                 if summary:
-                    return LlmInsight(provider="openai", model=self.config.openai_model, status="ok", summary=summary)
+                    return LlmInsight(provider=provider, model=model, status="ok", summary=summary)
             except Exception as exc:  # noqa: BLE001
                 return LlmInsight(
-                    provider="openai",
-                    model=self.config.openai_model,
+                    provider=provider,
+                    model=model,
                     status="fallback",
-                    summary=f"OpenAI 分析失败，已切换本地规则：{exc}",
+                    summary=f"大模型分析失败，已切换本地规则：{exc}",
                 )
         return LlmInsight(
             provider="local",
@@ -466,5 +571,7 @@ class IntelligenceHub:
         return (
             f"综合监控显示：策略命中 {len(strategy_hits)} 个，链上异动 {len(onchain_events)} 条，"
             f"价差机会 {len(spreads)} 个，交易所/社区关键情报 {len(intel_items)} 条。"
-            f"当前风险状态为{risk}；建议优先处理高分策略命中，并在实盘前复核链上大额流入与价差回归风险。"
+            f"当前风险状态为{risk}；建议优先处理高分策略命中。"
+            f"{' 未配置真实链上事件源，链上风控不参与阻断。' if not onchain_events else ' 实盘前需复核链上大额流入风险。'}"
+            f"{' 未配置真实现货/合约 basis 源，价差风控不参与阻断。' if not spreads else ' 实盘前需复核价差回归风险。'}"
         )

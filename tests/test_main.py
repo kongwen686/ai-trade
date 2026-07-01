@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import io
+import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -15,18 +16,31 @@ from trade_signal_app.main import (
     _backtest_payload,
     _backtest_export_csv,
     _build_runtime_config,
+    _compile_strategy_payload,
     _export_runtime_config_template,
+    _health_payload,
     _import_runtime_config_template,
     _run_trading_once,
+    _scan_payload,
+    _terminal_module_payload,
+    _trading_readiness_payload,
     _split_archives,
     main,
     parse_args,
     run,
 )
+from trade_signal_app.onchain import OnchainMonitorEvent
 from trade_signal_app.presets import list_backtest_presets
 from trade_signal_app.runtime_config import RuntimeConfig
 from trade_signal_app.trading import TradingStateStore
-from trade_signal_app.views import render_backtest_page, render_settings_page, render_terminal_module_page, render_terminal_page, render_trading_page
+from trade_signal_app.views import (
+    render_backtest_page,
+    render_index_page,
+    render_settings_page,
+    render_terminal_module_page,
+    render_terminal_page,
+    render_trading_page,
+)
 
 
 def _build_archive(path: Path) -> None:
@@ -108,6 +122,124 @@ class MainTests(unittest.TestCase):
             ["data/a.zip", "data/b.zip", "data/c.zip"],
         )
 
+    def test_health_payload_is_local_and_reports_live_blockers(self) -> None:
+        config = RuntimeConfig()
+        config.autotrade_defaults.mode = "live"
+        config.autotrade_defaults.order_test_only = False
+        with (
+            patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, object())),
+            patch("trade_signal_app.main.APP_STATE.storage_mode_label", return_value="Plain JSON"),
+            patch("trade_signal_app.main.TradingStateStore.load", return_value=[]),
+            patch("trade_signal_app.main.TradingStateStore.load_events", return_value=[]),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            payload = _health_payload()
+
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["external_checks"]["performed"])
+        self.assertIn("Binance API key/secret 未配置", payload["autotrade"]["local_blockers"])
+        self.assertIn("AI_TRADE_LIVE_CONFIRM", payload["autotrade"]["local_blockers"][1])
+
+    def test_trading_readiness_skips_account_check_for_paper_status(self) -> None:
+        config = RuntimeConfig()
+        config.binance_api_key = "key"
+        config.binance_api_secret = "secret"
+        gateway = Mock()
+        gateway.account_status.side_effect = AssertionError("account check should not run")
+        scanner = SimpleNamespace(gateway=gateway)
+        with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, scanner)):
+            payload = _trading_readiness_payload()
+
+        self.assertFalse(payload["account_check_performed"])
+        self.assertEqual(payload["exchange_status"]["status"], "unchecked")
+
+    def test_trading_readiness_can_force_account_check(self) -> None:
+        config = RuntimeConfig()
+        config.binance_api_key = "key"
+        config.binance_api_secret = "secret"
+        gateway = Mock()
+        gateway.account_status.return_value = {
+            "configured": True,
+            "authenticated": True,
+            "can_trade": True,
+            "quote_available": 100.0,
+            "status": "ready",
+        }
+        scanner = SimpleNamespace(gateway=gateway)
+        with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, scanner)):
+            payload = _trading_readiness_payload(check_account=True)
+
+        self.assertTrue(payload["account_check_performed"])
+        gateway.account_status.assert_called_once_with({"USDT"})
+
+    def test_scan_payload_rejects_invalid_query_parameters(self) -> None:
+        scanner = Mock()
+        with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(RuntimeConfig(), scanner)):
+            with self.assertRaisesRegex(ValueError, "Candidate Pool"):
+                _scan_payload({"candidate_pool": ["many"]})
+
+        scanner.scan.assert_not_called()
+
+    def test_scan_payload_preserves_table_view_mode(self) -> None:
+        scanner = Mock()
+        scanner.scan.return_value = (
+            {"scanned_symbols": 0, "returned_signals": 0, "quote_asset": "USDT", "interval": "4h", "min_quote_volume": 0},
+            [],
+        )
+        with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(RuntimeConfig(), scanner)):
+            _, params = _scan_payload({"view_mode": ["table"]})
+
+        self.assertEqual(params["view_mode"], "table")
+
+    def test_render_index_page_supports_table_view_mode(self) -> None:
+        html = render_index_page(
+            summary={
+                "scanned_symbols": 12,
+                "returned_signals": 1,
+                "quote_asset": "USDT",
+                "interval": "4h",
+                "min_quote_volume": 1_000_000,
+            },
+            signals=[
+                {
+                    "symbol": "BTCUSDT",
+                    "grade": "A",
+                    "score": 82.5,
+                    "reasons": ["趋势向上", "量能放大"],
+                    "warnings": ["追高风险"],
+                    "quote_volume_m": 1200.0,
+                    "price_change_percent": 2.4,
+                    "rsi_14": 58.2,
+                    "ema_spread_pct": 1.3,
+                    "volume_ratio": 1.8,
+                    "macd_hist": 0.0234,
+                    "community_score": 76,
+                    "community_source": "local",
+                    "breakdown": {"trend": 80, "momentum": 75, "volume": 70},
+                    "sparkline_points": "0,20 80,10 160,4",
+                }
+            ],
+            params={
+                "quote_asset": "USDT",
+                "interval": "4h",
+                "candidate_pool": 5,
+                "min_quote_volume": 1_000_000,
+                "min_trade_count": 100,
+                "view_mode": "table",
+            },
+            intervals=["4h"],
+        )
+
+        self.assertIn("展示模式", html)
+        self.assertIn("signal-table", html)
+        self.assertIn("BTCUSDT", html)
+        self.assertIn("view_mode=cards", html)
+
+    def test_backtest_payload_rejects_invalid_query_parameters(self) -> None:
+        with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(RuntimeConfig(), None)):
+            with self.assertRaisesRegex(ValueError, "Lookback Bars"):
+                _backtest_payload({"lookback_bars": ["soon"]})
+
     def test_backtest_payload_runs_with_web_only_parameters(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             archive = Path(temp_dir) / "BTCUSDT-4h-2025-01.zip"
@@ -166,6 +298,7 @@ class MainTests(unittest.TestCase):
         self.assertEqual(len(payload["series_reports"]), 1)
         self.assertEqual(len(payload["portfolio_reports"]), 1)
         self.assertGreater(payload["series_reports"][0]["signal_count"], 0)
+        self.assertGreater(payload["series_reports"][0]["buy_hold_final_equity"], 1.0)
         self.assertEqual(payload["portfolio_reports"][0]["top_n"], 1)
 
     def test_render_backtest_page_includes_extended_controls(self) -> None:
@@ -209,6 +342,14 @@ class MainTests(unittest.TestCase):
             portfolio_reports=[],
             error=None,
             presets=list_backtest_presets(),
+            strategy_explanation={
+                "strategy_type": "balanced_swing",
+                "summary": "均衡波段模板，在趋势、动量、量能和买压之间取折中。",
+                "sample": {"series_count": 0, "series_trades": 0},
+                "best": {"series": None, "portfolio": None},
+                "diagnostics": ["尚未产生单币种回测结果；需要先提供本地历史 K 线 ZIP。"],
+                "notes": ["成本假设：fee_model=maker_taker, fee_source=manual, slippage_model=dynamic。"],
+            },
         )
 
         self.assertIn("Lookback Bars", html)
@@ -221,7 +362,12 @@ class MainTests(unittest.TestCase):
         self.assertIn("Fee Source", html)
         self.assertIn("Maker Fee bps", html)
         self.assertIn("Entry Fee Role", html)
+        self.assertIn("基准测试", html)
         self.assertIn("Series Equity Rank", html)
+        self.assertIn("策略解释", html)
+        self.assertIn("稳定性检查", html)
+        self.assertIn("均衡波段模板", html)
+        self.assertIn("Stability Checks", html)
         self.assertIn("/api/backtest/export?format=csv", html)
         self.assertIn("Balanced Swing", html)
         self.assertIn("/api/backtest/presets", html)
@@ -230,8 +376,14 @@ class MainTests(unittest.TestCase):
         html = render_settings_page(
             params={
                 "binance_recv_window_ms": 5000.0,
+                "market_data_preset": "binance_public",
+                "onchain_data_preset": "defillama_free",
+                "onchain_api_base_url": "",
                 "community_provider": "x",
+                "x_provider": "official_api",
                 "x_api_base_url": "https://api.x.com",
+                "x_nitter_base_url": "",
+                "x_session_command": "",
                 "x_recent_window_hours": 24,
                 "x_recent_max_results": 25,
                 "x_language": "en",
@@ -239,7 +391,10 @@ class MainTests(unittest.TestCase):
                 "reddit_recent_window_hours": 24,
                 "reddit_max_results": 25,
                 "reddit_user_agent": "trade-signal-app/0.2",
-                "openai_model": "gpt-5.4",
+                "llm_provider": "openai",
+                "llm_base_url": "",
+                "llm_model": "gpt-5.5",
+                "openai_model": "gpt-5.5",
                 "x_account_mode": "blend",
                 "x_account_weight_pct": 35.0,
                 "x_tracked_accounts": ["lookonchain", "wu_blockchain"],
@@ -262,7 +417,10 @@ class MainTests(unittest.TestCase):
                 "autotrade_order_test_only": True,
                 "intelligence_enabled": True,
                 "intelligence_llm_enabled": False,
-                "intelligence_openai_model": "gpt-5.4",
+                "intelligence_llm_provider": "openai",
+                "intelligence_llm_base_url": "",
+                "intelligence_llm_model": "gpt-5.5",
+                "intelligence_openai_model": "gpt-5.5",
                 "intelligence_min_intel_severity": 60.0,
                 "intelligence_min_spread_bps": 12.0,
                 "intelligence_whale_transfer_threshold_usd": 5_000_000.0,
@@ -304,27 +462,59 @@ class MainTests(unittest.TestCase):
                 "binance_auth_label": "API key + secret 已配置",
                 "okx_auth_configured": False,
                 "x_auth_configured": True,
+                "x_provider": "official_api",
+                "x_provider_configured": True,
                 "tracked_account_count": 2,
                 "storage_mode": "Encrypted",
                 "autotrade_enabled": False,
                 "autotrade_mode": "paper",
                 "intelligence_enabled": True,
                 "llm_enabled": False,
+                "llm_provider": "openai",
+                "llm_configured": False,
+                "public_data_presets": [
+                    {"preset_id": "binance_public", "name": "Binance Public Market Data", "category": "market"},
+                    {"preset_id": "defillama_free", "name": "DefiLlama Free API", "category": "onchain"},
+                ],
+                "llm_provider_presets": [
+                    {"provider_id": "openai", "name": "OpenAI"},
+                    {"provider_id": "anthropic", "name": "Anthropic Claude"},
+                    {"provider_id": "google", "name": "Google Gemini"},
+                    {"provider_id": "deepseek", "name": "DeepSeek"},
+                    {"provider_id": "xai", "name": "xAI Grok"},
+                    {"provider_id": "mistral", "name": "Mistral AI"},
+                    {"provider_id": "qwen", "name": "Alibaba Qwen"},
+                    {"provider_id": "moonshot", "name": "Moonshot Kimi"},
+                ],
             },
             message="运行配置已保存。",
             error=None,
             import_payload_text=None,
+            layout_context={"market_ticker": {"items": [], "error": "Ticker cache is empty. Run a market scan to load live ticker data.", "error_code": "cache_empty"}},
         )
 
         self.assertIn("Runtime Settings", html)
         self.assertIn("Binance API Key", html)
         self.assertIn("OKX API Key", html)
+        self.assertIn("Market Data Preset", html)
+        self.assertIn("On-chain Data Preset", html)
+        self.assertIn("DefiLlama", html)
+        self.assertIn("LLM Provider", html)
+        self.assertIn("DeepSeek", html)
+        self.assertIn("Moonshot", html)
+        self.assertIn("X Provider", html)
+        self.assertIn("nitter_rss", html)
+        self.assertIn("session_scrape", html)
+        self.assertIn("X Nitter Base URL", html)
+        self.assertIn("X Session Command", html)
         self.assertIn("Twitter Intel", html)
         self.assertIn("Tracked Accounts", html)
         self.assertIn("Backtest Defaults", html)
         self.assertIn("运行配置已保存", html)
         self.assertIn("导出模板 JSON", html)
         self.assertIn("导入配置模板", html)
+        self.assertIn("未配置 OKX 凭据", html)
+        self.assertIn("2 个 X 跟踪账号", html)
         self.assertIn("Reddit API Base URL", html)
         self.assertIn("Reddit User-Agent", html)
         self.assertIn("Default Preset", html)
@@ -332,6 +522,12 @@ class MainTests(unittest.TestCase):
         self.assertIn("Intelligence & LLM", html)
         self.assertIn("Encrypted", html)
         self.assertIn("RUNTIME_CONFIG_PASSPHRASE", html)
+        self.assertIn("用于读取 Binance 账户权限、费率和提交受保护的实盘订单", html)
+        self.assertIn("自动交易最多同时持有的仓位数量", html)
+        self.assertIn("本地 Binance public-data ZIP 路径或 glob", html)
+        self.assertIn("粘贴从导出功能得到的配置模板 JSON", html)
+        self.assertIn("行情缓存为空，请先运行一次市场扫描加载实时行情。", html)
+        self.assertNotIn("Ticker cache is empty", html)
 
     def test_render_terminal_page_includes_intelligence_sections(self) -> None:
         html = render_terminal_page(
@@ -467,6 +663,97 @@ class MainTests(unittest.TestCase):
         self.assertIn('class="sidebar-link active" href="/terminal/trading"', html)
         self.assertNotIn("terminal-sidebar", html)
 
+    def test_onchain_module_loads_without_terminal_scan(self) -> None:
+        config = RuntimeConfig()
+        config.onchain_data_preset = "open_multichain_keyless"
+        with (
+            patch("trade_signal_app.main._terminal_payload", side_effect=RuntimeError("scan failed")),
+            patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, None)),
+            patch(
+                "trade_signal_app.main.OpenMultiChainOnchainProvider.fetch_events",
+                return_value=[
+                    OnchainMonitorEvent(
+                        chain="bitcoin",
+                        symbol="BTCUSDT",
+                        event_type="network_snapshot",
+                        amount_usd=0.0,
+                        direction="latest_block_txs=25",
+                        severity=50.0,
+                    )
+                ],
+            ),
+        ):
+            payload = _terminal_module_payload("onchain")
+
+        self.assertFalse(payload["fallback"])
+        self.assertEqual(payload["onchain_events"][0]["symbol"], "BTCUSDT")
+        self.assertEqual(payload["warning"], "")
+
+    def test_compile_strategy_payload_returns_run_urls_without_llm(self) -> None:
+        with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(RuntimeConfig(), object())):
+            payload = _compile_strategy_payload("BTC 15m RSI 超卖反弹，止损3%，止盈6%")
+
+        self.assertEqual(payload["source"], "local_rules")
+        self.assertEqual(payload["style"], "mean_reversion")
+        self.assertEqual(payload["symbols"], ["BTCUSDT"])
+        self.assertIn("/backtest?", payload["run_urls"]["backtest"])
+        self.assertEqual(payload["run_urls"]["paper_trading"], "/terminal/trading")
+
+    def test_render_strategy_module_includes_natural_language_compiler(self) -> None:
+        html = render_terminal_module_page(
+            snapshot={
+                "generated_at": "2026-04-28T00:00:00+00:00",
+                "scanned_symbols": 12,
+                "returned_signals": 4,
+                "intel_items": [],
+                "twitter_accounts": [],
+                "onchain_events": [],
+                "spreads": [],
+                "strategy_hits": [{"symbol": "BTCUSDT", "strategy": "auto_score_breakout", "score": 82.0, "grade": "A", "action": "watch", "reasons": ["趋势结构改善"]}],
+                "llm_insight": {"provider": "local", "model": "rules", "status": "ok", "summary": "综合监控正常。"},
+                "execution_risk": {
+                    "status": "clear",
+                    "risk_score": 22.0,
+                    "allowed_symbols": ["BTCUSDT"],
+                    "blocked_symbols": {},
+                    "summary": "执行前风控：允许 1 个候选。",
+                },
+                "platform": {
+                    "generated_at": "2026-04-28T00:00:00+00:00",
+                    "components": [],
+                    "accounts": [],
+                    "strategies": [{"strategy_id": "auto_score_breakout", "name": "综合评分突破", "status": "watch_only", "trigger": "score >= 75.0", "execution": "paper/live 市价买入", "risk_controls": ["risk_gate"]}],
+                    "risk_rules": [],
+                    "recent_events": [],
+                },
+            },
+            module="strategies",
+            strategy_builder_text="BTC 15m RSI 超卖反弹",
+            strategy_builder_result={
+                "name": "BTC 15m 均值回归策略",
+                "description": "BTC 15m RSI 超卖反弹",
+                "symbols": ["BTCUSDT"],
+                "quote_asset": "USDT",
+                "interval": "15m",
+                "style": "mean_reversion",
+                "entry_rules": ["RSI 低位反弹"],
+                "exit_rules": ["止损 3%"],
+                "risk_controls": ["paper 模式验证"],
+                "backtest_defaults": {"preset": "custom", "score_threshold": 62.0, "stop_loss_pct": 3.0, "take_profit_pct": 6.0},
+                "autotrade_defaults": {"enabled": False, "mode": "paper", "score_threshold": 68.0, "order_test_only": True},
+                "source": "local_rules",
+                "model": "rules",
+                "warnings": ["先回测。"],
+                "run_urls": {"backtest": "/backtest?preset=custom", "paper_trading": "/terminal/trading"},
+            },
+            message="策略已编译为可回测和 paper 自动交易参数。",
+        )
+
+        self.assertIn("自然语言策略编译器", html)
+        self.assertIn('action="/terminal/strategies/compile"', html)
+        self.assertIn("BTCUSDT", html)
+        self.assertIn("打开回测", html)
+
     def test_render_trading_page_includes_execution_controls(self) -> None:
         html = render_trading_page(
             config={
@@ -565,13 +852,22 @@ class MainTests(unittest.TestCase):
         current.okx_api_secret = "keep-okx-secret"
         current.okx_api_passphrase = "keep-okx-pass"
         current.x_bearer_token = "keep-x-token"
+        current.onchain_api_key = "keep-onchain-key"
+        current.llm_api_key = "keep-llm-key"
 
         with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(current, None)):
             config = _build_runtime_config(
                 {
                     "binance_recv_window_ms": ["6000"],
+                    "market_data_preset": ["okx_public"],
+                    "onchain_data_preset": ["geckoterminal_keyless"],
+                    "onchain_api_key": ["test-onchain-key"],
+                    "onchain_api_base_url": ["https://onchain.example.test"],
                     "community_provider": ["x"],
+                    "x_provider": ["nitter_rss"],
                     "x_api_base_url": ["https://api.x.com"],
+                    "x_nitter_base_url": ["http://127.0.0.1:8788"],
+                    "x_session_command": ["twscrape search {query} --limit {limit}"],
                     "x_recent_window_hours": ["12"],
                     "x_recent_max_results": ["20"],
                     "x_language": ["en"],
@@ -601,8 +897,10 @@ class MainTests(unittest.TestCase):
                     "autotrade_order_test_only": ["on"],
                     "intelligence_enabled": ["on"],
                     "intelligence_llm_enabled": ["on"],
-                    "openai_api_key": ["test-openai-key"],
-                    "intelligence_openai_model": ["gpt-5.4"],
+                    "llm_provider": ["deepseek"],
+                    "llm_api_key": ["test-llm-key"],
+                    "llm_base_url": ["https://llm.example.test/v1"],
+                    "llm_model": ["deepseek-chat"],
                     "intelligence_min_intel_severity": ["68"],
                     "intelligence_min_spread_bps": ["15"],
                     "intelligence_whale_transfer_threshold_usd": ["7000000"],
@@ -647,6 +945,17 @@ class MainTests(unittest.TestCase):
         self.assertEqual(config.okx_api_secret, "keep-okx-secret")
         self.assertEqual(config.okx_api_passphrase, "keep-okx-pass")
         self.assertEqual(config.x_bearer_token, "keep-x-token")
+        self.assertEqual(config.market_data_preset, "okx_public")
+        self.assertEqual(config.onchain_data_preset, "geckoterminal_keyless")
+        self.assertEqual(config.onchain_api_key, "test-onchain-key")
+        self.assertEqual(config.onchain_api_base_url, "https://onchain.example.test")
+        self.assertEqual(config.llm_provider, "deepseek")
+        self.assertEqual(config.llm_api_key, "test-llm-key")
+        self.assertEqual(config.llm_base_url, "https://llm.example.test/v1")
+        self.assertEqual(config.llm_model, "deepseek-chat")
+        self.assertEqual(config.x_provider, "nitter_rss")
+        self.assertEqual(config.x_nitter_base_url, "http://127.0.0.1:8788")
+        self.assertEqual(config.x_session_command, "twscrape search {query} --limit {limit}")
         self.assertEqual(config.x_account_mode, "blend")
         self.assertEqual(config.x_tracked_accounts, ["@lookonchain", "wu_blockchain"])
         self.assertEqual(config.reddit_recent_window_hours, 18)
@@ -659,11 +968,31 @@ class MainTests(unittest.TestCase):
         self.assertEqual(config.autotrade_defaults.max_open_positions, 2)
         self.assertTrue(config.intelligence_defaults.enabled)
         self.assertTrue(config.intelligence_defaults.llm_enabled)
-        self.assertEqual(config.intelligence_defaults.openai_api_key, "test-openai-key")
+        self.assertEqual(config.intelligence_defaults.llm_provider, "deepseek")
+        self.assertEqual(config.intelligence_defaults.llm_api_key, "test-llm-key")
+        self.assertEqual(config.intelligence_defaults.llm_model, "deepseek-chat")
         self.assertEqual(config.intelligence_defaults.min_spread_bps, 15.0)
         self.assertEqual(config.backtest_defaults.fee_source, "account")
         self.assertTrue(config.backtest_defaults.no_binance_discount)
         self.assertTrue(config.backtest_defaults.no_kdj_confirmation)
+
+    def test_build_runtime_config_rejects_invalid_choices(self) -> None:
+        with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(RuntimeConfig(), None)):
+            with self.assertRaisesRegex(ValueError, "Auto Trade Mode"):
+                _build_runtime_config({"autotrade_mode": ["real"]})
+
+    def test_import_runtime_config_template_rejects_invalid_ranges(self) -> None:
+        current = RuntimeConfig()
+        config_payload = current.to_dict()
+        config_payload["backtest_defaults"] = {
+            **config_payload["backtest_defaults"],
+            "min_rsi": 80,
+            "max_rsi": 20,
+        }
+        payload = {"kind": "runtime_config_template", "version": 1, "config": config_payload}
+        with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(current, None)):
+            with self.assertRaisesRegex(ValueError, "Min RSI"):
+                _import_runtime_config_template({"config_template": [json.dumps(payload)]})
 
     def test_import_runtime_config_template_preserves_existing_secrets(self) -> None:
         current = RuntimeConfig()
@@ -713,6 +1042,11 @@ class MainTests(unittest.TestCase):
     def test_backtest_export_csv_contains_core_rows(self) -> None:
         csv_text = _backtest_export_csv(
             payload={
+                "strategy_explanation": {
+                    "strategy_type": "balanced_swing",
+                    "summary": "均衡波段模板",
+                    "notes": ["成本假设：fee_model=flat"],
+                },
                 "series_reports": [
                     {
                         "symbol": "BTCUSDT",
@@ -739,6 +1073,7 @@ class MainTests(unittest.TestCase):
         )
 
         self.assertIn("section,name,interval,metric,value", csv_text)
+        self.assertIn("meta,strategy,,strategy_type,balanced_swing", csv_text)
         self.assertIn("param,backtest,,lookback_bars,240", csv_text)
         self.assertIn("series,BTCUSDT,4h,final_equity,1.23", csv_text)
         self.assertIn("portfolio,portfolio_top_2,4h,profit_factor,2.1", csv_text)
@@ -753,6 +1088,41 @@ class MainTests(unittest.TestCase):
         self.assertEqual(params["preset"], "portfolio_rotation")
         self.assertEqual(params["portfolio_top_n"], 3)
         self.assertEqual(params["capital_fraction_pct"], 60.0)
+
+    def test_backtest_payload_includes_strategy_explanation_without_archives(self) -> None:
+        current = RuntimeConfig()
+        current.backtest_defaults.preset = "breakout_aggressive"
+
+        with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(current, None)):
+            payload, _, error = _backtest_payload({})
+
+        self.assertIsNone(error)
+        self.assertEqual(payload["strategy_explanation"]["strategy_type"], "breakout")
+        self.assertIn("尚未产生", " ".join(payload["strategy_explanation"]["diagnostics"]))
+
+    def test_backtest_payload_runs_optional_stability_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive = Path(temp_dir) / "BTCUSDT-4h-2025-01.zip"
+            _build_archive(archive)
+
+            with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(RuntimeConfig(), None)):
+                payload, _, error = _backtest_payload(
+                    {
+                        "archives": [str(archive)],
+                        "portfolio_top_n": ["0"],
+                        "stability_checks": ["on"],
+                    }
+                )
+
+        self.assertIsNone(error)
+        explanation = payload["strategy_explanation"]
+        self.assertTrue(explanation["stability_enabled"])
+        self.assertTrue(explanation["stability_checks"])
+        check_names = {item["check"] for item in explanation["stability_checks"]}
+        self.assertIn("score_minus_3", check_names)
+        self.assertIn("score_plus_3", check_names)
+        self.assertIn("slippage_plus_5bps", check_names)
+        self.assertIn("walk_forward_fold_1", check_names)
 
     def test_backtest_payload_applies_btc_cycle_trend_preset(self) -> None:
         current = RuntimeConfig()
@@ -777,6 +1147,30 @@ class MainTests(unittest.TestCase):
         self.assertEqual(params["preset"], "btc_core_trading")
         self.assertEqual(params["min_buy_pressure"], 0.56)
         self.assertEqual(params["max_rsi"], 74.0)
+        self.assertTrue(params["no_kdj_confirmation"])
+
+    def test_backtest_payload_applies_crypto_rebalance_premium_preset(self) -> None:
+        current = RuntimeConfig()
+        current.backtest_defaults.preset = "crypto_rebalance_premium"
+
+        with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(current, None)):
+            _, params, _ = _backtest_payload({})
+
+        self.assertEqual(params["preset"], "crypto_rebalance_premium")
+        self.assertEqual(params["portfolio_top_n"], 0)
+        self.assertEqual(params["capital_fraction_pct"], 100.0)
+        self.assertTrue(params["no_kdj_confirmation"])
+
+    def test_backtest_payload_applies_btc_overnight_seasonality_preset(self) -> None:
+        current = RuntimeConfig()
+        current.backtest_defaults.preset = "btc_overnight_seasonality"
+
+        with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(current, None)):
+            _, params, _ = _backtest_payload({})
+
+        self.assertEqual(params["preset"], "btc_overnight_seasonality")
+        self.assertEqual(params["score_threshold"], 0.0)
+        self.assertEqual(params["max_holding_bars"], 2)
         self.assertTrue(params["no_kdj_confirmation"])
 
     def test_backtest_payload_returns_error_for_binance_fee_resolution_failure(self) -> None:

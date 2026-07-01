@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from .binance_client import BinanceSpotGateway, parse_ticker
+from .binance_client import BinancePublicAPIError, BinanceSpotGateway, parse_ticker
 from .community import CommunityScoreProvider
 from .config import AppSettings
 from .indicators import build_indicator_snapshot
@@ -11,6 +11,41 @@ from .scoring import build_reasons, build_subscores, composite_score, compute_li
 
 STABLELIKE_BASES = {"USDT", "USDC", "FDUSD", "BUSD", "TUSD", "USDP", "DAI"}
 LEVERAGED_SUFFIXES = ("UP", "DOWN", "BULL", "BEAR")
+FALLBACK_SCAN_BASES = (
+    "BTC",
+    "ETH",
+    "BNB",
+    "SOL",
+    "XRP",
+    "DOGE",
+    "ADA",
+    "TRX",
+    "LINK",
+    "AVAX",
+    "SUI",
+    "TON",
+    "LTC",
+    "BCH",
+    "DOT",
+    "UNI",
+    "NEAR",
+    "APT",
+    "ICP",
+    "ETC",
+    "FIL",
+    "ARB",
+    "OP",
+    "ATOM",
+    "AAVE",
+    "INJ",
+    "SEI",
+    "TIA",
+    "WLD",
+    "ENA",
+    "PEPE",
+    "SHIB",
+    "ZEC",
+)
 
 
 class SignalScanner:
@@ -23,6 +58,7 @@ class SignalScanner:
         self.gateway = gateway
         self.community_provider = community_provider
         self.settings = settings
+        self._exchange_info_retry_after: datetime | None = None
 
     def scan(
         self,
@@ -38,9 +74,19 @@ class SignalScanner:
         min_quote_volume = min_quote_volume or self.settings.min_quote_volume
         min_trade_count = min_trade_count or self.settings.min_trade_count
 
-        exchange_info = self.gateway.exchange_info()
-        eligible_symbols = self._eligible_symbols(exchange_info, quote_asset)
-        tickers = [parse_ticker(row) for row in self.gateway.ticker24hr()]
+        now = datetime.now(timezone.utc)
+        if self._exchange_info_retry_after and self._exchange_info_retry_after > now:
+            eligible_symbols = self._fallback_symbols(quote_asset)
+        else:
+            try:
+                exchange_info = self.gateway.exchange_info()
+                eligible_symbols = self._eligible_symbols(exchange_info, quote_asset)
+                self._exchange_info_retry_after = None
+            except BinancePublicAPIError:
+                self._exchange_info_retry_after = now + timedelta(seconds=self.settings.scan_ttl_seconds)
+                eligible_symbols = self._fallback_symbols(quote_asset)
+        ticker_rows = self.gateway.ticker24hr_symbols(sorted(eligible_symbols))
+        tickers = [parse_ticker(row) for row in ticker_rows]
         filtered = [
             ticker
             for ticker in tickers
@@ -142,3 +188,8 @@ class SignalScanner:
                 continue
             eligible.add(symbol["symbol"])
         return eligible
+
+    @staticmethod
+    def _fallback_symbols(quote_asset: str) -> set[str]:
+        quote = quote_asset.upper()
+        return {f"{base}{quote}" for base in FALLBACK_SCAN_BASES if base != quote}

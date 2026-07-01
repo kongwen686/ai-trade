@@ -24,6 +24,8 @@ from .models import (
     PortfolioBacktestReport,
     PortfolioReturnStat,
     PortfolioSelection,
+    RebalancePremiumReport,
+    RebalanceSnapshot,
     TradePerformanceStat,
 )
 from .scoring import build_reasons, build_subscores, composite_score, compute_liquidity_score, grade_from_score
@@ -254,6 +256,7 @@ def run_backtest_for_series(
     stats = summarize_events(events, horizons)
     trade_stat = summarize_realized_trades(events)
     equity_curve = build_equity_curve_from_events(events, capital_fraction_pct=execution_config.capital_fraction_pct)
+    buy_hold_equity_curve = build_buy_hold_equity_curve(candles)
     return BacktestReport(
         symbol=symbol,
         interval=interval,
@@ -277,6 +280,119 @@ def run_backtest_for_series(
         stats=stats,
         trade_stat=trade_stat,
         equity_curve=equity_curve,
+        buy_hold_equity_curve=buy_hold_equity_curve,
+        events=events,
+    )
+
+
+def run_overnight_seasonality_backtest(
+    *,
+    symbol: str,
+    interval: str,
+    candles: list[Candlestick],
+    open_hour_utc: int = 22,
+    hold_hours: int = 2,
+    execution_config: ExecutionConfig | None = None,
+) -> BacktestReport:
+    execution_config = execution_config or ExecutionConfig()
+    if len(candles) < 3:
+        raise ValueError(f"Not enough candles for overnight seasonality backtest: {symbol} {interval}.")
+
+    day_bars = bars_per_day(candles)
+    hold_bars = max(1, round((day_bars / 24) * hold_hours))
+    entry_fee_bps = resolve_fee_bps(
+        fee_model=execution_config.fee_model,
+        role=execution_config.entry_fee_role,
+        flat_fee_bps=execution_config.fee_bps,
+        maker_fee_bps=execution_config.maker_fee_bps,
+        taker_fee_bps=execution_config.taker_fee_bps,
+        fee_discount_pct=execution_config.fee_discount_pct,
+    )
+    exit_fee_bps = resolve_fee_bps(
+        fee_model=execution_config.fee_model,
+        role=execution_config.exit_fee_role,
+        flat_fee_bps=execution_config.fee_bps,
+        maker_fee_bps=execution_config.maker_fee_bps,
+        taker_fee_bps=execution_config.taker_fee_bps,
+        fee_discount_pct=execution_config.fee_discount_pct,
+    )
+    events: list[BacktestSignalEvent] = []
+    for index, candle in enumerate(candles):
+        exit_index = index + hold_bars - 1
+        if exit_index >= len(candles):
+            break
+        if candle.open_time.hour != open_hour_utc or candle.open_time.minute != 0:
+            continue
+        exit_candle = candles[exit_index]
+        entry_price = apply_long_entry_slippage(candle.open_price, execution_config.slippage_bps)
+        exit_price = apply_long_exit_slippage(exit_candle.close_price, execution_config.slippage_bps)
+        gross_return_pct = normalize_return_pct(percent_return(candle.open_price, exit_candle.close_price))
+        realized_return_pct = normalize_return_pct(
+            compute_net_long_return_pct(
+                entry_fill_price=entry_price,
+                exit_fill_price=exit_price,
+                entry_fee_bps=entry_fee_bps,
+                exit_fee_bps=exit_fee_bps,
+            )
+        )
+        lows = [item.low_price for item in candles[index : exit_index + 1]]
+        highs = [item.high_price for item in candles[index : exit_index + 1]]
+        events.append(
+            BacktestSignalEvent(
+                symbol=symbol,
+                interval=interval,
+                entry_time=candle.open_time,
+                entry_price=entry_price,
+                score=70.0,
+                grade="B",
+                reasons=[f"UTC {open_hour_utc:02d}:00 overnight seasonality window", f"hold {hold_hours} hours"],
+                forward_returns_pct={hold_bars: gross_return_pct},
+                signal_time=candle.open_time,
+                exit_time=exit_candle.close_time,
+                exit_price=exit_price,
+                exit_reason="time_window_exit",
+                gross_return_pct=gross_return_pct,
+                realized_return_pct=realized_return_pct,
+                bars_held=hold_bars,
+                max_drawdown_pct=normalize_return_pct(percent_return(candle.open_price, min(lows))),
+                max_runup_pct=normalize_return_pct(percent_return(candle.open_price, max(highs))),
+                fee_bps=execution_config.fee_bps,
+                slippage_bps=execution_config.slippage_bps,
+                capital_fraction_pct=execution_config.capital_fraction_pct,
+                effective_slippage_bps=execution_config.slippage_bps,
+                entry_fee_bps=entry_fee_bps,
+                exit_fee_bps=exit_fee_bps,
+            )
+        )
+
+    stats = summarize_events(events, [hold_bars])
+    trade_stat = summarize_realized_trades(events)
+    equity_curve = build_equity_curve_from_events(events, capital_fraction_pct=execution_config.capital_fraction_pct)
+    buy_hold_equity_curve = build_buy_hold_equity_curve(candles)
+    return BacktestReport(
+        symbol=symbol,
+        interval=interval,
+        candle_count=len(candles),
+        evaluated_bars=max(0, len(candles) - hold_bars),
+        signal_count=len(events),
+        lookback_bars=hold_bars,
+        score_threshold=0.0,
+        cooldown_bars=0,
+        fee_bps=execution_config.fee_bps,
+        slippage_bps=execution_config.slippage_bps,
+        capital_fraction_pct=execution_config.capital_fraction_pct,
+        generated_at=datetime.now(timezone.utc),
+        fee_model=execution_config.fee_model,
+        fee_source=execution_config.fee_source,
+        maker_fee_bps=execution_config.maker_fee_bps,
+        taker_fee_bps=execution_config.taker_fee_bps,
+        entry_fee_role=execution_config.entry_fee_role,
+        exit_fee_role=execution_config.exit_fee_role,
+        fee_discount_pct=execution_config.fee_discount_pct,
+        stats=stats,
+        trade_stat=trade_stat,
+        equity_curve=equity_curve,
+        buy_hold_equity_curve=buy_hold_equity_curve,
         events=events,
     )
 
@@ -365,6 +481,32 @@ def build_equity_curve_from_events(events: list[BacktestSignalEvent], capital_fr
                 period_return_pct=round(event.realized_return_pct, 4),
             )
         )
+    return curve
+
+
+def build_buy_hold_equity_curve(candles: list[Candlestick]) -> list[EquityPoint]:
+    if not candles:
+        return []
+    start_price = candles[0].close_price
+    if start_price <= 0:
+        return []
+    peak = 1.0
+    previous_equity = 1.0
+    curve: list[EquityPoint] = []
+    for candle in candles:
+        equity = candle.close_price / start_price
+        peak = max(peak, equity)
+        drawdown_pct = ((equity / peak) - 1) * 100 if peak else 0.0
+        period_return_pct = ((equity / previous_equity) - 1) * 100 if previous_equity else 0.0
+        curve.append(
+            EquityPoint(
+                time=candle.close_time,
+                equity=round(equity, 6),
+                drawdown_pct=round(drawdown_pct, 4),
+                period_return_pct=round(period_return_pct, 4),
+            )
+        )
+        previous_equity = equity
     return curve
 
 
@@ -1014,6 +1156,146 @@ def build_equity_curve_from_selections(selections: list[PortfolioSelection], cap
             )
         )
     return curve
+
+
+def run_rebalance_premium_backtest(
+    candles_by_symbol: dict[str, list[Candlestick]],
+    *,
+    interval: str,
+    rebalance_interval_bars: int | None = None,
+    fee_bps: float = 10.0,
+    slippage_bps: float = 5.0,
+    min_symbols: int = 2,
+) -> RebalancePremiumReport | None:
+    usable = {
+        symbol: candles
+        for symbol, candles in candles_by_symbol.items()
+        if len(candles) >= 2
+    }
+    if len(usable) < min_symbols:
+        return None
+
+    common_times: set[datetime] | None = None
+    close_maps: dict[str, dict[datetime, float]] = {}
+    for symbol, candles in usable.items():
+        price_map = {candle.close_time: candle.close_price for candle in candles if candle.close_price > 0}
+        if len(price_map) < 2:
+            continue
+        close_maps[symbol] = price_map
+        times = set(price_map)
+        common_times = times if common_times is None else common_times & times
+
+    if not common_times or len(close_maps) < min_symbols:
+        return None
+    times = sorted(common_times)
+    if len(times) < 2:
+        return None
+
+    symbols = sorted(close_maps)
+    rebalance_interval_bars = rebalance_interval_bars or bars_per_day(next(iter(usable.values())))
+    rebalance_interval_bars = max(1, rebalance_interval_bars)
+    cost_rate = max(0.0, fee_bps + slippage_bps) / 10_000
+
+    start_prices = {symbol: close_maps[symbol][times[0]] for symbol in symbols}
+    equal_capital = 1.0 / len(symbols)
+    rebalanced_shares = {symbol: equal_capital / start_prices[symbol] for symbol in symbols}
+    buy_hold_shares = dict(rebalanced_shares)
+    rebalanced_equity = 1.0
+    buy_hold_start_equity = sum(buy_hold_shares[symbol] * start_prices[symbol] for symbol in symbols)
+
+    rebalanced_curve: list[EquityPoint] = []
+    buy_hold_curve: list[EquityPoint] = []
+    snapshots: list[RebalanceSnapshot] = []
+    rebalanced_peak = 1.0
+    buy_hold_peak = 1.0
+    turnovers: list[float] = []
+
+    for index, timestamp in enumerate(times):
+        prices = {symbol: close_maps[symbol][timestamp] for symbol in symbols}
+        current_rebalanced_value = sum(rebalanced_shares[symbol] * prices[symbol] for symbol in symbols)
+        current_buy_hold_value = sum(buy_hold_shares[symbol] * prices[symbol] for symbol in symbols)
+        rebalanced_equity = current_rebalanced_value
+        buy_hold_equity = current_buy_hold_value / buy_hold_start_equity if buy_hold_start_equity else 1.0
+
+        turnover_pct = 0.0
+        if index > 0 and index % rebalance_interval_bars == 0:
+            target_value = current_rebalanced_value / len(symbols)
+            turnover = sum(
+                abs(target_value - (rebalanced_shares[symbol] * prices[symbol]))
+                for symbol in symbols
+            )
+            turnover_pct = (turnover / current_rebalanced_value) * 100 if current_rebalanced_value else 0.0
+            cost = turnover * cost_rate
+            after_cost_value = max(0.0, current_rebalanced_value - cost)
+            rebalanced_equity = after_cost_value
+            target_after_cost = after_cost_value / len(symbols)
+            rebalanced_shares = {symbol: target_after_cost / prices[symbol] for symbol in symbols}
+            turnovers.append(turnover_pct)
+
+        rebalanced_peak = max(rebalanced_peak, rebalanced_equity)
+        buy_hold_peak = max(buy_hold_peak, buy_hold_equity)
+        rebalanced_drawdown_pct = ((rebalanced_equity / rebalanced_peak) - 1) * 100 if rebalanced_peak else 0.0
+        buy_hold_drawdown_pct = ((buy_hold_equity / buy_hold_peak) - 1) * 100 if buy_hold_peak else 0.0
+        premium_pct = ((rebalanced_equity / buy_hold_equity) - 1) * 100 if buy_hold_equity else 0.0
+        period_return_pct = (
+            ((rebalanced_equity / rebalanced_curve[-1].equity) - 1) * 100
+            if rebalanced_curve and rebalanced_curve[-1].equity
+            else 0.0
+        )
+        buy_hold_period_return_pct = (
+            ((buy_hold_equity / buy_hold_curve[-1].equity) - 1) * 100
+            if buy_hold_curve and buy_hold_curve[-1].equity
+            else 0.0
+        )
+        rebalanced_curve.append(
+            EquityPoint(
+                time=timestamp,
+                equity=round(rebalanced_equity, 6),
+                drawdown_pct=round(rebalanced_drawdown_pct, 4),
+                period_return_pct=round(period_return_pct, 4),
+            )
+        )
+        buy_hold_curve.append(
+            EquityPoint(
+                time=timestamp,
+                equity=round(buy_hold_equity, 6),
+                drawdown_pct=round(buy_hold_drawdown_pct, 4),
+                period_return_pct=round(buy_hold_period_return_pct, 4),
+            )
+        )
+        if turnover_pct > 0 or index in {0, len(times) - 1}:
+            snapshots.append(
+                RebalanceSnapshot(
+                    time=timestamp,
+                    rebalanced_equity=round(rebalanced_equity, 6),
+                    buy_hold_equity=round(buy_hold_equity, 6),
+                    premium_pct=round(premium_pct, 4),
+                    turnover_pct=round(turnover_pct, 4),
+                )
+            )
+
+    final_rebalanced = rebalanced_curve[-1].equity
+    final_buy_hold = buy_hold_curve[-1].equity
+    premium_pct = ((final_rebalanced / final_buy_hold) - 1) * 100 if final_buy_hold else 0.0
+    return RebalancePremiumReport(
+        interval=interval,
+        symbol_count=len(symbols),
+        rebalance_interval_bars=rebalance_interval_bars,
+        fee_bps=fee_bps,
+        slippage_bps=slippage_bps,
+        generated_at=datetime.now(timezone.utc),
+        rebalanced_final_equity=round(final_rebalanced, 6),
+        buy_hold_final_equity=round(final_buy_hold, 6),
+        premium_pct=round(premium_pct, 4),
+        max_drawdown_pct=min((point.drawdown_pct for point in rebalanced_curve), default=0.0),
+        buy_hold_max_drawdown_pct=min((point.drawdown_pct for point in buy_hold_curve), default=0.0),
+        avg_turnover_pct=round(statistics.fmean(turnovers), 4) if turnovers else 0.0,
+        rebalance_count=len(turnovers),
+        symbols=symbols,
+        equity_curve=rebalanced_curve,
+        buy_hold_equity_curve=buy_hold_curve,
+        snapshots=snapshots,
+    )
 
 
 def percent_return(entry_price: float, exit_price: float) -> float:

@@ -8,7 +8,7 @@ import hmac
 import json
 import os
 
-from .config import AppSettings
+from .config import AppSettings, DEFAULT_X_TRACKED_ACCOUNTS
 
 RUNTIME_CONFIG_TEMPLATE_VERSION = 1
 RUNTIME_CONFIG_ENCRYPTED_KIND = "runtime_config_encrypted"
@@ -20,6 +20,8 @@ SECRET_FIELDS = (
     "okx_api_secret",
     "okx_api_passphrase",
     "x_bearer_token",
+    "onchain_api_key",
+    "llm_api_key",
     "openai_api_key",
 )
 
@@ -151,8 +153,12 @@ class AutoTradeDefaults:
 class IntelligenceDefaults:
     enabled: bool = True
     llm_enabled: bool = False
+    llm_provider: str = "openai"
+    llm_api_key: str = ""
+    llm_base_url: str = ""
+    llm_model: str = "gpt-5.5"
     openai_api_key: str = ""
-    openai_model: str = "gpt-5.4"
+    openai_model: str = "gpt-5.5"
     min_intel_severity: float = 60.0
     min_spread_bps: float = 12.0
     whale_transfer_threshold_usd: float = 5_000_000.0
@@ -166,21 +172,32 @@ class RuntimeConfig:
     okx_api_key: str = ""
     okx_api_secret: str = ""
     okx_api_passphrase: str = ""
+    market_data_preset: str = "binance_public"
+    onchain_data_preset: str = "open_multichain_keyless"
+    onchain_api_key: str = ""
+    onchain_api_base_url: str = ""
     community_provider: str = "auto"
+    x_provider: str = "official_api"
     x_bearer_token: str = ""
     x_api_base_url: str = "https://api.x.com"
+    x_nitter_base_url: str = ""
+    x_session_command: str = ""
     x_recent_window_hours: int = 24
     x_recent_max_results: int = 25
     x_language: str = "en"
     x_account_mode: str = "off"
     x_account_weight_pct: float = 35.0
-    x_tracked_accounts: list[str] = field(default_factory=list)
+    x_tracked_accounts: list[str] = field(default_factory=lambda: list(DEFAULT_X_TRACKED_ACCOUNTS))
     reddit_api_base_url: str = "https://www.reddit.com"
     reddit_recent_window_hours: int = 24
     reddit_max_results: int = 25
     reddit_user_agent: str = "trade-signal-app/0.2"
+    llm_provider: str = "openai"
+    llm_api_key: str = ""
+    llm_base_url: str = ""
+    llm_model: str = "gpt-5.5"
     openai_api_key: str = ""
-    openai_model: str = "gpt-5.4"
+    openai_model: str = "gpt-5.5"
     scan_defaults: ScanDefaults = field(default_factory=ScanDefaults)
     backtest_defaults: BacktestDefaults = field(default_factory=BacktestDefaults)
     autotrade_defaults: AutoTradeDefaults = field(default_factory=AutoTradeDefaults)
@@ -195,18 +212,38 @@ class RuntimeConfig:
             okx_api_key=settings.okx_api_key,
             okx_api_secret=settings.okx_api_secret,
             okx_api_passphrase=settings.okx_api_passphrase,
+            market_data_preset=settings.market_data_preset,
+            onchain_data_preset=settings.onchain_data_preset,
+            onchain_api_key=settings.onchain_api_key,
+            onchain_api_base_url=settings.onchain_api_base_url,
             community_provider=settings.community_provider,
+            x_provider=settings.x_provider,
             x_bearer_token=settings.x_bearer_token,
             x_api_base_url=settings.x_api_base_url,
+            x_nitter_base_url=settings.x_nitter_base_url,
+            x_session_command=settings.x_session_command,
             x_recent_window_hours=settings.x_recent_window_hours,
             x_recent_max_results=settings.x_recent_max_results,
             x_language=settings.x_language,
+            x_tracked_accounts=list(settings.x_tracked_accounts),
             reddit_api_base_url=settings.reddit_api_base_url,
             reddit_recent_window_hours=settings.reddit_recent_window_hours,
             reddit_max_results=settings.reddit_max_results,
             reddit_user_agent=settings.reddit_user_agent,
+            llm_provider=settings.llm_provider,
+            llm_api_key=settings.llm_api_key,
+            llm_base_url=settings.llm_base_url,
+            llm_model=settings.llm_model,
             openai_api_key=settings.openai_api_key,
             openai_model=settings.openai_model,
+            intelligence_defaults=IntelligenceDefaults(
+                llm_provider=settings.llm_provider,
+                llm_api_key=settings.llm_api_key,
+                llm_base_url=settings.llm_base_url,
+                llm_model=settings.llm_model,
+                openai_api_key=settings.openai_api_key,
+                openai_model=settings.openai_model,
+            ),
             scan_defaults=ScanDefaults(
                 quote_asset=settings.quote_asset,
                 interval=settings.interval,
@@ -223,6 +260,11 @@ class RuntimeConfig:
         backtest_payload = payload.get("backtest_defaults")
         autotrade_payload = payload.get("autotrade_defaults")
         intelligence_payload = payload.get("intelligence_defaults")
+        intelligence_dict = intelligence_payload if isinstance(intelligence_payload, dict) else {}
+        llm_provider = str(payload.get("llm_provider", intelligence_dict.get("llm_provider", defaults.llm_provider)))
+        llm_api_key = str(payload.get("llm_api_key", payload.get("openai_api_key", intelligence_dict.get("llm_api_key", defaults.llm_api_key))))
+        llm_base_url = str(payload.get("llm_base_url", intelligence_dict.get("llm_base_url", defaults.llm_base_url)))
+        llm_model = str(payload.get("llm_model", payload.get("openai_model", intelligence_dict.get("llm_model", defaults.llm_model))))
         return cls(
             binance_api_key=str(payload.get("binance_api_key", defaults.binance_api_key)),
             binance_api_secret=str(payload.get("binance_api_secret", defaults.binance_api_secret)),
@@ -230,9 +272,16 @@ class RuntimeConfig:
             okx_api_key=str(payload.get("okx_api_key", defaults.okx_api_key)),
             okx_api_secret=str(payload.get("okx_api_secret", defaults.okx_api_secret)),
             okx_api_passphrase=str(payload.get("okx_api_passphrase", defaults.okx_api_passphrase)),
+            market_data_preset=str(payload.get("market_data_preset", defaults.market_data_preset)),
+            onchain_data_preset=str(payload.get("onchain_data_preset", defaults.onchain_data_preset)),
+            onchain_api_key=str(payload.get("onchain_api_key", defaults.onchain_api_key)),
+            onchain_api_base_url=str(payload.get("onchain_api_base_url", defaults.onchain_api_base_url)),
             community_provider=str(payload.get("community_provider", defaults.community_provider)),
+            x_provider=str(payload.get("x_provider", defaults.x_provider)),
             x_bearer_token=str(payload.get("x_bearer_token", defaults.x_bearer_token)),
             x_api_base_url=str(payload.get("x_api_base_url", defaults.x_api_base_url)),
+            x_nitter_base_url=str(payload.get("x_nitter_base_url", defaults.x_nitter_base_url)),
+            x_session_command=str(payload.get("x_session_command", defaults.x_session_command)),
             x_recent_window_hours=int(payload.get("x_recent_window_hours", defaults.x_recent_window_hours)),
             x_recent_max_results=int(payload.get("x_recent_max_results", defaults.x_recent_max_results)),
             x_language=str(payload.get("x_language", defaults.x_language)),
@@ -249,6 +298,10 @@ class RuntimeConfig:
             reddit_recent_window_hours=int(payload.get("reddit_recent_window_hours", defaults.reddit_recent_window_hours)),
             reddit_max_results=int(payload.get("reddit_max_results", defaults.reddit_max_results)),
             reddit_user_agent=str(payload.get("reddit_user_agent", defaults.reddit_user_agent)),
+            llm_provider=llm_provider,
+            llm_api_key=llm_api_key,
+            llm_base_url=llm_base_url,
+            llm_model=llm_model,
             openai_api_key=str(payload.get("openai_api_key", defaults.openai_api_key)),
             openai_model=str(payload.get("openai_model", defaults.openai_model)),
             scan_defaults=ScanDefaults(
@@ -272,7 +325,11 @@ class RuntimeConfig:
             intelligence_defaults=IntelligenceDefaults(
                 **{
                     **asdict(defaults.intelligence_defaults),
-                    **(intelligence_payload if isinstance(intelligence_payload, dict) else {}),
+                    **intelligence_dict,
+                    "llm_provider": llm_provider,
+                    "llm_api_key": llm_api_key,
+                    "llm_base_url": llm_base_url,
+                    "llm_model": llm_model,
                     "openai_api_key": str(payload.get("openai_api_key", defaults.openai_api_key)),
                     "openai_model": str(payload.get("openai_model", defaults.openai_model)),
                 }
@@ -289,6 +346,7 @@ class RuntimeConfig:
                 payload[field_name] = ""
             intelligence_payload = payload.get("intelligence_defaults")
             if isinstance(intelligence_payload, dict):
+                intelligence_payload["llm_api_key"] = ""
                 intelligence_payload["openai_api_key"] = ""
         return {
             "kind": "runtime_config_template",

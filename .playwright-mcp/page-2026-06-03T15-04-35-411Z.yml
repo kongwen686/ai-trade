@@ -1,0 +1,518 @@
+- main [ref=e2]:
+  - complementary [ref=e3]:
+    - link "QT 量化交易系统 Quantitative Trading System" [ref=e4] [cursor=pointer]:
+      - /url: /terminal
+      - generic [ref=e5]: QT
+      - generic [ref=e6]:
+        - strong [ref=e7]: 量化交易系统
+        - generic [ref=e8]: Quantitative Trading System
+    - navigation "Sidebar" [ref=e9]:
+      - generic [ref=e10]:
+        - button "核心导航" [ref=e11]: 核心导航
+        - generic [ref=e13]:
+          - link "工作台" [ref=e14] [cursor=pointer]:
+            - /url: /terminal
+            - generic [ref=e15]: 工作台
+          - link "信号扫描" [ref=e16] [cursor=pointer]:
+            - /url: /
+            - generic [ref=e17]: 信号扫描
+      - generic [ref=e18]:
+        - button "数据中心" [ref=e19]: 数据中心
+        - generic [ref=e21]:
+          - link "数据概览" [ref=e22] [cursor=pointer]:
+            - /url: /terminal/market
+            - generic [ref=e23]: 数据概览
+          - link "社区情报" [ref=e24] [cursor=pointer]:
+            - /url: /terminal/community
+            - generic [ref=e25]: 社区情报
+          - link "链上监控" [ref=e26] [cursor=pointer]:
+            - /url: /terminal/onchain
+            - generic [ref=e27]: 链上监控
+          - link "价差分析" [ref=e28] [cursor=pointer]:
+            - /url: /terminal/basis
+            - generic [ref=e29]: 价差分析
+      - generic [ref=e30]:
+        - button "策略研究" [ref=e31]: 策略研究
+        - generic [ref=e33]:
+          - link "策略命中" [ref=e34] [cursor=pointer]:
+            - /url: /terminal/strategies
+            - generic [ref=e35]: 策略命中
+          - link "回测分析" [ref=e36] [cursor=pointer]:
+            - /url: /backtest
+            - generic [ref=e37]: 回测分析
+      - generic [ref=e38]:
+        - button "交易执行" [ref=e39]: 交易执行
+        - generic [ref=e41]:
+          - link "自动交易" [ref=e42] [cursor=pointer]:
+            - /url: /trading
+            - generic [ref=e43]: 自动交易
+          - link "模拟账户" [ref=e44] [cursor=pointer]:
+            - /url: /terminal/trading
+            - generic [ref=e45]: 模拟账户
+          - link "风险控制" [ref=e46] [cursor=pointer]:
+            - /url: /terminal/risk
+            - generic [ref=e47]: 风险控制
+      - generic [ref=e48]:
+        - button "系统管理" [ref=e49]: 系统管理
+        - link "系统配置" [ref=e52] [cursor=pointer]:
+          - /url: /settings
+          - generic [ref=e53]: 系统配置
+    - generic [ref=e54]:
+      - generic [ref=e55]: 系统状态
+      - strong [ref=e56]: 运行中
+  - generic [ref=e57]:
+    - generic [ref=e58]:
+      - navigation "Primary" [ref=e59]:
+        - link "工作台 系统总览" [ref=e60] [cursor=pointer]:
+          - /url: /terminal
+          - generic [ref=e61]: 工作台
+          - generic [ref=e62]: 系统总览
+        - link "策略研究 历史回测" [ref=e63] [cursor=pointer]:
+          - /url: /backtest
+          - generic [ref=e64]: 策略研究
+          - generic [ref=e65]: 历史回测
+        - link "回测分析 实时扫描" [ref=e66] [cursor=pointer]:
+          - /url: /
+          - generic [ref=e67]: 回测分析
+          - generic [ref=e68]: 实时扫描
+        - link "交易执行 模拟/实盘" [ref=e69] [cursor=pointer]:
+          - /url: /trading
+          - generic [ref=e70]: 交易执行
+          - generic [ref=e71]: 模拟/实盘
+        - link "风险管理 执行风控" [ref=e72] [cursor=pointer]:
+          - /url: /terminal/risk
+          - generic [ref=e73]: 风险管理
+          - generic [ref=e74]: 执行风控
+        - link "系统管理 运行配置" [ref=e75] [cursor=pointer]:
+          - /url: /settings
+          - generic [ref=e76]: 系统管理
+          - generic [ref=e77]: 运行配置
+      - generic "Runtime tools" [ref=e78]:
+        - link "Snapshot" [ref=e79] [cursor=pointer]:
+          - /url: /api/terminal/snapshot
+          - img [ref=e80]
+        - link "Settings" [ref=e82] [cursor=pointer]:
+          - /url: /settings
+          - img [ref=e83]
+        - generic "3 alerts" [ref=e86]:
+          - img [ref=e87]
+          - emphasis [ref=e90]: "3"
+        - generic "Language" [ref=e91]:
+          - link "中文" [ref=e92] [cursor=pointer]:
+            - /url: /settings?lang=zh
+          - link "English" [ref=e93] [cursor=pointer]:
+            - /url: /settings?lang=en
+        - generic [ref=e94]:
+          - generic [ref=e95]: quant_admin
+          - generic [ref=e96]: 超级管理员
+    - generic [ref=e97]:
+      - generic [ref=e98]:
+        - paragraph [ref=e99]: 运行配置
+        - heading "把数据源、情报源和策略参数都收进一个运行时配置面板。" [level=1] [ref=e100]
+        - paragraph [ref=e101]: 密钥、Twitter 监控账号、扫描默认值和回测默认策略都可以在这里改。保存后，扫描页和回测页会直接吃新的默认配置。
+        - generic [ref=e102]:
+          - generic [ref=e103]: Market Intelligence
+          - generic [ref=e104]: Signal Scoring
+          - generic [ref=e105]: Portfolio Backtest
+          - generic [ref=e106]: Runtime Vault
+      - generic [ref=e107]:
+        - generic [ref=e108]:
+          - generic [ref=e109]: Binance Auth
+          - strong [ref=e110]: 关闭
+          - generic [ref=e111]: 未配置
+        - generic [ref=e112]:
+          - generic [ref=e113]: OKX Auth
+          - strong [ref=e114]: 关闭
+          - generic [ref=e115]: 跨交易所就绪
+        - generic [ref=e116]:
+          - generic [ref=e117]: X / Reddit
+          - strong [ref=e118]: 混合
+          - generic [ref=e119]: 0 个跟踪账号
+        - generic [ref=e120]:
+          - generic [ref=e121]: Storage
+          - strong [ref=e122]: Local
+          - generic [ref=e123]: 配置保存到本地 JSON
+        - generic [ref=e124]:
+          - generic [ref=e125]: Auto Trade
+          - strong [ref=e126]: 关闭
+          - generic [ref=e127]: 模拟 执行
+        - generic [ref=e128]:
+          - generic [ref=e129]: Intelligence
+          - strong [ref=e130]: 开启
+          - generic [ref=e131]: 本地规则
+    - generic [ref=e132]:
+      - generic [ref=e133]:
+        - generic [ref=e134]:
+          - heading "Access" [level=2] [ref=e135]
+          - paragraph [ref=e136]: 密钥通过 POST 提交，不会出现在 URL。留空表示保持当前值。
+        - generic [ref=e137]:
+          - generic [ref=e138]: Binance API Key
+          - textbox "Binance API Key" [ref=e139]:
+            - /placeholder: 留空保持当前
+        - generic [ref=e140]:
+          - generic [ref=e141]: Binance API Secret
+          - textbox "Binance API Secret" [ref=e142]:
+            - /placeholder: 留空保持当前
+        - generic [ref=e143]:
+          - generic [ref=e144]: Binance RecvWindow
+          - spinbutton "Binance RecvWindow" [ref=e145]: "5000"
+        - generic [ref=e146]:
+          - checkbox "Clear Binance auth" [ref=e147]
+          - generic [ref=e148]: Clear Binance auth
+        - generic [ref=e149]:
+          - generic [ref=e150]: OKX API Key
+          - textbox "OKX API Key" [ref=e151]:
+            - /placeholder: 留空保持当前
+        - generic [ref=e152]:
+          - generic [ref=e153]: OKX API Secret
+          - textbox "OKX API Secret" [ref=e154]:
+            - /placeholder: 留空保持当前
+        - generic [ref=e155]:
+          - generic [ref=e156]: OKX Passphrase
+          - textbox "OKX Passphrase" [ref=e157]:
+            - /placeholder: 留空保持当前
+        - generic [ref=e158]:
+          - checkbox "Clear OKX auth" [ref=e159]
+          - generic [ref=e160]: Clear OKX auth
+        - generic [ref=e161]:
+          - generic [ref=e162]: X Bearer Token
+          - textbox "X Bearer Token" [ref=e163]:
+            - /placeholder: 留空保持当前
+        - generic [ref=e164]:
+          - generic [ref=e165]: Community Provider
+          - combobox "Community Provider" [ref=e166]:
+            - option "auto" [selected]
+            - option "x"
+            - option "csv"
+            - option "news"
+            - option "telegram"
+            - option "reddit"
+            - option "x,csv"
+            - option "x,news"
+            - option "x,telegram"
+            - option "x,reddit"
+            - option "csv,news"
+            - option "csv,telegram"
+            - option "csv,reddit"
+            - option "news,telegram"
+            - option "news,reddit"
+            - option "telegram,reddit"
+            - option "x,csv,news"
+            - option "x,csv,telegram"
+            - option "x,csv,reddit"
+            - option "x,news,telegram"
+            - option "x,news,reddit"
+            - option "x,telegram,reddit"
+            - option "csv,news,telegram"
+            - option "csv,news,reddit"
+            - option "csv,telegram,reddit"
+            - option "news,telegram,reddit"
+            - option "x,csv,news,telegram"
+            - option "x,csv,news,reddit"
+            - option "x,csv,telegram,reddit"
+            - option "x,news,telegram,reddit"
+            - option "csv,news,telegram,reddit"
+            - option "x,csv,news,telegram,reddit"
+        - generic [ref=e167]:
+          - generic [ref=e168]: X API Base URL
+          - textbox "X API Base URL" [ref=e169]: https://api.x.com
+        - generic [ref=e170]:
+          - checkbox "Clear X auth" [ref=e171]
+          - generic [ref=e172]: Clear X auth
+        - generic [ref=e173]:
+          - heading "Intelligence & LLM" [level=2] [ref=e174]
+          - paragraph [ref=e175]: 总控台会聚合交易所情报、Twitter 账号、链上异动、现货/合约价差和策略命中。未配置 OpenAI 时使用本地规则分析。
+        - generic [ref=e176]:
+          - checkbox "Enable intelligence center" [checked] [ref=e177]
+          - generic [ref=e178]: Enable intelligence center
+        - generic [ref=e179]:
+          - checkbox "Enable LLM analysis" [ref=e180]
+          - generic [ref=e181]: Enable LLM analysis
+        - generic [ref=e182]:
+          - generic [ref=e183]: OpenAI API Key
+          - textbox "OpenAI API Key" [ref=e184]:
+            - /placeholder: 留空保持当前
+        - generic [ref=e185]:
+          - generic [ref=e186]: OpenAI Model
+          - textbox "OpenAI Model" [ref=e187]: gpt-5.4
+        - generic [ref=e188]:
+          - generic [ref=e189]: Min Intel Severity
+          - spinbutton "Min Intel Severity" [ref=e190]: "60.0"
+        - generic [ref=e191]:
+          - generic [ref=e192]: Min Spread bps
+          - spinbutton "Min Spread bps" [ref=e193]: "12.0"
+        - generic [ref=e194]:
+          - generic [ref=e195]: Whale Threshold USD
+          - spinbutton "Whale Threshold USD" [ref=e196]: "5000000"
+        - generic [ref=e197]:
+          - heading "Twitter Intel" [level=2] [ref=e198]
+          - paragraph [ref=e199]:
+            - text: "账号列表支持一行一个用户名。`blend` 会把普通舆情和指定账号情报按权重混合，`only` 只看指定账号。本地新闻与 Telegram 情报可分别通过"
+            - code [ref=e200]: data/news_sentiment.csv
+            - text: 和
+            - code [ref=e201]: data/telegram_sentiment.csv
+            - text: 参与混合。
+        - generic [ref=e202]:
+          - generic [ref=e203]: X Window Hours
+          - spinbutton "X Window Hours" [ref=e204]: "24"
+        - generic [ref=e205]:
+          - generic [ref=e206]: X Max Results
+          - spinbutton "X Max Results" [ref=e207]: "25"
+        - generic [ref=e208]:
+          - generic [ref=e209]: X Language
+          - textbox "X Language" [ref=e210]: en
+        - generic [ref=e211]:
+          - generic [ref=e212]: Account Mode
+          - combobox "Account Mode" [ref=e213]:
+            - option "off" [selected]
+            - option "blend"
+            - option "only"
+        - generic [ref=e214]:
+          - generic [ref=e215]: Account Weight %
+          - spinbutton "Account Weight %" [ref=e216]: "35.0"
+        - generic [ref=e217]:
+          - generic [ref=e218]: Tracked Accounts
+          - textbox "Tracked Accounts" [ref=e219]:
+            - /placeholder: "@lookonchain\nwu_blockchain\nTheBlock__"
+        - generic [ref=e220]:
+          - generic [ref=e221]: Reddit API Base URL
+          - textbox "Reddit API Base URL" [ref=e222]: https://www.reddit.com
+        - generic [ref=e223]:
+          - generic [ref=e224]: Reddit Window Hours
+          - spinbutton "Reddit Window Hours" [ref=e225]: "24"
+        - generic [ref=e226]:
+          - generic [ref=e227]: Reddit Max Results
+          - spinbutton "Reddit Max Results" [ref=e228]: "25"
+        - generic [ref=e229]:
+          - generic [ref=e230]: Reddit User-Agent
+          - textbox "Reddit User-Agent" [ref=e231]: trade-signal-app/0.2
+        - generic [ref=e232]:
+          - heading "Scan Defaults" [level=2] [ref=e233]
+          - paragraph [ref=e234]: 这些值会成为实时扫描页的默认参数，你仍然可以在扫描页临时改动。
+        - generic [ref=e235]:
+          - generic [ref=e236]: Quote Asset
+          - textbox "Quote Asset" [ref=e237]: USDT
+        - generic [ref=e238]:
+          - generic [ref=e239]: Scan Interval
+          - combobox "Scan Interval" [ref=e240]:
+            - option "15m"
+            - option "1h"
+            - option "4h" [selected]
+            - option "1d"
+        - generic [ref=e241]:
+          - generic [ref=e242]: Candidate Pool
+          - spinbutton "Candidate Pool" [ref=e243]: "18"
+        - generic [ref=e244]:
+          - generic [ref=e245]: Min Quote Volume
+          - spinbutton "Min Quote Volume" [ref=e246]: "10000000"
+        - generic [ref=e247]:
+          - generic [ref=e248]: Min Trade Count
+          - spinbutton "Min Trade Count" [ref=e249]: "3000"
+        - generic [ref=e250]:
+          - heading "Auto Trade Defaults" [level=2] [ref=e251]
+          - paragraph [ref=e252]: 自动交易会根据实时扫描分数生成市价单。默认 paper 模式只记录模拟持仓；live 模式还需要服务端环境变量确认才会提交真实订单。
+        - generic [ref=e253]:
+          - checkbox "Enable auto trade" [ref=e254]
+          - generic [ref=e255]: Enable auto trade
+        - generic [ref=e256]:
+          - generic [ref=e257]: Execution Mode
+          - combobox "Execution Mode" [ref=e258]:
+            - option "paper" [selected]
+            - option "live"
+        - generic [ref=e259]:
+          - generic [ref=e260]: Quote Order Qty
+          - spinbutton "Quote Order Qty" [ref=e261]: "25.00"
+        - generic [ref=e262]:
+          - generic [ref=e263]: Max Open Positions
+          - spinbutton "Max Open Positions" [ref=e264]: "3"
+        - generic [ref=e265]:
+          - generic [ref=e266]: Max Total Exposure
+          - spinbutton "Max Total Exposure" [ref=e267]: "100.00"
+        - generic [ref=e268]:
+          - generic [ref=e269]: Score Threshold
+          - spinbutton "Score Threshold" [ref=e270]: "75.0"
+        - generic [ref=e271]:
+          - generic [ref=e272]: Min Volume Ratio
+          - spinbutton "Min Volume Ratio" [ref=e273]: "1.10"
+        - generic [ref=e274]:
+          - generic [ref=e275]: Min Buy Pressure
+          - spinbutton "Min Buy Pressure" [ref=e276]: "0.52"
+        - generic [ref=e277]:
+          - generic [ref=e278]: Stop Loss %
+          - spinbutton "Stop Loss %" [ref=e279]: "4.0"
+        - generic [ref=e280]:
+          - generic [ref=e281]: Take Profit %
+          - spinbutton "Take Profit %" [ref=e282]: "9.0"
+        - generic [ref=e283]:
+          - generic [ref=e284]: Cooldown Minutes
+          - spinbutton "Cooldown Minutes" [ref=e285]: "240"
+        - generic [ref=e286]:
+          - checkbox "Use Binance order/test" [checked] [ref=e287]
+          - generic [ref=e288]: Use Binance order/test
+        - generic [ref=e289]:
+          - heading "Backtest Defaults" [level=2] [ref=e290]
+          - paragraph [ref=e291]: 这些值会作为回测页的默认策略参数。你可以把实盘偏好先固定下来，再按每次任务微调。
+        - generic [ref=e292]:
+          - generic [ref=e293]: Default Preset
+          - combobox "Default Preset" [ref=e294]:
+            - option "custom" [selected]
+            - option "balanced_swing"
+            - option "breakout_aggressive"
+            - option "portfolio_rotation"
+            - option "crypto_rebalance_premium"
+            - option "btc_overnight_seasonality"
+            - option "btc_cycle_trend"
+            - option "btc_core_trading"
+            - option "btc_compounding_risk_off"
+        - generic [ref=e295]:
+          - generic [ref=e296]: Default Archives
+          - textbox "Default Archives" [ref=e297]:
+            - /placeholder: data/spot/monthly/klines/*/4h/*.zip
+        - generic [ref=e298]:
+          - generic [ref=e299]: Lookback Bars
+          - spinbutton "Lookback Bars" [ref=e300]: "240"
+        - generic [ref=e301]:
+          - generic [ref=e302]: Score Threshold
+          - spinbutton "Score Threshold" [ref=e303]: "70.0"
+        - generic [ref=e304]:
+          - generic [ref=e305]: Holding Periods
+          - textbox "Holding Periods" [ref=e306]: 3,6,12
+        - generic [ref=e307]:
+          - generic [ref=e308]: Portfolio Top N
+          - spinbutton "Portfolio Top N" [ref=e309]: "0"
+        - generic [ref=e310]:
+          - generic [ref=e311]: Cooldown Bars
+          - spinbutton "Cooldown Bars" [ref=e312]: "0"
+        - generic [ref=e313]:
+          - generic [ref=e314]: Stop Loss %
+          - spinbutton "Stop Loss %" [ref=e315]: "4.0"
+        - generic [ref=e316]:
+          - generic [ref=e317]: Take Profit %
+          - spinbutton "Take Profit %" [ref=e318]: "9.0"
+        - generic [ref=e319]:
+          - generic [ref=e320]: Max Holding Bars
+          - spinbutton "Max Holding Bars" [ref=e321]: "12"
+        - generic [ref=e322]:
+          - generic [ref=e323]: Fee Source
+          - combobox "Fee Source" [ref=e324]:
+            - option "manual" [selected]
+            - option "account"
+            - option "symbol"
+        - generic [ref=e325]:
+          - generic [ref=e326]: Fee Model
+          - combobox "Fee Model" [ref=e327]:
+            - option "flat" [selected]
+            - option "maker_taker"
+        - generic [ref=e328]:
+          - generic [ref=e329]: Fee bps
+          - spinbutton "Fee bps" [ref=e330]: "10.0"
+        - generic [ref=e331]:
+          - generic [ref=e332]: Maker Fee bps
+          - spinbutton "Maker Fee bps" [ref=e333]: "10.0"
+        - generic [ref=e334]:
+          - generic [ref=e335]: Taker Fee bps
+          - spinbutton "Taker Fee bps" [ref=e336]: "10.0"
+        - generic [ref=e337]:
+          - generic [ref=e338]: Entry Role
+          - combobox "Entry Role" [ref=e339]:
+            - option "maker"
+            - option "taker" [selected]
+        - generic [ref=e340]:
+          - generic [ref=e341]: Exit Role
+          - combobox "Exit Role" [ref=e342]:
+            - option "maker"
+            - option "taker" [selected]
+        - generic [ref=e343]:
+          - generic [ref=e344]: Fee Discount %
+          - spinbutton "Fee Discount %" [ref=e345]: "0.0"
+        - generic [ref=e346]:
+          - checkbox "Disable Binance discount" [ref=e347]
+          - generic [ref=e348]: Disable Binance discount
+        - generic [ref=e349]:
+          - generic [ref=e350]: Slippage bps
+          - spinbutton "Slippage bps" [ref=e351]: "5.0"
+        - generic [ref=e352]:
+          - generic [ref=e353]: Slippage Model
+          - combobox "Slippage Model" [ref=e354]:
+            - option "fixed" [selected]
+            - option "dynamic"
+        - generic [ref=e355]:
+          - generic [ref=e356]: Min Slippage
+          - spinbutton "Min Slippage" [ref=e357]: "2.0"
+        - generic [ref=e358]:
+          - generic [ref=e359]: Max Slippage
+          - spinbutton "Max Slippage" [ref=e360]: "25.0"
+        - generic [ref=e361]:
+          - generic [ref=e362]: Slip Window
+          - spinbutton "Slip Window" [ref=e363]: "20"
+        - generic [ref=e364]:
+          - generic [ref=e365]: Capital %
+          - spinbutton "Capital %" [ref=e366]: "100.0"
+        - generic [ref=e367]:
+          - generic [ref=e368]: Max Exposure %
+          - spinbutton "Max Exposure %" [ref=e369]: "100.0"
+        - generic [ref=e370]:
+          - generic [ref=e371]: Max Concurrent
+          - spinbutton "Max Concurrent" [ref=e372]: "0"
+        - generic [ref=e373]:
+          - generic [ref=e374]: Min Volume Ratio
+          - spinbutton "Min Volume Ratio" [ref=e375]: "1.10"
+        - generic [ref=e376]:
+          - generic [ref=e377]: Min Buy Pressure
+          - spinbutton "Min Buy Pressure" [ref=e378]: "0.52"
+        - generic [ref=e379]:
+          - generic [ref=e380]: Min RSI
+          - spinbutton "Min RSI" [ref=e381]: "45.0"
+        - generic [ref=e382]:
+          - generic [ref=e383]: Max RSI
+          - spinbutton "Max RSI" [ref=e384]: "72.0"
+        - generic [ref=e385]:
+          - checkbox "Disable KDJ confirmation" [ref=e386]
+          - generic [ref=e387]: Disable KDJ confirmation
+        - button "保存运行配置" [ref=e388] [cursor=pointer]
+      - generic [ref=e389]:
+        - generic [ref=e390]:
+          - generic [ref=e391]:
+            - heading "Config Export" [level=2] [ref=e392]
+            - paragraph [ref=e393]: 模板导出默认会清空密钥字段，适合备份参数或跨机器迁移。需要完整备份时再导出包含密钥的版本。
+          - generic [ref=e394]:
+            - link "导出模板 JSON" [ref=e395] [cursor=pointer]:
+              - /url: /api/settings/export
+            - link "导出完整配置" [ref=e396] [cursor=pointer]:
+              - /url: /api/settings/export?include_secrets=1
+        - generic [ref=e397]:
+          - generic [ref=e398]:
+            - heading "Config Import" [level=2] [ref=e399]
+            - paragraph [ref=e400]: 支持粘贴导出的模板 JSON。若模板中的密钥为空，当前已保存的密钥会自动保留。
+          - generic [ref=e401]:
+            - generic [ref=e402]: Template JSON
+            - textbox "Template JSON" [ref=e403]:
+              - /placeholder: "{\"kind\":\"runtime_config_template\",\"version\":1,\"config\":{...}}"
+          - button "导入配置模板" [ref=e404] [cursor=pointer]
+      - paragraph [ref=e405]:
+        - text: 当前实现支持本地 JSON 存储；如果设置环境变量
+        - code [ref=e406]: RUNTIME_CONFIG_PASSPHRASE
+        - text: ，后续保存会自动写成加密格式。未设置时仍保持明文 JSON，适合单机研究使用。
+    - generic [ref=e407]:
+      - strong [ref=e408]: 市场行情
+      - generic [ref=e409]:
+        - generic [ref=e410]:
+          - strong [ref=e411]: BTC/USDT
+          - emphasis [ref=e412]: +1.56%
+        - generic [ref=e413]:
+          - strong [ref=e414]: ETH/USDT
+          - emphasis [ref=e415]: +2.34%
+        - generic [ref=e416]:
+          - strong [ref=e417]: BNB/USDT
+          - emphasis [ref=e418]: +1.12%
+        - generic [ref=e419]:
+          - strong [ref=e420]: SOL/USDT
+          - emphasis [ref=e421]: +3.45%
+        - generic [ref=e422]:
+          - strong [ref=e423]: XRP/USDT
+          - emphasis [ref=e424]: "-0.23%"
+        - generic [ref=e425]:
+          - strong [ref=e426]: IF2406
+          - emphasis [ref=e427]: +0.39%
+      - link "更多" [ref=e428] [cursor=pointer]:
+        - /url: /terminal/market

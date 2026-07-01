@@ -5,10 +5,11 @@ import hmac
 import io
 import json
 import unittest
+from http.client import IncompleteRead
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from trade_signal_app.binance_client import BinanceSpotGateway
+from trade_signal_app.binance_client import BinancePublicAPIError, BinanceSpotGateway
 
 
 class FakeResponse(io.StringIO):
@@ -48,6 +49,82 @@ class BinanceClientTests(unittest.TestCase):
         gateway = BinanceSpotGateway()
         with self.assertRaisesRegex(ValueError, "BINANCE_API_KEY / BINANCE_API_SECRET"):
             gateway.account_commission("BTCUSDT")
+
+    def test_account_status_reports_not_configured_without_credentials(self) -> None:
+        gateway = BinanceSpotGateway()
+
+        status = gateway.account_status({"USDT"})
+
+        self.assertEqual(status["status"], "not_configured")
+        self.assertFalse(status["authenticated"])
+        self.assertFalse(status["can_trade"])
+
+    def test_account_status_summarizes_authenticated_balances(self) -> None:
+        with patch.object(
+            BinanceSpotGateway,
+            "account",
+            return_value={
+                "canTrade": True,
+                "balances": [
+                    {"asset": "USDT", "free": "120.5", "locked": "0"},
+                    {"asset": "BTC", "free": "0.01", "locked": "0.02"},
+                    {"asset": "ETH", "free": "0", "locked": "0"},
+                ],
+            },
+        ):
+            gateway = BinanceSpotGateway(api_key="test-key", api_secret="test-secret")
+            status = gateway.account_status({"USDT"})
+
+        self.assertEqual(status["status"], "ready")
+        self.assertTrue(status["authenticated"])
+        self.assertTrue(status["can_trade"])
+        self.assertEqual(status["quote_available"], 120.5)
+        self.assertEqual(len(status["balances"]), 2)
+
+    def test_public_get_retries_incomplete_read(self) -> None:
+        with patch(
+            "trade_signal_app.binance_client.urlopen",
+            side_effect=[
+                IncompleteRead(b'{"symbol"', 10),
+                FakeResponse(json.dumps([{"symbol": "BTCUSDT", "lastPrice": "1", "priceChangePercent": "0", "quoteVolume": "1", "volume": "1", "count": 1}])),
+            ],
+        ) as mock_urlopen:
+            gateway = BinanceSpotGateway()
+            payload = gateway.ticker24hr()
+
+        self.assertEqual(payload[0]["symbol"], "BTCUSDT")
+        self.assertEqual(mock_urlopen.call_count, 2)
+
+    def test_ticker24hr_symbols_fetches_chunked_tickers(self) -> None:
+        with patch(
+            "trade_signal_app.binance_client.urlopen",
+            side_effect=[
+                FakeResponse(json.dumps([{"symbol": "BTCUSDT"}])),
+                FakeResponse(json.dumps([{"symbol": "ETHUSDT"}])),
+            ],
+        ) as mock_urlopen:
+            gateway = BinanceSpotGateway()
+            payload = gateway.ticker24hr_symbols(["BTCUSDT", "ETHUSDT"], chunk_size=1)
+
+        self.assertEqual([row["symbol"] for row in payload], ["BTCUSDT", "ETHUSDT"])
+        self.assertEqual(mock_urlopen.call_count, 2)
+        self.assertIn("symbols=", mock_urlopen.call_args.args[0].full_url)
+
+    def test_ticker24hr_symbols_splits_failed_large_chunk(self) -> None:
+        gateway = BinanceSpotGateway()
+        with patch.object(
+            gateway,
+            "_get_json",
+            side_effect=[
+                BinancePublicAPIError("HTTP 400"),
+                [{"symbol": "BTCUSDT"}],
+                [{"symbol": "ETHUSDT"}],
+            ],
+        ) as mock_get_json:
+            payload = gateway.ticker24hr_symbols(["BTCUSDT", "ETHUSDT"], chunk_size=2)
+
+        self.assertEqual([row["symbol"] for row in payload], ["BTCUSDT", "ETHUSDT"])
+        self.assertEqual(mock_get_json.call_count, 3)
 
     def test_signed_endpoint_surfaces_http_error_details(self) -> None:
         response = io.BytesIO(b'{"msg":"Invalid API-key, IP, or permissions for action."}')

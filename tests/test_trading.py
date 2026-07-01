@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -7,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from trade_signal_app.runtime_config import AutoTradeDefaults
-from trade_signal_app.trading import AutoTrader, LIVE_CONFIRM_VALUE, TradingStateStore
+from trade_signal_app.trading import AutoTrader, LIVE_CONFIRM_VALUE, TradingPosition, TradingStateStore
 
 
 def _signal(symbol: str = "BTCUSDT", score: float = 82.0, price: float = 100.0) -> SimpleNamespace:
@@ -21,13 +22,33 @@ def _signal(symbol: str = "BTCUSDT", score: float = 82.0, price: float = 100.0) 
 
 
 class FakeGateway:
-    def __init__(self, buy_response=None) -> None:
+    def __init__(self, buy_response=None, ticker_rows=None) -> None:
         self.buy_calls = []
+        self.sell_calls = []
+        self.ticker24hr_calls = 0
+        self.ticker24hr_symbols_calls: list[list[str]] = []
         self.buy_response = buy_response or {"orderId": 123}
+        self.ticker_rows = ticker_rows or []
 
     def order_market_buy(self, **kwargs):
         self.buy_calls.append(kwargs)
         return self.buy_response
+
+    def order_market_sell(self, **kwargs):
+        self.sell_calls.append(kwargs)
+        return {"orderId": 456, "executedQty": str(kwargs.get("quantity", 0)), "cummulativeQuoteQty": "55.0"}
+
+    def ticker24hr(self):
+        self.ticker24hr_calls += 1
+        return self.ticker_rows
+
+    def ticker24hr_symbols(self, symbols):
+        self.ticker24hr_symbols_calls.append(symbols)
+        wanted = {symbol.upper() for symbol in symbols}
+        return [row for row in self.ticker_rows if str(row.get("symbol", "")).upper() in wanted]
+
+    def exchange_info(self):
+        return {"symbols": []}
 
 
 class FakeScanner:
@@ -148,6 +169,193 @@ class TradingTests(unittest.TestCase):
     def test_quantity_floor_respects_step_size(self) -> None:
         self.assertEqual(AutoTrader._floor_quantity(1.234567, "0.00100000"), 1.234)
         self.assertEqual(AutoTrader._floor_quantity(1.234567, "0.01000000"), 1.23)
+
+    def test_paper_exit_records_realized_pnl(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            store.save(
+                [
+                    TradingPosition(
+                        symbol="BTCUSDT",
+                        quantity=0.5,
+                        entry_price=100.0,
+                        quote_notional=50.0,
+                        score=82.0,
+                        grade="A",
+                        opened_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                        stop_price=96.0,
+                        take_profit_price=109.0,
+                        mode="paper",
+                    )
+                ]
+            )
+            scanner = FakeScanner([_signal(price=110.0)])
+            trader = AutoTrader(scanner=scanner, state_store=store)
+
+            report = trader.run_once(AutoTradeDefaults(enabled=True, mode="paper", score_threshold=99.0))
+            stored_events = store.load_events()
+
+        self.assertEqual(report.open_positions, [])
+        self.assertEqual(report.events[0].action, "SELL")
+        self.assertEqual(report.events[0].exit_reason, "take_profit")
+        self.assertAlmostEqual(report.events[0].realized_pnl, 5.0)
+        self.assertAlmostEqual(report.events[0].realized_pnl_pct, 10.0)
+        self.assertEqual(stored_events[0].realized_pnl, 5.0)
+
+    def test_exit_check_uses_ticker_price_for_positions_outside_signal_list(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            store.save(
+                [
+                    TradingPosition(
+                        symbol="ETHUSDT",
+                        quantity=1.0,
+                        entry_price=100.0,
+                        quote_notional=100.0,
+                        score=82.0,
+                        grade="A",
+                        opened_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                        stop_price=96.0,
+                        take_profit_price=108.0,
+                        mode="paper",
+                    )
+                ]
+            )
+            gateway = FakeGateway(ticker_rows=[{"symbol": "ETHUSDT", "lastPrice": "110.0"}])
+            scanner = FakeScanner([_signal(symbol="BTCUSDT", price=100.0)], gateway=gateway)
+            trader = AutoTrader(scanner=scanner, state_store=store)
+
+            report = trader.run_once(AutoTradeDefaults(enabled=True, mode="paper", score_threshold=99.0))
+
+        self.assertEqual(report.open_positions, [])
+        self.assertEqual(report.events[0].symbol, "ETHUSDT")
+        self.assertEqual(report.events[0].exit_reason, "take_profit")
+        self.assertEqual(gateway.ticker24hr_calls, 0)
+        self.assertEqual(gateway.ticker24hr_symbols_calls, [["ETHUSDT"]])
+
+    def test_paper_mode_does_not_simulate_close_for_live_position(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            store.save(
+                [
+                    TradingPosition(
+                        symbol="BTCUSDT",
+                        quantity=0.5,
+                        entry_price=100.0,
+                        quote_notional=50.0,
+                        score=82.0,
+                        grade="A",
+                        opened_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                        stop_price=96.0,
+                        take_profit_price=109.0,
+                        mode="live",
+                    )
+                ]
+            )
+            scanner = FakeScanner([_signal(price=110.0)])
+            trader = AutoTrader(scanner=scanner, state_store=store)
+
+            report = trader.run_once(AutoTradeDefaults(enabled=True, mode="paper", score_threshold=99.0))
+            stored_positions = store.load()
+
+        self.assertEqual(len(report.open_positions), 1)
+        self.assertEqual(report.events[0].status, "blocked")
+        self.assertEqual(stored_positions[0].mode, "live")
+
+    def test_disabled_autotrade_does_not_live_close_position(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            store.save(
+                [
+                    TradingPosition(
+                        symbol="BTCUSDT",
+                        quantity=0.5,
+                        entry_price=100.0,
+                        quote_notional=50.0,
+                        score=82.0,
+                        grade="A",
+                        opened_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                        stop_price=96.0,
+                        take_profit_price=109.0,
+                        mode="live",
+                    )
+                ]
+            )
+            gateway = FakeGateway()
+            scanner = FakeScanner([_signal(price=110.0)], gateway=gateway)
+            trader = AutoTrader(scanner=scanner, state_store=store)
+
+            with patch.dict("os.environ", {"AI_TRADE_LIVE_CONFIRM": LIVE_CONFIRM_VALUE}):
+                report = trader.run_once(AutoTradeDefaults(enabled=False, mode="live", score_threshold=99.0))
+
+        self.assertEqual(len(report.open_positions), 1)
+        self.assertEqual(report.events[0].status, "blocked")
+        self.assertIn("未启用", report.events[0].message)
+        self.assertEqual(gateway.sell_calls, [])
+
+    def test_live_close_requires_confirmation_env(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            store.save(
+                [
+                    TradingPosition(
+                        symbol="BTCUSDT",
+                        quantity=0.5,
+                        entry_price=100.0,
+                        quote_notional=50.0,
+                        score=82.0,
+                        grade="A",
+                        opened_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                        stop_price=96.0,
+                        take_profit_price=109.0,
+                        mode="live",
+                    )
+                ]
+            )
+            gateway = FakeGateway()
+            scanner = FakeScanner([_signal(price=110.0)], gateway=gateway)
+            trader = AutoTrader(scanner=scanner, state_store=store)
+
+            with patch.dict("os.environ", {}, clear=True):
+                report = trader.run_once(AutoTradeDefaults(enabled=True, mode="live", score_threshold=99.0))
+
+        self.assertEqual(len(report.open_positions), 1)
+        self.assertEqual(report.events[0].status, "blocked")
+        self.assertIn("AI_TRADE_LIVE_CONFIRM", report.events[0].message)
+        self.assertEqual(gateway.sell_calls, [])
+
+    def test_confirmed_live_close_submits_sell_and_records_pnl(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            store.save(
+                [
+                    TradingPosition(
+                        symbol="BTCUSDT",
+                        quantity=0.5,
+                        entry_price=100.0,
+                        quote_notional=50.0,
+                        score=82.0,
+                        grade="A",
+                        opened_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                        stop_price=96.0,
+                        take_profit_price=109.0,
+                        mode="live",
+                    )
+                ]
+            )
+            gateway = FakeGateway()
+            scanner = FakeScanner([_signal(price=110.0)], gateway=gateway)
+            trader = AutoTrader(scanner=scanner, state_store=store)
+
+            with patch.dict("os.environ", {"AI_TRADE_LIVE_CONFIRM": LIVE_CONFIRM_VALUE}):
+                report = trader.run_once(
+                    AutoTradeDefaults(enabled=True, mode="live", order_test_only=False, score_threshold=99.0)
+                )
+
+        self.assertEqual(report.open_positions, [])
+        self.assertEqual(report.events[0].status, "filled")
+        self.assertEqual(gateway.sell_calls[0]["symbol"], "BTCUSDT")
+        self.assertAlmostEqual(report.events[0].realized_pnl, 5.0)
 
 
 if __name__ == "__main__":

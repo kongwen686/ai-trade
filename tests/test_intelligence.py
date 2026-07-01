@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from trade_signal_app.config import AppSettings
-from trade_signal_app.intelligence import IntelligenceHub, OpenAIInsightClient
+from trade_signal_app.intelligence import IntelligenceHub, LlmInsightClient, OpenAIInsightClient
 from trade_signal_app.runtime_config import RuntimeConfig
 
 
@@ -32,6 +32,7 @@ class FakeScanner:
 class IntelligenceTests(unittest.TestCase):
     def test_snapshot_builds_local_intelligence_sections(self) -> None:
         config = RuntimeConfig()
+        config.onchain_data_preset = "local_csv"
         config.autotrade_defaults.score_threshold = 75.0
         config.x_tracked_accounts = ["@lookonchain", "wu_blockchain"]
         hub = IntelligenceHub(
@@ -44,6 +45,8 @@ class IntelligenceTests(unittest.TestCase):
 
         self.assertEqual(snapshot.scanned_symbols, 20)
         self.assertGreaterEqual(len(snapshot.intel_items), 1)
+        self.assertEqual(snapshot.onchain_events, [])
+        self.assertEqual(snapshot.spreads, [])
         self.assertGreaterEqual(len(snapshot.strategy_hits), 1)
         self.assertEqual(snapshot.twitter_accounts[0].username, "lookonchain")
         self.assertEqual(snapshot.llm_insight.provider, "local")
@@ -59,9 +62,11 @@ class IntelligenceTests(unittest.TestCase):
             onchain.write_text("chain,symbol,event_type,amount_usd,direction,severity,tx_hash\nbitcoin,BTCUSDT,whale_transfer,9000000,outflow,88,tx\n", encoding="utf-8")
             spreads.write_text("symbol,spot_exchange,futures_exchange,spot_price,futures_price,spread_bps,direction\nBTCUSDT,BINANCE,BINANCE-PERP,100,101,100,basis\n", encoding="utf-8")
             settings = AppSettings(exchange_intel_csv=intel, onchain_events_csv=onchain, futures_basis_csv=spreads)
+            config = RuntimeConfig()
+            config.onchain_data_preset = "local_csv"
             hub = IntelligenceHub(
                 scanner=FakeScanner([_signal("BTCUSDT", 82.0, 100.0)]),
-                runtime_config=RuntimeConfig(),
+                runtime_config=config,
                 settings=settings,
             )
 
@@ -85,6 +90,16 @@ class IntelligenceTests(unittest.TestCase):
         }
 
         self.assertEqual(OpenAIInsightClient._extract_output_text(payload), "综合分析")
+
+    def test_openai_compatible_chat_text_extractor(self) -> None:
+        payload = {"choices": [{"message": {"content": "兼容模型分析"}}]}
+
+        self.assertEqual(LlmInsightClient._extract_chat_text(payload), "兼容模型分析")
+
+    def test_anthropic_text_extractor(self) -> None:
+        payload = {"content": [{"type": "text", "text": "Claude 分析"}]}
+
+        self.assertEqual(LlmInsightClient._extract_anthropic_text(payload), "Claude 分析")
 
 
 if __name__ == "__main__":

@@ -10,8 +10,10 @@ from trade_signal_app.community import (
     CommunitySignal,
     CsvCommunityScoreProvider,
     NewsCommunityScoreProvider,
+    NitterRSSCommunityScoreProvider,
     NullCommunityScoreProvider,
     RedditCommunityScoreProvider,
+    SessionScrapeCommunityScoreProvider,
     TelegramCommunityScoreProvider,
     sanitize_account_names,
     XCommunityScoreProvider,
@@ -161,6 +163,57 @@ class CommunityTests(unittest.TestCase):
         self.assertEqual(signal.mentions, 240)
         self.assertGreater(signal.score, 0)
 
+    def test_prepare_fetches_nitter_rss_signal(self) -> None:
+        def fake_fetcher(url: str, headers: dict[str, str] | None, timeout: int) -> str:
+            self.assertIn("/search/rss?", url)
+            return """<?xml version="1.0" encoding="UTF-8" ?>
+            <rss><channel>
+              <item><title>Bitcoin bullish breakout</title><description>strong rally and buy momentum</description><pubDate>Wed, 30 Jun 2026 12:00:00 GMT</pubDate></item>
+              <item><title>BTC adoption growth</title><description>market momentum improves</description><pubDate>Wed, 30 Jun 2026 12:01:00 GMT</pubDate></item>
+            </channel></rss>"""
+
+        provider = NitterRSSCommunityScoreProvider(
+            alias_registry=AliasRegistry(alias_csv_path=Path("/tmp/does-not-exist.csv")),
+            base_url="http://127.0.0.1:8788",
+            ttl_seconds=60,
+            recent_window_hours=100000,
+            max_results=10,
+            language="en",
+            fetcher=fake_fetcher,
+        )
+        provider.prepare(["BTCUSDT"])
+        signal = provider.get("BTCUSDT")
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal.source, "x_nitter")
+        self.assertEqual(signal.mentions, 2)
+        self.assertGreater(signal.score, 0)
+
+    def test_prepare_fetches_session_scrape_signal(self) -> None:
+        def fake_runner(command: str, timeout: int) -> str:
+            self.assertIn("bitcoin", command.lower())
+            return (
+                '{"text":"bitcoin bullish breakout and strong momentum","created_at":"2026-06-30T12:00:00Z"}\n'
+                '{"rawContent":"BTC adoption growth and buy pressure","createdAt":"2026-06-30T12:01:00Z"}\n'
+            )
+
+        provider = SessionScrapeCommunityScoreProvider(
+            alias_registry=AliasRegistry(alias_csv_path=Path("/tmp/does-not-exist.csv")),
+            command_template="twscrape search {query} --limit {limit}",
+            ttl_seconds=60,
+            recent_window_hours=100000,
+            max_results=10,
+            language="en",
+            runner=fake_runner,
+        )
+        provider.prepare(["BTCUSDT"])
+        signal = provider.get("BTCUSDT")
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal.source, "x_session")
+        self.assertEqual(signal.mentions, 2)
+        self.assertGreater(signal.score, 0)
+
     def test_reddit_query_builder_uses_default_map(self) -> None:
         provider = RedditCommunityScoreProvider(
             alias_registry=AliasRegistry(alias_csv_path=Path("/tmp/does-not-exist.csv")),
@@ -297,8 +350,11 @@ class CommunityTests(unittest.TestCase):
                 news_csv_path=Path(temp_dir) / "missing-news.csv",
                 telegram_csv_path=Path(temp_dir) / "missing-telegram.csv",
                 alias_csv_path=Path(temp_dir) / "aliases.csv",
+                x_provider="official_api",
                 x_bearer_token="",
                 x_api_base_url="https://api.x.com",
+                x_nitter_base_url="",
+                x_session_command="",
                 community_ttl_seconds=60,
                 x_recent_window_hours=24,
                 x_recent_max_results=10,
@@ -321,8 +377,11 @@ class CommunityTests(unittest.TestCase):
                 news_csv_path=Path(temp_dir) / "missing-news.csv",
                 telegram_csv_path=Path(temp_dir) / "missing-telegram.csv",
                 alias_csv_path=Path(temp_dir) / "aliases.csv",
+                x_provider="official_api",
                 x_bearer_token="",
                 x_api_base_url="https://api.x.com",
+                x_nitter_base_url="",
+                x_session_command="",
                 community_ttl_seconds=60,
                 x_recent_window_hours=24,
                 x_recent_max_results=10,
@@ -348,8 +407,11 @@ class CommunityTests(unittest.TestCase):
                 news_csv_path=csv_path,
                 telegram_csv_path=Path(temp_dir) / "missing-telegram.csv",
                 alias_csv_path=Path(temp_dir) / "aliases.csv",
+                x_provider="official_api",
                 x_bearer_token="",
                 x_api_base_url="https://api.x.com",
+                x_nitter_base_url="",
+                x_session_command="",
                 community_ttl_seconds=60,
                 x_recent_window_hours=24,
                 x_recent_max_results=10,
@@ -375,8 +437,11 @@ class CommunityTests(unittest.TestCase):
                 news_csv_path=Path(temp_dir) / "missing-news.csv",
                 telegram_csv_path=csv_path,
                 alias_csv_path=Path(temp_dir) / "aliases.csv",
+                x_provider="official_api",
                 x_bearer_token="",
                 x_api_base_url="https://api.x.com",
+                x_nitter_base_url="",
+                x_session_command="",
                 community_ttl_seconds=60,
                 x_recent_window_hours=24,
                 x_recent_max_results=10,
@@ -396,8 +461,11 @@ class CommunityTests(unittest.TestCase):
             news_csv_path=Path("/tmp/missing-news.csv"),
             telegram_csv_path=Path("/tmp/missing-telegram.csv"),
             alias_csv_path=Path("/tmp/aliases.csv"),
+            x_provider="official_api",
             x_bearer_token="",
             x_api_base_url="https://api.x.com",
+            x_nitter_base_url="",
+            x_session_command="",
             community_ttl_seconds=60,
             x_recent_window_hours=24,
             x_recent_max_results=10,
@@ -409,6 +477,54 @@ class CommunityTests(unittest.TestCase):
             reddit_user_agent="trade-signal-app/0.2",
         )
         self.assertIsInstance(provider, RedditCommunityScoreProvider)
+
+    def test_build_provider_with_nitter_rss(self) -> None:
+        provider = build_community_provider(
+            provider_mode="x",
+            csv_path=Path("/tmp/missing-community.csv"),
+            news_csv_path=Path("/tmp/missing-news.csv"),
+            telegram_csv_path=Path("/tmp/missing-telegram.csv"),
+            alias_csv_path=Path("/tmp/aliases.csv"),
+            x_provider="nitter_rss",
+            x_bearer_token="",
+            x_api_base_url="https://api.x.com",
+            x_nitter_base_url="http://127.0.0.1:8788",
+            x_session_command="",
+            community_ttl_seconds=60,
+            x_recent_window_hours=24,
+            x_recent_max_results=10,
+            x_language="en",
+            x_max_workers=1,
+            reddit_api_base_url="https://www.reddit.com",
+            reddit_recent_window_hours=24,
+            reddit_max_results=10,
+            reddit_user_agent="trade-signal-app/0.2",
+        )
+        self.assertIsInstance(provider, NitterRSSCommunityScoreProvider)
+
+    def test_build_provider_with_session_scrape(self) -> None:
+        provider = build_community_provider(
+            provider_mode="x",
+            csv_path=Path("/tmp/missing-community.csv"),
+            news_csv_path=Path("/tmp/missing-news.csv"),
+            telegram_csv_path=Path("/tmp/missing-telegram.csv"),
+            alias_csv_path=Path("/tmp/aliases.csv"),
+            x_provider="session_scrape",
+            x_bearer_token="",
+            x_api_base_url="https://api.x.com",
+            x_nitter_base_url="",
+            x_session_command="twscrape search {query} --limit {limit}",
+            community_ttl_seconds=60,
+            x_recent_window_hours=24,
+            x_recent_max_results=10,
+            x_language="en",
+            x_max_workers=1,
+            reddit_api_base_url="https://www.reddit.com",
+            reddit_recent_window_hours=24,
+            reddit_max_results=10,
+            reddit_user_agent="trade-signal-app/0.2",
+        )
+        self.assertIsInstance(provider, SessionScrapeCommunityScoreProvider)
 
 
 if __name__ == "__main__":

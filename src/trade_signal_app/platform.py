@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from .data_services import get_llm_provider, get_public_data_preset
 from .runtime_config import RuntimeConfig
 from .trading import TradingEvent, TradingPosition
 
@@ -44,6 +45,9 @@ class AccountSnapshot:
     open_positions: int
     quote_exposure: float
     max_quote_exposure: float
+    realized_pnl: float = 0.0
+    closed_trades: int = 0
+    win_rate_pct: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -67,18 +71,45 @@ def build_platform_snapshot(
         components=build_components(config),
         strategies=build_strategy_catalog(config),
         risk_rules=build_risk_rules(config),
-        accounts=build_account_snapshots(config, positions),
+        accounts=build_account_snapshots_from_events(config, positions, events),
         recent_events=events[-30:],
     )
 
 
 def build_components(config: RuntimeConfig) -> list[PlatformComponent]:
+    binance_auth_configured = bool(config.binance_api_key and config.binance_api_secret)
+    market_preset = get_public_data_preset(config.market_data_preset)
+    onchain_preset = get_public_data_preset(config.onchain_data_preset)
+    llm_provider = get_llm_provider(config.intelligence_defaults.llm_provider)
+    llm_configured = bool(config.intelligence_defaults.llm_api_key or config.intelligence_defaults.openai_api_key)
+    x_configured = (
+        bool(config.x_bearer_token)
+        if config.x_provider == "official_api"
+        else bool(config.x_nitter_base_url)
+        if config.x_provider == "nitter_rss"
+        else bool(config.x_session_command)
+    )
     return [
-        PlatformComponent("接入层", "Binance API", "ready", "现货行情、账户费率、实盘市价单", "/api/scan", bool(config.binance_api_key and config.binance_api_secret)),
-        PlatformComponent("接入层", "OKX API", "configured" if config.okx_api_key else "ready_public", "OKX 接入参数与后续跨交易所扩展", "", bool(config.okx_api_key and config.okx_api_secret and config.okx_api_passphrase)),
-        PlatformComponent("接入层", "Twitter/X", "configured" if config.x_bearer_token else "token_missing", "热门社区和指定账号情报", "/settings", bool(config.x_bearer_token)),
-        PlatformComponent("接入层", "On-chain CSV", "ready", "链上异动、大额转账、交易所流入流出", "/api/terminal/snapshot", True),
-        PlatformComponent("接入层", "OpenAI", "configured" if config.openai_api_key else "fallback", "综合指标分析和风险解释", "/terminal", bool(config.openai_api_key)),
+        PlatformComponent(
+            "接入层",
+            "Binance API",
+            "configured" if binance_auth_configured else "ready_public",
+            "现货公开行情、账户授权状态和受保护市价单" if binance_auth_configured else "现货公开行情；账户级接口需要配置 API key/secret",
+            "/api/platform/exchange-auth" if binance_auth_configured else "/api/scan",
+            binance_auth_configured,
+        ),
+        PlatformComponent(
+            "接入层",
+            "OKX API",
+            "configured_pending_connector" if config.okx_api_key and config.okx_api_secret and config.okx_api_passphrase else "not_configured",
+            "OKX 凭据保存；当前版本不使用 OKX 私有接口自动交易",
+            "/settings",
+            bool(config.okx_api_key and config.okx_api_secret and config.okx_api_passphrase),
+        ),
+        PlatformComponent("接入层", market_preset.name, "ready_public", market_preset.description, market_preset.base_url, True),
+        PlatformComponent("接入层", "Twitter/X", "configured" if x_configured else "source_missing", f"社区热度和指定账号情报；provider={config.x_provider}", "/settings", x_configured),
+        PlatformComponent("接入层", onchain_preset.name, "ready_public" if not onchain_preset.auth_required else "key_optional", onchain_preset.description, onchain_preset.base_url, True),
+        PlatformComponent("接入层", llm_provider.name, "configured" if llm_configured else "fallback", "综合指标分析和风险解释；未配置 key 时使用本地规则", "/settings", llm_configured),
         PlatformComponent("策略层", "Signal Scoring", "ready", "趋势、动量、量能、社区评分", "/api/scan", True),
         PlatformComponent("策略层", "Basis Monitor", "ready", "现货/合约价差和跨市场 basis", "/api/terminal/snapshot", True),
         PlatformComponent("策略层", "Strategy Hits", "ready", "自动交易候选和策略命中", "/api/terminal/snapshot", True),
@@ -112,12 +143,52 @@ def build_strategy_catalog(config: RuntimeConfig) -> list[StrategyDefinition]:
             ["risk_gate", "cooldown"],
         ),
         StrategyDefinition(
+            "trend_following",
+            "趋势跟随策略",
+            "research",
+            "EMA 20/50 trend, score filter, trailing review",
+            "回测研究 / paper 趋势跟随观察",
+            ["trend_filter", "cooldown", "position_sizing"],
+        ),
+        StrategyDefinition(
+            "range_breakout",
+            "区间突破策略",
+            "research",
+            "resistance breakout + volume expansion",
+            "回测研究 / paper 突破观察",
+            ["false_breakout_exit", "cooldown", "risk_gate"],
+        ),
+        StrategyDefinition(
+            "momentum_rotation",
+            "动量轮动策略",
+            "research",
+            "relative strength rank + score filter",
+            "回测研究 / 组合轮动观察",
+            ["diversification", "turnover_cost", "max_positions"],
+        ),
+        StrategyDefinition(
             "spot_futures_basis",
             "现货/合约价差策略",
             "monitoring",
             f"abs(spread_bps) >= {config.intelligence_defaults.min_spread_bps:.1f}",
             "套利/对冲观察",
             ["basis_extreme_block", "manual_review"],
+        ),
+        StrategyDefinition(
+            "crypto_rebalance_premium",
+            "加密资产等权再平衡",
+            "research",
+            "equal-weight basket, periodic rebalance",
+            "回测研究 / 组合再平衡观察",
+            ["diversification", "turnover_cost", "spot_only"],
+        ),
+        StrategyDefinition(
+            "btc_overnight_seasonality",
+            "BTC 隔夜季节性",
+            "research",
+            "UTC 22:00 entry, hold 2 hours",
+            "回测研究 / 时间窗口观察",
+            ["time_window", "btc_only", "execution_cost"],
         ),
         StrategyDefinition(
             "onchain_whale_guard",
@@ -144,7 +215,24 @@ def build_risk_rules(config: RuntimeConfig) -> list[RiskRule]:
 
 
 def build_account_snapshots(config: RuntimeConfig, positions: list[TradingPosition]) -> list[AccountSnapshot]:
+    return build_account_snapshots_from_events(config, positions, [])
+
+
+def build_account_snapshots_from_events(
+    config: RuntimeConfig,
+    positions: list[TradingPosition],
+    events: list[TradingEvent],
+) -> list[AccountSnapshot]:
     exposure = sum(position.quote_notional for position in positions)
+    closed_events = [
+        event
+        for event in events
+        if event.action == "SELL" and event.status in {"filled", "paper_filled"} and event.realized_pnl is not None
+    ]
+    realized_pnl = sum(float(event.realized_pnl or 0.0) for event in closed_events)
+    closed_trades = len(closed_events)
+    winning_trades = sum(1 for event in closed_events if float(event.realized_pnl or 0.0) > 0)
+    win_rate_pct = (winning_trades / closed_trades) * 100 if closed_trades else 0.0
     return [
         AccountSnapshot(
             exchange="BINANCE",
@@ -153,11 +241,14 @@ def build_account_snapshots(config: RuntimeConfig, positions: list[TradingPositi
             open_positions=len(positions),
             quote_exposure=exposure,
             max_quote_exposure=config.autotrade_defaults.max_total_quote_exposure,
+            realized_pnl=round(realized_pnl, 8),
+            closed_trades=closed_trades,
+            win_rate_pct=round(win_rate_pct, 2),
         ),
         AccountSnapshot(
             exchange="OKX",
             mode="monitor",
-            status="configured" if config.okx_api_key and config.okx_api_secret and config.okx_api_passphrase else "not_configured",
+            status="configured_pending_connector" if config.okx_api_key and config.okx_api_secret and config.okx_api_passphrase else "not_configured",
             open_positions=0,
             quote_exposure=0.0,
             max_quote_exposure=0.0,

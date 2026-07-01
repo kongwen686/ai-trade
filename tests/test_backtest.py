@@ -18,7 +18,9 @@ from trade_signal_app.backtest import (
     resolve_execution_config_from_binance,
     resolve_slippage_bps,
     run_backtest_for_series,
+    run_overnight_seasonality_backtest,
     run_portfolio_backtest,
+    run_rebalance_premium_backtest,
     simulate_long_trade,
 )
 from trade_signal_app.models import BacktestReport, BacktestSignalEvent, Candlestick
@@ -53,6 +55,35 @@ def _make_backtest_candles() -> list[Candlestick]:
                 trade_count=150 + index * 4,
                 taker_buy_base_volume=volume * taker_ratio,
                 taker_buy_quote_volume=volume * price * taker_ratio,
+            )
+        )
+    return candles
+
+
+def _make_hourly_candles() -> list[Candlestick]:
+    candles: list[Candlestick] = []
+    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    price = 100.0
+    for index in range(72):
+        open_time = start + timedelta(hours=index)
+        close_time = open_time + timedelta(hours=1) - timedelta(milliseconds=1)
+        if open_time.hour in {22, 23}:
+            price += 0.35
+        else:
+            price += 0.02 if index % 3 else -0.01
+        candles.append(
+            Candlestick(
+                open_time=open_time,
+                close_time=close_time,
+                open_price=price - 0.15,
+                high_price=price + 0.4,
+                low_price=price - 0.35,
+                close_price=price,
+                volume=1000 + index,
+                quote_volume=(1000 + index) * price,
+                trade_count=100 + index,
+                taker_buy_base_volume=(1000 + index) * 0.55,
+                taker_buy_quote_volume=(1000 + index) * price * 0.55,
             )
         )
     return candles
@@ -113,6 +144,8 @@ class BacktestTests(unittest.TestCase):
         self.assertTrue(any(event.grade in {"A", "B", "C"} for event in report.events))
         self.assertIsNotNone(report.trade_stat)
         self.assertGreater(len(report.equity_curve), 0)
+        self.assertGreater(len(report.buy_hold_equity_curve), 0)
+        self.assertGreater(report.buy_hold_equity_curve[-1].equity, 1.0)
         self.assertTrue(all(event.exit_reason is not None for event in report.events))
 
     def test_simulate_long_trade_hits_take_profit(self) -> None:
@@ -439,6 +472,56 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(len(portfolio.selections), 1)
         self.assertEqual(len(portfolio.selections[0].picks), 2)
         self.assertAlmostEqual(portfolio.selections[0].capital_fraction_pct, 60.0, places=4)
+
+    def test_rebalance_premium_compares_equal_weight_and_drift_portfolios(self) -> None:
+        base = _make_backtest_candles()[:90]
+        alt = []
+        for index, candle in enumerate(base):
+            multiplier = 1.0 + (0.08 if index % 12 < 6 else -0.04)
+            alt.append(
+                Candlestick(
+                    open_time=candle.open_time,
+                    close_time=candle.close_time,
+                    open_price=candle.open_price * multiplier,
+                    high_price=candle.high_price * multiplier,
+                    low_price=candle.low_price * multiplier,
+                    close_price=candle.close_price * multiplier,
+                    volume=candle.volume,
+                    quote_volume=candle.quote_volume * multiplier,
+                    trade_count=candle.trade_count,
+                    taker_buy_base_volume=candle.taker_buy_base_volume,
+                    taker_buy_quote_volume=candle.taker_buy_quote_volume * multiplier,
+                )
+            )
+
+        report = run_rebalance_premium_backtest(
+            {"BTCUSDT": base, "ETHUSDT": alt},
+            interval="4h",
+            rebalance_interval_bars=6,
+            fee_bps=0.0,
+            slippage_bps=0.0,
+        )
+
+        self.assertIsNotNone(report)
+        assert report is not None
+        self.assertEqual(report.symbol_count, 2)
+        self.assertEqual(report.rebalance_interval_bars, 6)
+        self.assertGreater(report.rebalance_count, 0)
+        self.assertGreater(len(report.equity_curve), 0)
+        self.assertGreater(len(report.buy_hold_equity_curve), 0)
+
+    def test_overnight_seasonality_enters_utc_22_and_holds_two_hours(self) -> None:
+        report = run_overnight_seasonality_backtest(
+            symbol="BTCUSDT",
+            interval="1h",
+            candles=_make_hourly_candles(),
+            execution_config=ExecutionConfig(fee_bps=0.0, slippage_bps=0.0),
+        )
+
+        self.assertGreater(report.signal_count, 0)
+        self.assertTrue(all(event.entry_time.hour == 22 for event in report.events))
+        self.assertTrue(all(event.bars_held == 2 for event in report.events))
+        self.assertTrue(all(event.exit_reason == "time_window_exit" for event in report.events))
 
     def test_capital_fraction_scales_equity_curve(self) -> None:
         full = run_backtest_for_series(

@@ -181,6 +181,7 @@ class BacktestReport:
     stats: list[ForwardReturnStat] = field(default_factory=list)
     trade_stat: TradePerformanceStat | None = None
     equity_curve: list[EquityPoint] = field(default_factory=list)
+    buy_hold_equity_curve: list[EquityPoint] = field(default_factory=list)
     events: list[BacktestSignalEvent] = field(default_factory=list)
 
 
@@ -232,6 +233,36 @@ class PortfolioBacktestReport:
     trade_stat: TradePerformanceStat | None = None
     equity_curve: list[EquityPoint] = field(default_factory=list)
     selections: list[PortfolioSelection] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RebalanceSnapshot:
+    time: datetime
+    rebalanced_equity: float
+    buy_hold_equity: float
+    premium_pct: float
+    turnover_pct: float
+
+
+@dataclass(frozen=True)
+class RebalancePremiumReport:
+    interval: str
+    symbol_count: int
+    rebalance_interval_bars: int
+    fee_bps: float
+    slippage_bps: float
+    generated_at: datetime
+    rebalanced_final_equity: float
+    buy_hold_final_equity: float
+    premium_pct: float
+    max_drawdown_pct: float
+    buy_hold_max_drawdown_pct: float
+    avg_turnover_pct: float
+    rebalance_count: int
+    symbols: list[str] = field(default_factory=list)
+    equity_curve: list[EquityPoint] = field(default_factory=list)
+    buy_hold_equity_curve: list[EquityPoint] = field(default_factory=list)
+    snapshots: list[RebalanceSnapshot] = field(default_factory=list)
 
 
 def utc_datetime_from_epoch(epoch: int) -> datetime:
