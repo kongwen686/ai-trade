@@ -29,6 +29,7 @@ def format_signal_row(signal: TradeSignal) -> dict:
         "grade": signal.grade,
         "reasons": signal.reasons,
         "warnings": signal.warnings,
+        "last_price": signal.ticker.last_price,
         "quote_volume_m": signal.ticker.quote_volume / 1_000_000,
         "price_change_percent": signal.ticker.price_change_percent,
         "rsi_14": signal.indicators.rsi_14,
@@ -40,6 +41,10 @@ def format_signal_row(signal: TradeSignal) -> dict:
         "community_mentions": None if signal.community_signal is None else signal.community_signal.mentions,
         "community_sentiment": None if signal.community_signal is None else signal.community_signal.sentiment,
         "community_sample_size": None if signal.community_signal is None else signal.community_signal.sample_size,
+        "community_summary": "" if signal.community_signal is None else signal.community_signal.summary,
+        "community_drivers": [] if signal.community_signal is None else signal.community_signal.drivers,
+        "community_risks": [] if signal.community_signal is None else signal.community_signal.risks,
+        "community_samples": [] if signal.community_signal is None else signal.community_signal.samples,
         "breakdown": {
             "trend": signal.breakdown.trend,
             "momentum": signal.breakdown.momentum,

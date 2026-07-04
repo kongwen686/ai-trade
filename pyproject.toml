@@ -17,6 +17,7 @@ trade-signal-autotrade = "trade_signal_app.autotrade:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<9"]
+tradingview = ["tvdatafeed @ git+https://github.com/rongardF/tvdatafeed.git"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

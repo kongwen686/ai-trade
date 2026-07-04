@@ -81,6 +81,7 @@ class AppState:
             x_nitter_base_url=effective_settings.x_nitter_base_url,
             x_session_command=effective_settings.x_session_command,
             community_ttl_seconds=effective_settings.community_ttl_seconds,
+            exchange_community_urls=effective_settings.exchange_community_urls,
             x_recent_window_hours=effective_settings.x_recent_window_hours,
             x_recent_max_results=effective_settings.x_recent_max_results,
             x_language=effective_settings.x_language,

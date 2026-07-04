@@ -63,6 +63,21 @@ class AppSettings:
     community_telegram_csv: Path = BASE_DIR / os.getenv("COMMUNITY_TELEGRAM_CSV", "data/telegram_sentiment.csv")
     community_aliases_csv: Path = BASE_DIR / os.getenv("COMMUNITY_ALIASES_CSV", "data/social_aliases.csv")
     community_ttl_seconds: int = int(os.getenv("COMMUNITY_TTL_SECONDS", "900"))
+    exchange_community_urls: list[str] = field(
+        default_factory=lambda: parse_env_list(
+            os.getenv(
+                "EXCHANGE_COMMUNITY_URLS",
+                "\n".join(
+                    (
+                        "https://www.binance.com/en/support/announcement",
+                        "https://www.binance.com/en/support/announcement/new-cryptocurrency-listing?c=48",
+                        "https://www.okx.com/en-us/help/section/announcements-latest-announcements",
+                        "https://www.okx.com/en-us/help/section/new-listings",
+                    )
+                ),
+            )
+        )
+    )
     x_provider: str = os.getenv("X_PROVIDER", "official_api")
     x_bearer_token: str = os.getenv("X_BEARER_TOKEN", "")
     x_api_base_url: str = os.getenv("X_API_BASE_URL", "https://api.x.com")
@@ -100,6 +115,7 @@ class AppSettings:
     exchange_intel_csv: Path = BASE_DIR / os.getenv("EXCHANGE_INTEL_CSV", "data/exchange_intel.csv")
     onchain_events_csv: Path = BASE_DIR / os.getenv("ONCHAIN_EVENTS_CSV", "data/onchain_events.csv")
     futures_basis_csv: Path = BASE_DIR / os.getenv("FUTURES_BASIS_CSV", "data/futures_basis.csv")
+    futures_funding_csv: Path = BASE_DIR / os.getenv("FUTURES_FUNDING_CSV", "data/futures_funding.csv")
     runtime_config_passphrase: str = os.getenv("RUNTIME_CONFIG_PASSPHRASE", "")
     server_host: str = os.getenv("HOST", "127.0.0.1")
     server_port: int = int(os.getenv("PORT", "8000"))

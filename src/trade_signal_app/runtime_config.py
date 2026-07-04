@@ -21,6 +21,7 @@ SECRET_FIELDS = (
     "okx_api_passphrase",
     "x_bearer_token",
     "onchain_api_key",
+    "tradingview_password",
     "llm_api_key",
     "openai_api_key",
 )
@@ -137,6 +138,7 @@ class BacktestDefaults:
 class AutoTradeDefaults:
     enabled: bool = False
     mode: str = "paper"
+    execution_exchange: str = "binance"
     quote_order_qty: float = 25.0
     max_open_positions: int = 3
     max_total_quote_exposure: float = 100.0
@@ -173,6 +175,13 @@ class RuntimeConfig:
     okx_api_secret: str = ""
     okx_api_passphrase: str = ""
     market_data_preset: str = "binance_public"
+    tradingview_username: str = ""
+    tradingview_password: str = ""
+    tradingview_exchange: str = "BINANCE"
+    tradingview_symbols: list[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT"])
+    tradingview_interval: str = "4h"
+    tradingview_bars: int = 5000
+    tradingview_cache_enabled: bool = True
     onchain_data_preset: str = "open_multichain_keyless"
     onchain_api_key: str = ""
     onchain_api_base_url: str = ""
@@ -265,6 +274,17 @@ class RuntimeConfig:
         llm_api_key = str(payload.get("llm_api_key", payload.get("openai_api_key", intelligence_dict.get("llm_api_key", defaults.llm_api_key))))
         llm_base_url = str(payload.get("llm_base_url", intelligence_dict.get("llm_base_url", defaults.llm_base_url)))
         llm_model = str(payload.get("llm_model", payload.get("openai_model", intelligence_dict.get("llm_model", defaults.llm_model))))
+        tradingview_symbols_raw = payload.get("tradingview_symbols", defaults.tradingview_symbols)
+        if isinstance(tradingview_symbols_raw, list):
+            tradingview_symbols = [str(item).strip().upper() for item in tradingview_symbols_raw if str(item).strip()]
+        elif isinstance(tradingview_symbols_raw, str):
+            tradingview_symbols = [
+                item.strip().upper()
+                for item in tradingview_symbols_raw.replace(",", "\n").splitlines()
+                if item.strip()
+            ]
+        else:
+            tradingview_symbols = defaults.tradingview_symbols
         return cls(
             binance_api_key=str(payload.get("binance_api_key", defaults.binance_api_key)),
             binance_api_secret=str(payload.get("binance_api_secret", defaults.binance_api_secret)),
@@ -273,6 +293,13 @@ class RuntimeConfig:
             okx_api_secret=str(payload.get("okx_api_secret", defaults.okx_api_secret)),
             okx_api_passphrase=str(payload.get("okx_api_passphrase", defaults.okx_api_passphrase)),
             market_data_preset=str(payload.get("market_data_preset", defaults.market_data_preset)),
+            tradingview_username=str(payload.get("tradingview_username", defaults.tradingview_username)),
+            tradingview_password=str(payload.get("tradingview_password", defaults.tradingview_password)),
+            tradingview_exchange=str(payload.get("tradingview_exchange", defaults.tradingview_exchange)),
+            tradingview_symbols=tradingview_symbols,
+            tradingview_interval=str(payload.get("tradingview_interval", defaults.tradingview_interval)),
+            tradingview_bars=int(payload.get("tradingview_bars", defaults.tradingview_bars)),
+            tradingview_cache_enabled=bool(payload.get("tradingview_cache_enabled", defaults.tradingview_cache_enabled)),
             onchain_data_preset=str(payload.get("onchain_data_preset", defaults.onchain_data_preset)),
             onchain_api_key=str(payload.get("onchain_api_key", defaults.onchain_api_key)),
             onchain_api_base_url=str(payload.get("onchain_api_base_url", defaults.onchain_api_base_url)),

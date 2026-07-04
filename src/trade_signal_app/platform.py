@@ -60,6 +60,50 @@ class PlatformSnapshot:
     recent_events: list[TradingEvent]
 
 
+def okx_credential_state(config: RuntimeConfig) -> dict[str, object]:
+    present = {
+        "API Key": bool(config.okx_api_key),
+        "API Secret": bool(config.okx_api_secret),
+        "Passphrase": bool(config.okx_api_passphrase),
+    }
+    missing = [name for name, exists in present.items() if not exists]
+    configured = not missing
+    partial = bool([name for name, exists in present.items() if exists]) and not configured
+    if configured:
+        return {
+            "configured": True,
+            "partial": False,
+            "status": "configured",
+            "label": "凭据已完整保存",
+            "message": "OKX API Key / Secret / Passphrase 已保存，可用于授权检查和自动交易执行。",
+            "missing": [],
+        }
+    if partial:
+        return {
+            "configured": False,
+            "partial": True,
+            "status": "partial_configured",
+            "label": "部分配置",
+            "message": "OKX 凭据已部分保存，缺少：" + "、".join(missing),
+            "missing": missing,
+        }
+    return {
+        "configured": False,
+        "partial": False,
+        "status": "not_configured",
+        "label": "未配置",
+        "message": "OKX API Key / Secret / Passphrase 未配置。",
+        "missing": missing,
+    }
+
+
+def _event_created_at_utc(event: TradingEvent) -> datetime:
+    created_at = event.created_at
+    if created_at.tzinfo is None:
+        return created_at.replace(tzinfo=timezone.utc)
+    return created_at.astimezone(timezone.utc)
+
+
 def build_platform_snapshot(
     *,
     config: RuntimeConfig,
@@ -72,12 +116,13 @@ def build_platform_snapshot(
         strategies=build_strategy_catalog(config),
         risk_rules=build_risk_rules(config),
         accounts=build_account_snapshots_from_events(config, positions, events),
-        recent_events=events[-30:],
+        recent_events=sorted(events, key=_event_created_at_utc, reverse=True)[:30],
     )
 
 
 def build_components(config: RuntimeConfig) -> list[PlatformComponent]:
     binance_auth_configured = bool(config.binance_api_key and config.binance_api_secret)
+    okx_state = okx_credential_state(config)
     market_preset = get_public_data_preset(config.market_data_preset)
     onchain_preset = get_public_data_preset(config.onchain_data_preset)
     llm_provider = get_llm_provider(config.intelligence_defaults.llm_provider)
@@ -101,10 +146,10 @@ def build_components(config: RuntimeConfig) -> list[PlatformComponent]:
         PlatformComponent(
             "接入层",
             "OKX API",
-            "configured_pending_connector" if config.okx_api_key and config.okx_api_secret and config.okx_api_passphrase else "not_configured",
-            "OKX 凭据保存；当前版本不使用 OKX 私有接口自动交易",
+            str(okx_state["status"]),
+            str(okx_state["message"]),
             "/settings",
-            bool(config.okx_api_key and config.okx_api_secret and config.okx_api_passphrase),
+            bool(okx_state["configured"] or okx_state["partial"]),
         ),
         PlatformComponent("接入层", market_preset.name, "ready_public", market_preset.description, market_preset.base_url, True),
         PlatformComponent("接入层", "Twitter/X", "configured" if x_configured else "source_missing", f"社区热度和指定账号情报；provider={config.x_provider}", "/settings", x_configured),
@@ -175,6 +220,30 @@ def build_strategy_catalog(config: RuntimeConfig) -> list[StrategyDefinition]:
             ["basis_extreme_block", "manual_review"],
         ),
         StrategyDefinition(
+            "low_float_momentum_long",
+            "小市值早期动量做多",
+            "monitoring",
+            "volume_ratio >= 2.5, 8% <= 24h_change <= 120%, funding <= +3.5bps/8h",
+            "paper 观察 / 低费率追踪做多",
+            ["funding_filter", "volume_spike", "take_profit_ladder"],
+        ),
+        StrategyDefinition(
+            "blowoff_distribution_short",
+            "小市值末端分布做空",
+            "monitoring",
+            "positive funding + extended RSI/EMA distance + volume spike",
+            "合约做空观察 / 禁止现货追高",
+            ["funding_overheat", "false_breakout_exit", "manual_review"],
+        ),
+        StrategyDefinition(
+            "capitulation_rebound_long",
+            "小市值暴跌反弹做多",
+            "monitoring",
+            "negative funding + 24h drawdown + RSI/EMA capitulation",
+            "短线反弹观察",
+            ["funding_short_crowding", "tight_stop", "mean_reversion_target"],
+        ),
+        StrategyDefinition(
             "crypto_rebalance_premium",
             "加密资产等权再平衡",
             "research",
@@ -211,6 +280,7 @@ def build_risk_rules(config: RuntimeConfig) -> list[RiskRule]:
         RiskRule("live_confirm", "实盘确认", "guarded", "AI_TRADE_LIVE_CONFIRM", "阻断真实订单"),
         RiskRule("order_test", "Binance order/test", "active" if config.autotrade_defaults.order_test_only else "disabled", str(config.autotrade_defaults.order_test_only), "仅校验不成交"),
         RiskRule("intel_gate", "智能执行风控", "active", "onchain + spread + strategy", "阻断风险标的"),
+        RiskRule("funding_rate_guard", "合约资金费率风控", "active", "funding >= +10bps/8h", "阻断拥挤追多"),
     ]
 
 
@@ -223,34 +293,53 @@ def build_account_snapshots_from_events(
     positions: list[TradingPosition],
     events: list[TradingEvent],
 ) -> list[AccountSnapshot]:
-    exposure = sum(position.quote_notional for position in positions)
+    okx_state = okx_credential_state(config)
+    binance_positions = [position for position in positions if position.exchange.upper() == "BINANCE"]
+    okx_positions = [position for position in positions if position.exchange.upper() == "OKX"]
+    binance_exposure = sum(position.quote_notional for position in binance_positions)
+    okx_exposure = sum(position.quote_notional for position in okx_positions)
     closed_events = [
         event
         for event in events
         if event.action == "SELL" and event.status in {"filled", "paper_filled"} and event.realized_pnl is not None
     ]
-    realized_pnl = sum(float(event.realized_pnl or 0.0) for event in closed_events)
-    closed_trades = len(closed_events)
-    winning_trades = sum(1 for event in closed_events if float(event.realized_pnl or 0.0) > 0)
-    win_rate_pct = (winning_trades / closed_trades) * 100 if closed_trades else 0.0
+    realized_by_exchange = {
+        exchange: sum(float(event.realized_pnl or 0.0) for event in closed_events if event.exchange.upper() == exchange)
+        for exchange in {"BINANCE", "OKX"}
+    }
+    closed_by_exchange = {
+        exchange: [event for event in closed_events if event.exchange.upper() == exchange]
+        for exchange in {"BINANCE", "OKX"}
+    }
+    wins_by_exchange = {
+        exchange: sum(1 for event in exchange_events if float(event.realized_pnl or 0.0) > 0)
+        for exchange, exchange_events in closed_by_exchange.items()
+    }
+    win_rate_by_exchange = {
+        exchange: (wins_by_exchange[exchange] / len(exchange_events)) * 100 if exchange_events else 0.0
+        for exchange, exchange_events in closed_by_exchange.items()
+    }
     return [
         AccountSnapshot(
             exchange="BINANCE",
             mode=config.autotrade_defaults.mode,
             status="configured" if config.binance_api_key and config.binance_api_secret else "paper_ready",
-            open_positions=len(positions),
-            quote_exposure=exposure,
+            open_positions=len(binance_positions),
+            quote_exposure=binance_exposure,
             max_quote_exposure=config.autotrade_defaults.max_total_quote_exposure,
-            realized_pnl=round(realized_pnl, 8),
-            closed_trades=closed_trades,
-            win_rate_pct=round(win_rate_pct, 2),
+            realized_pnl=round(realized_by_exchange["BINANCE"], 8),
+            closed_trades=len(closed_by_exchange["BINANCE"]),
+            win_rate_pct=round(win_rate_by_exchange["BINANCE"], 2),
         ),
         AccountSnapshot(
             exchange="OKX",
-            mode="monitor",
-            status="configured_pending_connector" if config.okx_api_key and config.okx_api_secret and config.okx_api_passphrase else "not_configured",
-            open_positions=0,
-            quote_exposure=0.0,
-            max_quote_exposure=0.0,
+            mode=config.autotrade_defaults.mode if config.autotrade_defaults.execution_exchange.lower() == "okx" else "monitor",
+            status=str(okx_state["status"]),
+            open_positions=len(okx_positions),
+            quote_exposure=okx_exposure,
+            max_quote_exposure=config.autotrade_defaults.max_total_quote_exposure if config.autotrade_defaults.execution_exchange.lower() == "okx" else 0.0,
+            realized_pnl=round(realized_by_exchange["OKX"], 8),
+            closed_trades=len(closed_by_exchange["OKX"]),
+            win_rate_pct=round(win_rate_by_exchange["OKX"], 2),
         ),
     ]

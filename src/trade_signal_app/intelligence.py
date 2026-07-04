@@ -58,6 +58,19 @@ class SpreadOpportunity:
 
 
 @dataclass(frozen=True)
+class FundingRateSnapshot:
+    symbol: str
+    futures_exchange: str
+    funding_rate: float
+    funding_rate_bps: float
+    annualized_pct: float
+    mark_price: float = 0.0
+    index_price: float = 0.0
+    next_funding_time: str = ""
+    source: str = "local_csv"
+
+
+@dataclass(frozen=True)
 class StrategyHit:
     symbol: str
     strategy: str
@@ -93,6 +106,7 @@ class IntelligenceSnapshot:
     twitter_accounts: list[TwitterAccountInsight]
     onchain_events: list[OnchainEvent]
     spreads: list[SpreadOpportunity]
+    funding_rates: list[FundingRateSnapshot]
     strategy_hits: list[StrategyHit]
     llm_insight: LlmInsight
     execution_risk: ExecutionRiskDecision
@@ -250,11 +264,13 @@ class IntelligenceHub:
         scanner: SignalScanner,
         runtime_config: RuntimeConfig,
         settings: AppSettings,
+        use_live_funding: bool = False,
     ) -> None:
         self.scanner = scanner
         self.runtime_config = runtime_config
         self.settings = settings
         self.config = runtime_config.intelligence_defaults
+        self.use_live_funding = use_live_funding
 
     def snapshot(self) -> IntelligenceSnapshot:
         summary, signals = self.scanner.scan()
@@ -262,17 +278,20 @@ class IntelligenceHub:
         intel_items = self._load_exchange_intel(top_signals)
         onchain_events = self._load_onchain_events(top_signals)
         spreads = self._build_spreads(top_signals)
-        strategy_hits = self._build_strategy_hits(top_signals)
+        funding_rates = self._build_funding_rates(top_signals)
+        strategy_hits = self._build_strategy_hits(top_signals, funding_rates)
         twitter_accounts = self._build_twitter_accounts()
         execution_risk = self._build_execution_risk(
             onchain_events=onchain_events,
             spreads=spreads,
+            funding_rates=funding_rates,
             strategy_hits=strategy_hits,
         )
         llm_insight = self._build_llm_insight(
             intel_items=intel_items,
             onchain_events=onchain_events,
             spreads=spreads,
+            funding_rates=funding_rates,
             strategy_hits=strategy_hits,
         )
         return IntelligenceSnapshot(
@@ -283,6 +302,7 @@ class IntelligenceHub:
             twitter_accounts=twitter_accounts,
             onchain_events=onchain_events,
             spreads=spreads,
+            funding_rates=funding_rates,
             strategy_hits=strategy_hits,
             llm_insight=llm_insight,
             execution_risk=execution_risk,
@@ -427,6 +447,72 @@ class IntelligenceHub:
             if abs(item.spread_bps) >= self.config.min_spread_bps
         ][:10]
 
+    def _build_funding_rates(self, signals: list[TradeSignal]) -> list[FundingRateSnapshot]:
+        csv_rates = self._read_funding_csv(self.settings.futures_funding_csv)
+        rates_by_symbol = {item.symbol: item for item in csv_rates}
+        if self.use_live_funding:
+            for signal in signals[:8]:
+                symbol = signal.symbol.upper()
+                if symbol in rates_by_symbol:
+                    continue
+                live_rate = self._fetch_binance_funding_rate(symbol)
+                if live_rate is not None:
+                    rates_by_symbol[symbol] = live_rate
+        return sorted(rates_by_symbol.values(), key=lambda item: abs(item.funding_rate_bps), reverse=True)[:12]
+
+    @staticmethod
+    def _read_funding_csv(path: Path) -> list[FundingRateSnapshot]:
+        if not path.exists():
+            return []
+        rates: list[FundingRateSnapshot] = []
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            for row in csv.DictReader(handle):
+                funding_rate = float(row.get("funding_rate", row.get("last_funding_rate", 0)) or 0)
+                rates.append(
+                    FundingRateSnapshot(
+                        symbol=(row.get("symbol") or "").strip().upper(),
+                        futures_exchange=(row.get("futures_exchange") or "BINANCE-PERP").strip(),
+                        funding_rate=funding_rate,
+                        funding_rate_bps=round(funding_rate * 10_000, 4),
+                        annualized_pct=round(funding_rate * 3 * 365 * 100, 4),
+                        mark_price=float(row.get("mark_price", 0) or 0),
+                        index_price=float(row.get("index_price", 0) or 0),
+                        next_funding_time=(row.get("next_funding_time") or "").strip(),
+                        source=(row.get("source") or "local_csv").strip(),
+                    )
+                )
+        return [item for item in rates if item.symbol]
+
+    @staticmethod
+    def _fetch_binance_funding_rate(symbol: str) -> FundingRateSnapshot | None:
+        request = Request(
+            f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol.upper()}",
+            headers={"User-Agent": "trade-signal-app/0.1"},
+        )
+        try:
+            with urlopen(request, timeout=3) as response:
+                payload = json.load(response)
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(payload, dict) or "lastFundingRate" not in payload:
+            return None
+        funding_rate = float(payload.get("lastFundingRate") or 0.0)
+        next_time = payload.get("nextFundingTime")
+        next_funding_time = ""
+        if next_time:
+            next_funding_time = datetime.fromtimestamp(int(next_time) / 1000, tz=timezone.utc).isoformat()
+        return FundingRateSnapshot(
+            symbol=str(payload.get("symbol") or symbol).upper(),
+            futures_exchange="BINANCE-PERP",
+            funding_rate=funding_rate,
+            funding_rate_bps=round(funding_rate * 10_000, 4),
+            annualized_pct=round(funding_rate * 3 * 365 * 100, 4),
+            mark_price=float(payload.get("markPrice") or 0.0),
+            index_price=float(payload.get("indexPrice") or 0.0),
+            next_funding_time=next_funding_time,
+            source="binance_futures_public",
+        )
+
     @staticmethod
     def _read_spread_csv(path: Path) -> list[SpreadOpportunity]:
         if not path.exists():
@@ -450,10 +536,16 @@ class IntelligenceHub:
                 )
         return spreads
 
-    def _build_strategy_hits(self, signals: list[TradeSignal]) -> list[StrategyHit]:
+    def _build_strategy_hits(
+        self,
+        signals: list[TradeSignal],
+        funding_rates: list[FundingRateSnapshot] | None = None,
+    ) -> list[StrategyHit]:
         hits: list[StrategyHit] = []
         threshold = self.runtime_config.autotrade_defaults.score_threshold
+        funding_by_symbol = {item.symbol: item for item in (funding_rates or [])}
         for signal in signals:
+            funding = funding_by_symbol.get(signal.symbol.upper())
             if signal.score >= threshold:
                 hits.append(
                     StrategyHit(
@@ -476,13 +568,107 @@ class IntelligenceHub:
                         reasons=["量能放大", "主动买盘增强", *signal.reasons[:2]],
                     )
                 )
+            hits.extend(self._low_float_strategy_hits(signal, funding))
         return sorted(hits, key=lambda item: item.score, reverse=True)[:12]
+
+    @staticmethod
+    def _funding_reason(funding: FundingRateSnapshot | None) -> str:
+        if funding is None:
+            return "资金费率未接入，按现货量价降级观察"
+        return f"资金费率 {funding.funding_rate_bps:+.2f}bps/8h，年化 {funding.annualized_pct:+.1f}%"
+
+    def _low_float_strategy_hits(
+        self,
+        signal: TradeSignal,
+        funding: FundingRateSnapshot | None,
+    ) -> list[StrategyHit]:
+        hits: list[StrategyHit] = []
+        funding_rate = 0.0 if funding is None else funding.funding_rate
+        funding_confirmed = funding is not None
+        change_24h = float(signal.ticker.price_change_percent)
+        volume_ratio = float(signal.indicators.volume_ratio)
+        buy_pressure = float(signal.indicators.buy_pressure_ratio)
+        rsi = float(getattr(signal.indicators, "rsi_14", 50.0))
+        price_vs_ema20 = float(getattr(signal.indicators, "price_vs_ema20_pct", 0.0))
+
+        # Early momentum long: funding must not be overheated; mild/negative funding is a better chase filter.
+        if (
+            signal.score >= 68
+            and 8 <= change_24h <= 120
+            and volume_ratio >= 2.5
+            and buy_pressure >= 0.56
+            and funding_rate <= 0.00035
+        ):
+            score = min(100.0, signal.score + 4 + min(volume_ratio, 8.0))
+            if funding_rate < 0:
+                score = min(100.0, score + 3)
+            hits.append(
+                StrategyHit(
+                    symbol=signal.symbol,
+                    strategy="low_float_momentum_long",
+                    score=score,
+                    grade=signal.grade,
+                    action="long_watch" if funding_confirmed else "watch_requires_funding",
+                    reasons=[
+                        "早期放量突破",
+                        f"24h 涨幅 {change_24h:+.1f}%",
+                        f"量能 {volume_ratio:.2f}x",
+                        self._funding_reason(funding),
+                    ],
+                )
+            )
+
+        # Blow-off distribution short: positive funding and extended price confirm crowded longs.
+        if (
+            funding_rate >= 0.00025
+            and volume_ratio >= 2.0
+            and (change_24h >= 35 or rsi >= 78 or price_vs_ema20 >= 25)
+        ):
+            hits.append(
+                StrategyHit(
+                    symbol=signal.symbol,
+                    strategy="blowoff_distribution_short",
+                    score=min(100.0, 72 + funding_rate * 100_000 + min(volume_ratio * 2, 16)),
+                    grade=signal.grade,
+                    action="short_watch",
+                    reasons=[
+                        "末端分布/拥挤多头候选",
+                        f"24h 涨幅 {change_24h:+.1f}%",
+                        f"RSI {rsi:.1f}，偏离 EMA20 {price_vs_ema20:+.1f}%",
+                        self._funding_reason(funding),
+                    ],
+                )
+            )
+
+        # Capitulation rebound long: negative funding is the required short-crowding confirmation.
+        if (
+            funding_rate <= -0.00015
+            and change_24h <= -15
+            and (rsi <= 38 or price_vs_ema20 <= -12)
+        ):
+            hits.append(
+                StrategyHit(
+                    symbol=signal.symbol,
+                    strategy="capitulation_rebound_long",
+                    score=min(100.0, 68 + abs(funding_rate) * 100_000 + max(0.0, 38 - rsi)),
+                    grade=signal.grade,
+                    action="rebound_long_watch",
+                    reasons=[
+                        "暴跌后空头拥挤反弹候选",
+                        f"24h 跌幅 {change_24h:+.1f}%",
+                        f"RSI {rsi:.1f}，偏离 EMA20 {price_vs_ema20:+.1f}%",
+                        self._funding_reason(funding),
+                    ],
+                )
+            )
+        return hits
 
     def _build_execution_risk(
         self,
         *,
         onchain_events: list[OnchainEvent],
         spreads: list[SpreadOpportunity],
+        funding_rates: list[FundingRateSnapshot],
         strategy_hits: list[StrategyHit],
     ) -> ExecutionRiskDecision:
         blocked: dict[str, str] = {}
@@ -493,6 +679,9 @@ class IntelligenceHub:
         for spread in spreads:
             if abs(spread.spread_bps) >= max(self.config.min_spread_bps * 4, 80):
                 blocked.setdefault(spread.symbol, f"现货/合约价差异常：{spread.spread_bps:+.1f}bps")
+        for funding in funding_rates:
+            if funding.funding_rate >= 0.001:
+                blocked.setdefault(funding.symbol, f"合约资金费率过热：{funding.funding_rate_bps:+.2f}bps/8h")
 
         hit_symbols = []
         for hit in strategy_hits:
@@ -501,7 +690,8 @@ class IntelligenceHub:
         allowed = [symbol for symbol in hit_symbols if symbol not in blocked]
         max_onchain = max((event.severity for event in onchain_events), default=0.0)
         max_spread = max((abs(spread.spread_bps) for spread in spreads), default=0.0)
-        risk_score = min(100.0, max(max_onchain, max_spread * 0.8, len(blocked) * 25.0))
+        max_funding = max((abs(funding.funding_rate_bps) for funding in funding_rates), default=0.0)
+        risk_score = min(100.0, max(max_onchain, max_spread * 0.8, max_funding * 8, len(blocked) * 25.0))
         status = "blocked" if blocked and not allowed else "caution" if blocked or risk_score >= 70 else "clear"
         summary = (
             f"执行前风控：允许 {len(allowed)} 个候选，阻断 {len(blocked)} 个标的，"
@@ -521,12 +711,14 @@ class IntelligenceHub:
         intel_items: list[ExchangeIntelItem],
         onchain_events: list[OnchainEvent],
         spreads: list[SpreadOpportunity],
+        funding_rates: list[FundingRateSnapshot],
         strategy_hits: list[StrategyHit],
     ) -> LlmInsight:
         payload = {
             "intel_items": [asdict(item) for item in intel_items[:6]],
             "onchain_events": [asdict(item) for item in onchain_events[:6]],
             "spreads": [asdict(item) for item in spreads[:6]],
+            "funding_rates": [asdict(item) for item in funding_rates[:6]],
             "strategy_hits": [asdict(item) for item in strategy_hits[:6]],
         }
         provider = self.config.llm_provider or "openai"
@@ -553,7 +745,7 @@ class IntelligenceHub:
             provider="local",
             model="rules",
             status="ok",
-            summary=self._local_summary(intel_items, onchain_events, spreads, strategy_hits),
+            summary=self._local_summary(intel_items, onchain_events, spreads, funding_rates, strategy_hits),
         )
 
     @staticmethod
@@ -561,6 +753,7 @@ class IntelligenceHub:
         intel_items: list[ExchangeIntelItem],
         onchain_events: list[OnchainEvent],
         spreads: list[SpreadOpportunity],
+        funding_rates: list[FundingRateSnapshot],
         strategy_hits: list[StrategyHit],
     ) -> str:
         risk = "中性"
@@ -570,8 +763,9 @@ class IntelligenceHub:
             risk = "偏积极"
         return (
             f"综合监控显示：策略命中 {len(strategy_hits)} 个，链上异动 {len(onchain_events)} 条，"
-            f"价差机会 {len(spreads)} 个，交易所/社区关键情报 {len(intel_items)} 条。"
+            f"价差机会 {len(spreads)} 个，资金费率样本 {len(funding_rates)} 个，交易所/社区关键情报 {len(intel_items)} 条。"
             f"当前风险状态为{risk}；建议优先处理高分策略命中。"
             f"{' 未配置真实链上事件源，链上风控不参与阻断。' if not onchain_events else ' 实盘前需复核链上大额流入风险。'}"
             f"{' 未配置真实现货/合约 basis 源，价差风控不参与阻断。' if not spreads else ' 实盘前需复核价差回归风险。'}"
+            f"{' 未接入合约资金费率，三类小市值策略会降级为观察。' if not funding_rates else ' 小市值动量/分布/暴跌反弹策略已纳入资金费率拥挤度。'}"
         )

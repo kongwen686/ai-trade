@@ -30,12 +30,22 @@ from .models import (
 )
 from .scoring import build_reasons, build_subscores, composite_score, compute_liquidity_score, grade_from_score
 from .strategy import EntryRuleConfig, ExecutionConfig, ExitRuleConfig, evaluate_long_entry, normalize_return_pct
+from .tradingview_data import load_tradingview_csv
+
+
+HISTORICAL_DATA_SUFFIXES = {".zip", ".csv"}
 
 
 def archive_key(path: Path) -> tuple[str, str]:
+    if path.suffix.lower() == ".csv":
+        parts = path.stem.split("-")
+        if len(parts) >= 2:
+            return parts[0].upper(), parts[1]
+        if path.parent.name:
+            return path.parent.name.upper(), path.stem
     parts = path.stem.split("-")
     if len(parts) < 2:
-        raise ValueError(f"Cannot parse symbol/interval from archive name: {path.name}")
+        raise ValueError(f"Cannot parse symbol/interval from historical data name: {path.name}")
     return parts[0].upper(), parts[1]
 
 
@@ -46,15 +56,17 @@ def resolve_archive_paths(inputs: list[str]) -> list[Path]:
         if matches:
             for match in matches:
                 if match.is_dir():
-                    paths.extend(sorted(match.rglob("*.zip")))
-                elif match.suffix == ".zip":
+                    for suffix in HISTORICAL_DATA_SUFFIXES:
+                        paths.extend(sorted(match.rglob(f"*{suffix}")))
+                elif match.suffix.lower() in HISTORICAL_DATA_SUFFIXES:
                     paths.append(match)
             continue
 
         path = Path(item)
         if path.is_dir():
-            paths.extend(sorted(path.rglob("*.zip")))
-        elif path.exists() and path.suffix == ".zip":
+            for suffix in HISTORICAL_DATA_SUFFIXES:
+                paths.extend(sorted(path.rglob(f"*{suffix}")))
+        elif path.exists() and path.suffix.lower() in HISTORICAL_DATA_SUFFIXES:
             paths.append(path)
 
     unique = []
@@ -78,7 +90,9 @@ def group_archives(paths: list[Path]) -> dict[tuple[str, str], list[Path]]:
 def merge_candles(paths: list[Path]) -> list[Candlestick]:
     merged: dict[datetime, Candlestick] = {}
     for path in sorted(paths):
-        for candle in load_public_data_klines(path):
+        interval = archive_key(path)[1]
+        candles = load_tradingview_csv(path, interval=interval) if path.suffix.lower() == ".csv" else load_public_data_klines(path)
+        for candle in candles:
             merged[candle.open_time] = candle
     return [merged[key] for key in sorted(merged)]
 
@@ -1439,10 +1453,10 @@ def json_default(value: object) -> object:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="trade_signal_app.backtest",
-        description="Backtest the signal model on Binance public-data kline archives.",
+        description="Backtest the signal model on Binance public-data ZIP archives or normalized OHLCV CSV files.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument("archives", nargs="+", help="ZIP files, folders, or glob patterns from Binance public data.")
+    parser.add_argument("archives", nargs="+", help="ZIP/CSV files, folders, or glob patterns for historical K lines.")
     parser.add_argument("--score-threshold", type=float, default=70.0, help="Minimum composite score to count as a signal.")
     parser.add_argument("--lookback-bars", type=int, default=240, help="Trailing bars used to compute indicators.")
     parser.add_argument(
@@ -1549,7 +1563,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     paths = resolve_archive_paths(args.archives)
     if not paths:
-        raise SystemExit("No ZIP archives found.")
+        raise SystemExit("No ZIP/CSV historical data files found.")
 
     holding_periods = [int(item) for item in args.holding_periods.split(",") if item.strip()]
     reports: list[BacktestReport] = []

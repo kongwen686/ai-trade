@@ -10,14 +10,28 @@ from trade_signal_app.intelligence import IntelligenceHub, LlmInsightClient, Ope
 from trade_signal_app.runtime_config import RuntimeConfig
 
 
-def _signal(symbol: str, score: float, price: float, change: float = 2.0) -> SimpleNamespace:
+def _signal(
+    symbol: str,
+    score: float,
+    price: float,
+    change: float = 2.0,
+    rsi: float = 58.0,
+    price_vs_ema20: float = 6.0,
+    volume_ratio: float = 1.8,
+) -> SimpleNamespace:
     return SimpleNamespace(
         symbol=symbol,
         score=score,
         grade="A",
         reasons=["趋势结构改善", "量能放大"],
         ticker=SimpleNamespace(last_price=price, quote_volume=200_000_000.0, price_change_percent=change),
-        indicators=SimpleNamespace(volume_ratio=1.8, buy_pressure_ratio=0.61, ema_spread_pct=1.2),
+        indicators=SimpleNamespace(
+            volume_ratio=volume_ratio,
+            buy_pressure_ratio=0.61,
+            ema_spread_pct=1.2,
+            rsi_14=rsi,
+            price_vs_ema20_pct=price_vs_ema20,
+        ),
     )
 
 
@@ -58,10 +72,12 @@ class IntelligenceTests(unittest.TestCase):
             intel = root / "intel.csv"
             onchain = root / "onchain.csv"
             spreads = root / "spreads.csv"
+            funding = root / "funding.csv"
             intel.write_text("source,symbol,title,category,severity,sentiment,url\nbinance,BTCUSDT,Listing update,news,91,0.8,\n", encoding="utf-8")
             onchain.write_text("chain,symbol,event_type,amount_usd,direction,severity,tx_hash\nbitcoin,BTCUSDT,whale_transfer,9000000,outflow,88,tx\n", encoding="utf-8")
             spreads.write_text("symbol,spot_exchange,futures_exchange,spot_price,futures_price,spread_bps,direction\nBTCUSDT,BINANCE,BINANCE-PERP,100,101,100,basis\n", encoding="utf-8")
-            settings = AppSettings(exchange_intel_csv=intel, onchain_events_csv=onchain, futures_basis_csv=spreads)
+            funding.write_text("symbol,futures_exchange,funding_rate,mark_price,index_price,source\nBTCUSDT,BINANCE-PERP,0.0012,101,100,fixture\n", encoding="utf-8")
+            settings = AppSettings(exchange_intel_csv=intel, onchain_events_csv=onchain, futures_basis_csv=spreads, futures_funding_csv=funding)
             config = RuntimeConfig()
             config.onchain_data_preset = "local_csv"
             hub = IntelligenceHub(
@@ -75,7 +91,44 @@ class IntelligenceTests(unittest.TestCase):
         self.assertEqual(snapshot.intel_items[0].title, "Listing update")
         self.assertEqual(snapshot.onchain_events[0].tx_hash, "tx")
         self.assertEqual(snapshot.spreads[0].spread_bps, 100.0)
+        self.assertEqual(snapshot.funding_rates[0].funding_rate_bps, 12.0)
         self.assertIn("BTCUSDT", snapshot.execution_risk.blocked_symbols)
+
+    def test_low_float_strategy_hits_use_funding_rate_filters(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            funding = Path(temp_dir) / "funding.csv"
+            funding.write_text(
+                "\n".join(
+                    [
+                        "symbol,futures_exchange,funding_rate,mark_price,index_price,source",
+                        "EARLYUSDT,BINANCE-PERP,-0.0001,1,1,fixture",
+                        "BLOWOFFUSDT,BINANCE-PERP,0.0006,1,1,fixture",
+                        "CRASHUSDT,BINANCE-PERP,-0.0004,1,1,fixture",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            settings = AppSettings(futures_funding_csv=funding)
+            hub = IntelligenceHub(
+                scanner=FakeScanner(
+                    [
+                        _signal("EARLYUSDT", 72.0, 1.0, change=35.0, volume_ratio=3.2),
+                        _signal("BLOWOFFUSDT", 78.0, 1.0, change=75.0, rsi=82.0, price_vs_ema20=32.0, volume_ratio=3.8),
+                        _signal("CRASHUSDT", 60.0, 1.0, change=-28.0, rsi=31.0, price_vs_ema20=-18.0),
+                    ]
+                ),
+                runtime_config=RuntimeConfig(),
+                settings=settings,
+            )
+
+            snapshot = hub.snapshot()
+
+        strategies = {hit.strategy for hit in snapshot.strategy_hits}
+        self.assertIn("low_float_momentum_long", strategies)
+        self.assertIn("blowoff_distribution_short", strategies)
+        self.assertIn("capitulation_rebound_long", strategies)
+        reasons = " ".join(" ".join(hit.reasons) for hit in snapshot.strategy_hits)
+        self.assertIn("资金费率", reasons)
 
     def test_openai_response_text_extractor(self) -> None:
         payload = {

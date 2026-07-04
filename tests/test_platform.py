@@ -63,14 +63,18 @@ class PlatformTests(unittest.TestCase):
         self.assertIn("range_breakout", strategy_ids)
         self.assertIn("momentum_rotation", strategy_ids)
         self.assertIn("spot_futures_basis", strategy_ids)
+        self.assertIn("low_float_momentum_long", strategy_ids)
+        self.assertIn("blowoff_distribution_short", strategy_ids)
+        self.assertIn("capitulation_rebound_long", strategy_ids)
         self.assertIn("intel_gate", risk_rule_ids)
+        self.assertIn("funding_rate_guard", risk_rule_ids)
         self.assertEqual(accounts["BINANCE"].status, "configured")
         self.assertEqual(accounts["BINANCE"].open_positions, 1)
         self.assertEqual(accounts["BINANCE"].quote_exposure, 600.0)
         self.assertEqual(accounts["BINANCE"].realized_pnl, 24.0)
         self.assertEqual(accounts["BINANCE"].closed_trades, 1)
         self.assertEqual(accounts["BINANCE"].win_rate_pct, 100.0)
-        self.assertEqual(accounts["OKX"].status, "configured_pending_connector")
+        self.assertEqual(accounts["OKX"].status, "configured")
         self.assertEqual(snapshot.recent_events, [event])
 
     def test_binance_component_distinguishes_public_data_from_private_auth(self) -> None:
@@ -79,6 +83,42 @@ class PlatformTests(unittest.TestCase):
 
         self.assertEqual(components["Binance API"].status, "ready_public")
         self.assertFalse(components["Binance API"].configured)
+
+    def test_okx_component_reports_partial_credentials(self) -> None:
+        config = RuntimeConfig()
+        config.okx_api_key = "okx-key"
+        config.okx_api_secret = "okx-secret"
+
+        snapshot = build_platform_snapshot(config=config, positions=[], events=[])
+        components = {component.name: component for component in snapshot.components}
+        accounts = {account.exchange: account for account in snapshot.accounts}
+
+        self.assertEqual(components["OKX API"].status, "partial_configured")
+        self.assertTrue(components["OKX API"].configured)
+        self.assertIn("Passphrase", components["OKX API"].capability)
+        self.assertEqual(accounts["OKX"].status, "partial_configured")
+
+    def test_recent_events_are_newest_first(self) -> None:
+        older = TradingEvent(
+            action="BUY",
+            symbol="BTCUSDT",
+            mode="paper",
+            status="paper_filled",
+            message="older",
+            created_at=datetime(2026, 4, 28, 1, tzinfo=timezone.utc),
+        )
+        newer = TradingEvent(
+            action="SELL",
+            symbol="ETHUSDT",
+            mode="paper",
+            status="paper_filled",
+            message="newer",
+            created_at=datetime(2026, 4, 28, 2, tzinfo=timezone.utc),
+        )
+
+        snapshot = build_platform_snapshot(config=RuntimeConfig(), positions=[], events=[older, newer])
+
+        self.assertEqual([event.message for event in snapshot.recent_events], ["newer", "older"])
 
 
 if __name__ == "__main__":

@@ -9,16 +9,20 @@ from trade_signal_app.community import (
     CompositeCommunityScoreProvider,
     CommunitySignal,
     CsvCommunityScoreProvider,
+    ExchangeAnnouncementCommunityScoreProvider,
     NewsCommunityScoreProvider,
     NitterRSSCommunityScoreProvider,
     NullCommunityScoreProvider,
     RedditCommunityScoreProvider,
     SessionScrapeCommunityScoreProvider,
     TelegramCommunityScoreProvider,
+    message_insight,
     sanitize_account_names,
     XCommunityScoreProvider,
     build_community_provider,
     derive_base_asset,
+    exchange_announcement_sentiment,
+    exchange_item_matches_symbol,
 )
 
 
@@ -94,6 +98,22 @@ class CommunityTests(unittest.TestCase):
         self.assertGreater(positive, 0)
         self.assertLess(negative, 0)
 
+    def test_message_insight_summarizes_drivers_risks_and_samples(self) -> None:
+        insight = message_insight(
+            "BTCUSDT",
+            [
+                "BTC bullish breakout with strong momentum and whale accumulation",
+                "BTC resistance and liquidation risk after pump",
+                "BTC bullish breakout with strong momentum and whale accumulation",
+            ],
+            source="x",
+        )
+
+        self.assertIn("BTC", insight["summary"])
+        self.assertIn("bullish", " ".join(insight["drivers"]))
+        self.assertIn("liquidation", " ".join(insight["risks"]))
+        self.assertEqual(len(insight["samples"]), 2)
+
     def test_prepare_fetches_x_signal(self) -> None:
         def fake_fetcher(url: str, headers: dict[str, str] | None, timeout: int) -> object:
             self.assertIsNotNone(headers)
@@ -128,6 +148,9 @@ class CommunityTests(unittest.TestCase):
         self.assertEqual(signal.mentions, 240)
         self.assertGreater(signal.score, 50)
         self.assertGreater(signal.sentiment or 0, 0)
+        self.assertIn("BTC", signal.summary)
+        self.assertIn("bullish", " ".join(signal.drivers))
+        self.assertTrue(signal.samples)
 
     def test_prepare_fetches_blended_account_signal(self) -> None:
         def fake_fetcher(url: str, headers: dict[str, str] | None, timeout: int) -> object:
@@ -268,6 +291,48 @@ class CommunityTests(unittest.TestCase):
         self.assertEqual(signal.source, "reddit")
         self.assertEqual(signal.mentions, 2)
         self.assertGreater(signal.score, 0)
+
+    def test_exchange_announcement_provider_matches_token_hotspots(self) -> None:
+        def fake_fetcher(url: str, headers: dict[str, str] | None, timeout: int) -> str:
+            if "binance" in url:
+                return """
+                <html><body>
+                  <a>Binance Will List SYN and Open Trading for SYN/USDT</a>
+                  <a>Binance Launchpool Adds BTC Rewards</a>
+                </body></html>
+                """
+            return """
+            <html><body>
+              <a>OKX to list LAB/USDT spot trading campaign</a>
+              <a>OKX will suspend deposits for OLD</a>
+            </body></html>
+            """
+
+        provider = ExchangeAnnouncementCommunityScoreProvider(
+            urls=["https://www.binance.com/en/support/announcement", "https://www.okx.com/en-us/help/section/new-listings"],
+            ttl_seconds=60,
+            fetcher=fake_fetcher,
+        )
+        provider.prepare(["SYNUSDT", "LABUSDT"])
+        syn = provider.get("SYNUSDT")
+        lab = provider.get("LABUSDT")
+
+        self.assertIsNotNone(syn)
+        self.assertIsNotNone(lab)
+        assert syn is not None
+        assert lab is not None
+        self.assertIn("binance_official", syn.source)
+        self.assertIn("okx_official", lab.source)
+        self.assertGreater(syn.score, 50)
+        self.assertGreater(lab.score, 50)
+        self.assertIn("list", " ".join(syn.drivers).lower())
+
+    def test_exchange_matching_handles_pair_and_base_mentions(self) -> None:
+        self.assertTrue(exchange_item_matches_symbol("LABUSDT", "OKX to list LAB/USDT spot trading"))
+        self.assertTrue(exchange_item_matches_symbol("BTCUSDT", "Binance Launchpool adds bitcoin rewards"))
+        self.assertFalse(exchange_item_matches_symbol("ETHUSDT", "Binance Will List SYN and Open Trading for SYN/USDT"))
+        self.assertGreater(exchange_announcement_sentiment(["Binance will list LAB and launch trading campaign"]), 0)
+        self.assertLess(exchange_announcement_sentiment(["OKX will delist OLD and suspend deposits"]), 0)
 
     def test_sanitize_account_names_deduplicates_and_strips(self) -> None:
         self.assertEqual(
@@ -477,6 +542,31 @@ class CommunityTests(unittest.TestCase):
             reddit_user_agent="trade-signal-app/0.2",
         )
         self.assertIsInstance(provider, RedditCommunityScoreProvider)
+
+    def test_build_provider_with_exchange_official_hotspots(self) -> None:
+        provider = build_community_provider(
+            provider_mode="exchange",
+            csv_path=Path("/tmp/missing-community.csv"),
+            news_csv_path=Path("/tmp/missing-news.csv"),
+            telegram_csv_path=Path("/tmp/missing-telegram.csv"),
+            alias_csv_path=Path("/tmp/aliases.csv"),
+            x_provider="official_api",
+            x_bearer_token="",
+            x_api_base_url="https://api.x.com",
+            x_nitter_base_url="",
+            x_session_command="",
+            community_ttl_seconds=60,
+            x_recent_window_hours=24,
+            x_recent_max_results=10,
+            x_language="en",
+            x_max_workers=1,
+            reddit_api_base_url="https://www.reddit.com",
+            reddit_recent_window_hours=24,
+            reddit_max_results=10,
+            reddit_user_agent="trade-signal-app/0.2",
+            exchange_community_urls=["https://www.binance.com/en/support/announcement"],
+        )
+        self.assertIsInstance(provider, ExchangeAnnouncementCommunityScoreProvider)
 
     def test_build_provider_with_nitter_rss(self) -> None:
         provider = build_community_provider(

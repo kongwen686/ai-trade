@@ -120,11 +120,14 @@ class SignalScanner:
             summary = ScanSummary(
                 quote_asset=quote_asset,
                 interval=interval,
-                scanned_symbols=len(filtered),
+                scanned_symbols=len(selected),
                 returned_signals=0,
                 min_quote_volume=min_quote_volume,
                 min_trade_count=min_trade_count,
                 fetched_at=datetime.now(timezone.utc),
+                eligible_symbols=len(filtered),
+                candidate_symbols=len(selected),
+                candidate_pool=candidate_pool,
             )
             return summary, []
 
@@ -163,11 +166,14 @@ class SignalScanner:
         summary = ScanSummary(
             quote_asset=quote_asset,
             interval=interval,
-            scanned_symbols=len(filtered),
+            scanned_symbols=len(selected),
             returned_signals=len(signals),
             min_quote_volume=min_quote_volume,
             min_trade_count=min_trade_count,
             fetched_at=now,
+            eligible_symbols=len(filtered),
+            candidate_symbols=len(selected),
+            candidate_pool=candidate_pool,
         )
         return summary, signals
 

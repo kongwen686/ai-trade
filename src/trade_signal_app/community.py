@@ -5,8 +5,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import csv
+from html import unescape
 import json
 import math
+import re
 import shlex
 import subprocess
 from typing import Callable
@@ -92,6 +94,112 @@ NEGATIVE_TERMS = {
     "weak",
 }
 
+EXCHANGE_POSITIVE_TERMS = {
+    "airdrop",
+    "campaign",
+    "deposit",
+    "earn",
+    "launch",
+    "launchpool",
+    "list",
+    "listing",
+    "lists",
+    "megadrop",
+    "pre-market",
+    "staking",
+    "trading",
+    "vote",
+}
+
+EXCHANGE_NEGATIVE_TERMS = {
+    "delist",
+    "delisting",
+    "maintenance",
+    "postpone",
+    "remove",
+    "removal",
+    "risk warning",
+    "suspend",
+    "suspension",
+    "terminate",
+}
+
+POSITIVE_TERMS.update(EXCHANGE_POSITIVE_TERMS)
+NEGATIVE_TERMS.update(EXCHANGE_NEGATIVE_TERMS)
+
+
+def clean_message_sample(text: str, limit: int = 180) -> str:
+    compact = " ".join(text.replace("\n", " ").replace("\r", " ").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1].rstrip() + "…"
+
+
+def message_insight(symbol: str, texts: list[str], *, source: str, max_samples: int = 3) -> dict[str, object]:
+    unique_texts: list[str] = []
+    seen: set[str] = set()
+    for text in texts:
+        sample = clean_message_sample(str(text))
+        key = sample.lower()
+        if not sample or key in seen:
+            continue
+        seen.add(key)
+        unique_texts.append(sample)
+    if not unique_texts:
+        return {"summary": "", "drivers": [], "risks": [], "samples": []}
+
+    positive_counts: dict[str, int] = {}
+    negative_counts: dict[str, int] = {}
+    for text in unique_texts:
+        for token in normalize_tokens(text):
+            if token in POSITIVE_TERMS:
+                positive_counts[token] = positive_counts.get(token, 0) + 1
+            if token in NEGATIVE_TERMS:
+                negative_counts[token] = negative_counts.get(token, 0) + 1
+
+    drivers = [f"{term} x{count}" for term, count in sorted(positive_counts.items(), key=lambda item: (-item[1], item[0]))[:4]]
+    risks = [f"{term} x{count}" for term, count in sorted(negative_counts.items(), key=lambda item: (-item[1], item[0]))[:4]]
+    bias = "偏多" if len(drivers) > len(risks) else "偏空" if len(risks) > len(drivers) else "中性"
+    base_asset = derive_base_asset(symbol)
+    if drivers and risks:
+        summary = f"{base_asset} 近端社区消息{bias}，多头词包括 {', '.join(drivers[:2])}，同时需关注 {', '.join(risks[:2])}。"
+    elif drivers:
+        summary = f"{base_asset} 近端社区消息{bias}，主要由 {', '.join(drivers[:3])} 驱动。"
+    elif risks:
+        summary = f"{base_asset} 近端社区消息{bias}，风险词集中在 {', '.join(risks[:3])}。"
+    else:
+        summary = f"{base_asset} 近端社区消息量来自 {source}，暂未出现明确多空关键词。"
+    return {
+        "summary": summary,
+        "drivers": drivers,
+        "risks": risks,
+        "samples": unique_texts[:max_samples],
+    }
+
+
+def signal_with_insight(
+    *,
+    symbol: str,
+    score: float,
+    source: str,
+    mentions: int | None,
+    sentiment: float | None,
+    sample_size: int | None,
+    texts: list[str],
+) -> CommunitySignal:
+    insight = message_insight(symbol, texts, source=source)
+    return CommunitySignal(
+        score=round(score, 2),
+        source=source,
+        mentions=mentions,
+        sentiment=None if sentiment is None else round(sentiment, 4),
+        sample_size=sample_size,
+        summary=str(insight["summary"]),
+        drivers=[str(item) for item in insight["drivers"]],
+        risks=[str(item) for item in insight["risks"]],
+        samples=[str(item) for item in insight["samples"]],
+    )
+
 
 class CommunityScoreProvider:
     def prepare(self, symbols: list[str]) -> None:
@@ -128,6 +236,10 @@ class CsvCommunityScoreProvider(CommunityScoreProvider):
                     mentions=int(row["mentions"]) if row.get("mentions") else None,
                     sentiment=float(row["sentiment"]) if row.get("sentiment") else None,
                     sample_size=int(row["sample_size"]) if row.get("sample_size") else None,
+                    summary=(row.get("summary") or "").strip(),
+                    drivers=[item.strip() for item in (row.get("drivers") or "").split("|") if item.strip()],
+                    risks=[item.strip() for item in (row.get("risks") or "").split("|") if item.strip()],
+                    samples=[item.strip() for item in (row.get("samples") or "").split("|") if item.strip()],
                 )
         return signals
 
@@ -171,12 +283,14 @@ class NewsCommunityScoreProvider(CommunityScoreProvider):
                 sentiment=sentiment,
                 sample_size=len(items),
             )
-            signals[symbol] = CommunitySignal(
-                score=round(score, 2),
+            signals[symbol] = signal_with_insight(
+                symbol=symbol,
+                score=score,
                 source="+".join(sources) if sources else "news",
                 mentions=mentions,
-                sentiment=round(sentiment, 4),
+                sentiment=sentiment,
                 sample_size=len(items),
+                texts=[str(item["headline"]) for item in items],
             )
         return signals
 
@@ -220,12 +334,14 @@ class TelegramCommunityScoreProvider(CommunityScoreProvider):
                 sentiment=sentiment,
                 sample_size=len(items),
             )
-            signals[symbol] = CommunitySignal(
-                score=round(score, 2),
+            signals[symbol] = signal_with_insight(
+                symbol=symbol,
+                score=score,
                 source="+".join(channels) if channels else "telegram",
                 mentions=mentions,
-                sentiment=round(sentiment, 4),
+                sentiment=sentiment,
                 sample_size=len(items),
+                texts=[str(item["message"]) for item in items],
             )
         return signals
 
@@ -319,12 +435,14 @@ class RedditCommunityScoreProvider(CommunityScoreProvider):
             sentiment=sentiment,
             sample_size=len(fresh_posts),
         )
-        return CommunitySignal(
-            score=round(score, 2),
+        return signal_with_insight(
+            symbol=symbol,
+            score=score,
             source="reddit",
             mentions=len(fresh_posts),
-            sentiment=round(sentiment, 4),
+            sentiment=sentiment,
             sample_size=len(fresh_posts),
+            texts=texts,
         )
 
     @staticmethod
@@ -389,6 +507,12 @@ class CachedSignal:
     signal: CommunitySignal | None
 
 
+@dataclass
+class CachedExchangeItems:
+    expires_at: datetime
+    items: list[dict[str, object]]
+
+
 def http_get_json(url: str, headers: dict[str, str] | None = None, timeout: int = 20) -> object:
     request = Request(url, headers=headers or {})
     with urlopen(request, timeout=timeout) as response:
@@ -399,6 +523,87 @@ def http_get_text(url: str, headers: dict[str, str] | None = None, timeout: int 
     request = Request(url, headers=headers or {})
     with urlopen(request, timeout=timeout) as response:
         return response.read().decode("utf-8", errors="replace")
+
+
+@dataclass
+class ExchangeAnnouncementCommunityScoreProvider(CommunityScoreProvider):
+    urls: list[str]
+    ttl_seconds: int
+    timeout: int = 8
+    fetcher: Callable[[str, dict[str, str] | None, int], str] = http_get_text
+    _signal_cache: dict[str, CachedSignal] = field(default_factory=dict)
+    _source_cache: CachedExchangeItems | None = None
+
+    def prepare(self, symbols: list[str]) -> None:
+        targets = [symbol.upper() for symbol in symbols if not self._is_cached(symbol)]
+        if not targets:
+            return
+        items = self._fetch_items()
+        for symbol in targets:
+            self._signal_cache[symbol] = CachedSignal(
+                expires_at=datetime.now(timezone.utc) + timedelta(seconds=self.ttl_seconds),
+                signal=self._signal_from_items(symbol, items),
+            )
+
+    def get(self, symbol: str) -> CommunitySignal | None:
+        normalized = symbol.upper()
+        cached = self._signal_cache.get(normalized)
+        if cached and cached.expires_at > datetime.now(timezone.utc):
+            return cached.signal
+        items = self._fetch_items()
+        signal = self._signal_from_items(normalized, items)
+        self._signal_cache[normalized] = CachedSignal(
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=self.ttl_seconds),
+            signal=signal,
+        )
+        return signal
+
+    def _is_cached(self, symbol: str) -> bool:
+        cached = self._signal_cache.get(symbol.upper())
+        return bool(cached and cached.expires_at > datetime.now(timezone.utc))
+
+    def _fetch_items(self) -> list[dict[str, object]]:
+        if self._source_cache and self._source_cache.expires_at > datetime.now(timezone.utc):
+            return self._source_cache.items
+        items: list[dict[str, object]] = []
+        for url in self.urls:
+            url = url.strip()
+            if not url:
+                continue
+            try:
+                html = self.fetcher(url, {"User-Agent": "trade-signal-app/0.2"}, self.timeout)
+            except Exception:  # noqa: BLE001
+                continue
+            source = "binance_official" if "binance." in url.lower() else "okx_official" if "okx." in url.lower() else "exchange_official"
+            items.extend(parse_exchange_announcement_items(html, source=source, url=url))
+        deduped = dedupe_exchange_items(items)
+        self._source_cache = CachedExchangeItems(
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=self.ttl_seconds),
+            items=deduped,
+        )
+        return deduped
+
+    def _signal_from_items(self, symbol: str, items: list[dict[str, object]]) -> CommunitySignal | None:
+        matched = [item for item in items if exchange_item_matches_symbol(symbol, str(item.get("text", "")))]
+        if not matched:
+            return None
+        texts = [str(item["text"]) for item in matched if str(item.get("text", "")).strip()]
+        sentiment = exchange_announcement_sentiment(texts)
+        score = XCommunityScoreProvider.compute_score(
+            mentions=len(matched) * 28,
+            sentiment=sentiment,
+            sample_size=len(texts),
+        )
+        sources = dedupe_terms([str(item.get("source", "exchange_official")) for item in matched])
+        return signal_with_insight(
+            symbol=symbol,
+            score=score,
+            source="+".join(sources) if sources else "exchange_official",
+            mentions=len(matched),
+            sentiment=sentiment,
+            sample_size=len(texts),
+            texts=texts,
+        )
 
 
 @dataclass
@@ -468,6 +673,7 @@ class XCommunityScoreProvider(CommunityScoreProvider):
         tracked_accounts = sanitize_account_names(self.tracked_accounts)
         if not tracked_accounts or self.account_mode == "off":
             return self._signal_from_sample(
+                symbol=symbol,
                 mentions=general_mentions,
                 texts=general_texts,
                 source="x",
@@ -477,17 +683,20 @@ class XCommunityScoreProvider(CommunityScoreProvider):
         account_mentions, account_texts = self._fetch_sample(account_query, headers, time_params)
         if self.account_mode == "only":
             return self._signal_from_sample(
+                symbol=symbol,
                 mentions=account_mentions,
                 texts=account_texts,
                 source="x_accounts",
             )
 
         general_signal = self._signal_from_sample(
+            symbol=symbol,
             mentions=general_mentions,
             texts=general_texts,
             source="x",
         )
         account_signal = self._signal_from_sample(
+            symbol=symbol,
             mentions=account_mentions,
             texts=account_texts,
             source="x_accounts",
@@ -505,12 +714,14 @@ class XCommunityScoreProvider(CommunityScoreProvider):
             ((general_signal.sentiment or 0.0) * (1 - account_weight))
             + ((account_signal.sentiment or 0.0) * account_weight)
         )
-        return CommunitySignal(
-            score=round(blended_score, 2),
+        return signal_with_insight(
+            symbol=symbol,
+            score=blended_score,
             source="x+x_accounts",
             mentions=blended_mentions,
-            sentiment=round(blended_sentiment, 4),
+            sentiment=blended_sentiment,
             sample_size=blended_samples,
+            texts=[*general_signal.samples, *account_signal.samples],
         )
 
     def build_query(self, symbol: str) -> str:
@@ -571,17 +782,19 @@ class XCommunityScoreProvider(CommunityScoreProvider):
         texts = self._parse_texts(search_payload)
         return mentions, texts
 
-    def _signal_from_sample(self, *, mentions: int, texts: list[str], source: str) -> CommunitySignal | None:
+    def _signal_from_sample(self, *, symbol: str, mentions: int, texts: list[str], source: str) -> CommunitySignal | None:
         if mentions <= 0 and not texts:
             return None
         sentiment = self.score_sentiment(texts)
         score = self.compute_score(mentions=mentions, sentiment=sentiment, sample_size=len(texts))
-        return CommunitySignal(
-            score=round(score, 2),
+        return signal_with_insight(
+            symbol=symbol,
+            score=score,
             source=source,
             mentions=mentions,
-            sentiment=round(sentiment, 4),
+            sentiment=sentiment,
             sample_size=len(texts),
+            texts=texts,
         )
 
     @staticmethod
@@ -680,7 +893,7 @@ class NitterRSSCommunityScoreProvider(CommunityScoreProvider):
         return bool(cached and cached.expires_at > datetime.now(timezone.utc))
 
     def _fetch_symbol(self, symbol: str) -> CommunitySignal | None:
-        general_signal = self._signal_from_rss(self._fetch_search_feed(symbol), source="x_nitter")
+        general_signal = self._signal_from_rss(symbol, self._fetch_search_feed(symbol), source="x_nitter")
         tracked_accounts = sanitize_account_names(self.tracked_accounts)
         if not tracked_accounts or self.account_mode == "off":
             return general_signal
@@ -689,7 +902,7 @@ class NitterRSSCommunityScoreProvider(CommunityScoreProvider):
         for account in tracked_accounts:
             account_items.extend(self._fetch_user_feed(account))
         account_items = self._filter_items_for_symbol(symbol, account_items)
-        account_signal = self._signal_from_rss(account_items, source="x_nitter_accounts")
+        account_signal = self._signal_from_rss(symbol, account_items, source="x_nitter_accounts")
         if self.account_mode == "only":
             return account_signal
         if general_signal is None:
@@ -697,7 +910,7 @@ class NitterRSSCommunityScoreProvider(CommunityScoreProvider):
         if account_signal is None:
             return general_signal
         account_weight = max(0.0, min(self.account_weight_pct, 100.0)) / 100
-        return blend_community_signals(general_signal, account_signal, account_weight, source="x_nitter+x_accounts")
+        return blend_community_signals(symbol, general_signal, account_signal, account_weight, source="x_nitter+x_accounts")
 
     def build_query(self, symbol: str) -> str:
         symbol = symbol.upper()
@@ -729,7 +942,7 @@ class NitterRSSCommunityScoreProvider(CommunityScoreProvider):
         lowered_tokens = [item.lower() for item in dedupe_terms(tokens)]
         return [item for item in items if any(token in str(item["text"]).lower() for token in lowered_tokens)]
 
-    def _signal_from_rss(self, items: list[dict[str, object]], *, source: str) -> CommunitySignal | None:
+    def _signal_from_rss(self, symbol: str, items: list[dict[str, object]], *, source: str) -> CommunitySignal | None:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=self.recent_window_hours)
         fresh_items = [item for item in items if item["created_at"] is None or item["created_at"] >= cutoff]
         if not fresh_items:
@@ -742,12 +955,14 @@ class NitterRSSCommunityScoreProvider(CommunityScoreProvider):
             sentiment=sentiment,
             sample_size=len(texts),
         )
-        return CommunitySignal(
-            score=round(score, 2),
+        return signal_with_insight(
+            symbol=symbol,
+            score=score,
             source=source,
             mentions=len(fresh_items),
-            sentiment=round(sentiment, 4),
+            sentiment=sentiment,
             sample_size=len(texts),
+            texts=texts,
         )
 
     @staticmethod
@@ -815,11 +1030,11 @@ class SessionScrapeCommunityScoreProvider(CommunityScoreProvider):
         return bool(cached and cached.expires_at > datetime.now(timezone.utc))
 
     def _fetch_symbol(self, symbol: str) -> CommunitySignal | None:
-        general_signal = self._fetch_query_signal(self.build_query(symbol), source="x_session")
+        general_signal = self._fetch_query_signal(symbol, self.build_query(symbol), source="x_session")
         tracked_accounts = sanitize_account_names(self.tracked_accounts)
         if not tracked_accounts or self.account_mode == "off":
             return general_signal
-        account_signal = self._fetch_query_signal(self.build_account_query(symbol, tracked_accounts), source="x_session_accounts")
+        account_signal = self._fetch_query_signal(symbol, self.build_account_query(symbol, tracked_accounts), source="x_session_accounts")
         if self.account_mode == "only":
             return account_signal
         if general_signal is None:
@@ -827,7 +1042,7 @@ class SessionScrapeCommunityScoreProvider(CommunityScoreProvider):
         if account_signal is None:
             return general_signal
         account_weight = max(0.0, min(self.account_weight_pct, 100.0)) / 100
-        return blend_community_signals(general_signal, account_signal, account_weight, source="x_session+x_accounts")
+        return blend_community_signals(symbol, general_signal, account_signal, account_weight, source="x_session+x_accounts")
 
     def build_query(self, symbol: str) -> str:
         symbol = symbol.upper()
@@ -847,7 +1062,7 @@ class SessionScrapeCommunityScoreProvider(CommunityScoreProvider):
         account_clause = " OR ".join(f"from:{account}" for account in tracked_accounts)
         return f"{self.build_query(symbol)} ({account_clause})"
 
-    def _fetch_query_signal(self, query: str, *, source: str) -> CommunitySignal | None:
+    def _fetch_query_signal(self, symbol: str, query: str, *, source: str) -> CommunitySignal | None:
         command = self.command_template.format(
             query=shlex.quote(query),
             raw_query=query,
@@ -870,12 +1085,14 @@ class SessionScrapeCommunityScoreProvider(CommunityScoreProvider):
             sentiment=sentiment,
             sample_size=len(texts),
         )
-        return CommunitySignal(
-            score=round(score, 2),
+        return signal_with_insight(
+            symbol=symbol,
+            score=score,
             source=source,
             mentions=len(fresh_items),
-            sentiment=round(sentiment, 4),
+            sentiment=sentiment,
             sample_size=len(texts),
+            texts=texts,
         )
 
 
@@ -898,12 +1115,17 @@ class CompositeCommunityScoreProvider(CommunityScoreProvider):
         mention_values = [signal.mentions for signal in signals if signal.mentions is not None]
         sentiment_values = [signal.sentiment for signal in signals if signal.sentiment is not None]
         sample_values = [signal.sample_size for signal in signals if signal.sample_size is not None]
-        return CommunitySignal(
-            score=round(score, 2),
+        merged_samples: list[str] = []
+        for signal in signals:
+            merged_samples.extend(signal.samples)
+        return signal_with_insight(
+            symbol=symbol,
+            score=score,
             source="+".join(signal.source for signal in signals),
             mentions=sum(mention_values) if mention_values else None,
             sentiment=(sum(sentiment_values) / len(sentiment_values)) if sentiment_values else None,
             sample_size=sum(sample_values) if sample_values else None,
+            texts=merged_samples,
         )
 
 
@@ -1044,7 +1266,102 @@ def parse_session_scrape_output(output: str) -> list[dict[str, object]]:
     return items
 
 
+def parse_exchange_announcement_items(payload: str, *, source: str, url: str) -> list[dict[str, object]]:
+    text = html_to_visible_text(payload)
+    if not text:
+        return []
+    lines = [line.strip() for line in text.splitlines() if len(line.strip()) >= 8]
+    items: list[dict[str, object]] = []
+    for line in lines:
+        if not looks_like_exchange_announcement(line):
+            continue
+        items.append({"text": clean_message_sample(line, limit=220), "source": source, "url": url})
+        if len(items) >= 80:
+            break
+    if items:
+        return items
+    compact_lines = [clean_message_sample(line, limit=220) for line in lines[:80]]
+    return [{"text": line, "source": source, "url": url} for line in compact_lines if line]
+
+
+def html_to_visible_text(payload: str) -> str:
+    without_scripts = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", payload)
+    without_tags = re.sub(r"(?s)<[^>]+>", "\n", without_scripts)
+    decoded = unescape(without_tags)
+    cleaned_lines = []
+    for line in decoded.splitlines():
+        compact = " ".join(line.split())
+        if compact:
+            cleaned_lines.append(compact)
+    return "\n".join(cleaned_lines)
+
+
+def looks_like_exchange_announcement(text: str) -> bool:
+    lowered = text.lower()
+    if len(text) > 240:
+        return False
+    if any(term in lowered for term in EXCHANGE_POSITIVE_TERMS | EXCHANGE_NEGATIVE_TERMS):
+        return True
+    return bool(re.search(r"\b[A-Z0-9]{2,12}\s*/\s*(USDT|USDC|FDUSD|BTC|ETH)\b", text))
+
+
+def dedupe_exchange_items(items: list[dict[str, object]]) -> list[dict[str, object]]:
+    result: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for item in items:
+        text = clean_message_sample(str(item.get("text", "")), limit=220)
+        key = re.sub(r"\W+", "", text).lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append({**item, "text": text})
+    return result
+
+
+def exchange_item_matches_symbol(symbol: str, text: str) -> bool:
+    symbol = symbol.upper()
+    base_asset = derive_base_asset(symbol)
+    compact = re.sub(r"[^A-Z0-9]", "", text.upper())
+    if symbol in compact:
+        return True
+    for quote in QUOTE_SUFFIXES:
+        if symbol.endswith(quote) and re.search(rf"\b{re.escape(base_asset)}\s*/\s*{re.escape(quote)}\b", text, re.IGNORECASE):
+            return True
+    terms = [base_asset, f"${base_asset}", f"#{base_asset}", *DEFAULT_X_NAME_MAP.get(base_asset, [])]
+    for term in dedupe_terms(terms):
+        if term.startswith(("$", "#")):
+            if term.upper() in text.upper():
+                return True
+            continue
+        if re.search(rf"(?<![A-Z0-9]){re.escape(term)}(?![A-Z0-9])", text, re.IGNORECASE):
+            return True
+    return False
+
+
+def exchange_announcement_sentiment(texts: list[str]) -> float:
+    if not texts:
+        return 0.0
+    total = 0.0
+    for text in texts:
+        lowered = text.lower()
+        positive = sum(1 for term in EXCHANGE_POSITIVE_TERMS if exchange_term_in_text(term, lowered))
+        negative = sum(1 for term in EXCHANGE_NEGATIVE_TERMS if exchange_term_in_text(term, lowered))
+        token_sentiment = XCommunityScoreProvider.score_sentiment([text])
+        if positive or negative:
+            total += (positive - negative) / max(positive + negative, 1)
+        else:
+            total += token_sentiment
+    return max(-1.0, min(1.0, total / len(texts)))
+
+
+def exchange_term_in_text(term: str, lowered_text: str) -> bool:
+    if " " in term or "-" in term:
+        return term in lowered_text
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", lowered_text))
+
+
 def blend_community_signals(
+    symbol: str,
     general_signal: CommunitySignal,
     account_signal: CommunitySignal,
     account_weight: float,
@@ -1059,12 +1376,14 @@ def blend_community_signals(
         ((general_signal.sentiment or 0.0) * (1 - account_weight))
         + ((account_signal.sentiment or 0.0) * account_weight)
     )
-    return CommunitySignal(
-        score=round(blended_score, 2),
+    return signal_with_insight(
+        symbol=symbol,
+        score=blended_score,
         source=source,
         mentions=blended_mentions,
-        sentiment=round(blended_sentiment, 4),
+        sentiment=blended_sentiment,
         sample_size=blended_samples,
+        texts=[*general_signal.samples, *account_signal.samples],
     )
 
 
@@ -1078,7 +1397,7 @@ def derive_base_asset(symbol: str) -> str:
 def parse_provider_mode(value: str) -> list[str]:
     normalized = (value or "auto").strip().lower()
     if normalized == "auto":
-        return ["x", "csv", "news"]
+        return ["exchange", "x", "csv", "news"]
     return [item.strip().lower() for item in normalized.split(",") if item.strip()]
 
 
@@ -1106,10 +1425,19 @@ def build_community_provider(
     x_tracked_accounts: list[str] | None = None,
     x_account_mode: str = "off",
     x_account_weight_pct: float = 35.0,
+    exchange_community_urls: list[str] | None = None,
 ) -> CommunityScoreProvider:
     providers: list[CommunityScoreProvider] = []
     requested = parse_provider_mode(provider_mode)
     x_provider = (x_provider or "official_api").strip().lower()
+
+    if "exchange" in requested and exchange_community_urls:
+        providers.append(
+            ExchangeAnnouncementCommunityScoreProvider(
+                urls=exchange_community_urls,
+                ttl_seconds=community_ttl_seconds,
+            )
+        )
 
     if "x" in requested:
         if x_provider == "official_api" and x_bearer_token:

@@ -26,6 +26,7 @@ class TradingPosition:
     take_profit_price: float
     mode: str = "paper"
     client_order_id: str = ""
+    exchange: str = "BINANCE"
 
 
 @dataclass
@@ -44,6 +45,7 @@ class TradingEvent:
     exit_reason: str = ""
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     response: dict[str, object] | None = None
+    exchange: str = "BINANCE"
 
 
 @dataclass
@@ -78,10 +80,31 @@ class TradingStateStore:
     def _load_payload(self) -> dict[str, object]:
         if not self.path.exists():
             return {}
-        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        text = self.path.read_text(encoding="utf-8")
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            payload = self._recover_json_payload(text, exc)
         if not isinstance(payload, dict):
             return {}
         return payload
+
+    def _recover_json_payload(self, text: str, exc: json.JSONDecodeError) -> object:
+        decoder = json.JSONDecoder()
+        try:
+            payload, end = decoder.raw_decode(text)
+        except json.JSONDecodeError:
+            return {}
+        if not text[end:].strip():
+            return payload
+        backup_path = self.path.with_suffix(f"{self.path.suffix}.corrupt-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}")
+        try:
+            backup_path.write_text(text, encoding="utf-8")
+            if isinstance(payload, dict):
+                self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+        return payload if isinstance(payload, dict) and exc.msg == "Extra data" else {}
 
     def save(self, positions: list[TradingPosition]) -> None:
         existing_events = self.load_events()
@@ -118,6 +141,7 @@ class TradingStateStore:
             take_profit_price=float(payload["take_profit_price"]),
             mode=str(payload.get("mode", "paper")),
             client_order_id=str(payload.get("client_order_id", "")),
+            exchange=str(payload.get("exchange", "BINANCE")).upper(),
         )
 
     @staticmethod
@@ -144,6 +168,7 @@ class TradingStateStore:
             exit_reason=str(payload.get("exit_reason", "")),
             created_at=datetime.fromisoformat(str(created_at)) if created_at else datetime.now(timezone.utc),
             response=payload.get("response") if isinstance(payload.get("response"), dict) else None,
+            exchange=str(payload.get("exchange", "BINANCE")).upper(),
         )
 
     @staticmethod
@@ -162,8 +187,12 @@ class AutoTrader:
         blocked_symbols: dict[str, str] | None = None,
     ) -> None:
         self.scanner = scanner
+        self.execution_gateway = getattr(scanner, "gateway", None)
         self.state_store = state_store
         self.blocked_symbols = blocked_symbols or {}
+
+    def set_execution_gateway(self, gateway: object) -> None:
+        self.execution_gateway = gateway
 
     def run_once(self, config: AutoTradeDefaults) -> TradingRunReport:
         positions = self.state_store.load()
@@ -185,6 +214,7 @@ class AutoTrader:
                     mode=config.mode,
                     status="disabled",
                     message="自动交易未启用，仅完成信号扫描和仓位检查。",
+                    exchange=config.execution_exchange.upper(),
                 )
             )
             self.state_store.append_events(events)
@@ -207,6 +237,7 @@ class AutoTrader:
                     mode=config.mode,
                     status="blocked",
                     message=f"实盘模式需要环境变量 AI_TRADE_LIVE_CONFIRM={LIVE_CONFIRM_VALUE}。",
+                    exchange=config.execution_exchange.upper(),
                 )
             )
             self.state_store.save(positions)
@@ -246,6 +277,7 @@ class AutoTrader:
                         message=self.blocked_symbols[signal.symbol],
                         score=signal.score,
                         price=signal.ticker.last_price,
+                        exchange=config.execution_exchange.upper(),
                     )
                 )
                 continue
@@ -335,6 +367,7 @@ class AutoTrader:
         quantity = config.quote_order_qty / price
         client_order_id = self._client_order_id("buy", signal.symbol, now)
         position = TradingPosition(
+            exchange=config.execution_exchange.upper(),
             symbol=signal.symbol,
             quantity=quantity,
             entry_price=price,
@@ -350,6 +383,7 @@ class AutoTrader:
         if config.mode == "paper":
             return position, TradingEvent(
                 action="BUY",
+                exchange=config.execution_exchange.upper(),
                 symbol=signal.symbol,
                 mode=config.mode,
                 status="paper_filled",
@@ -361,7 +395,7 @@ class AutoTrader:
             )
 
         try:
-            response = self.scanner.gateway.order_market_buy(
+            response = self.execution_gateway.order_market_buy(
                 symbol=signal.symbol,
                 quote_order_qty=config.quote_order_qty,
                 test=config.order_test_only,
@@ -378,6 +412,7 @@ class AutoTrader:
                 price=price,
                 quantity=quantity,
                 quote_notional=config.quote_order_qty,
+                exchange=config.execution_exchange.upper(),
             )
         response_payload = response if isinstance(response, dict) else {"raw": response}
         if not config.order_test_only:
@@ -391,12 +426,13 @@ class AutoTrader:
             symbol=signal.symbol,
             mode=config.mode,
             status="test_accepted" if config.order_test_only else "filled",
-            message="Binance 市价买入请求已提交。",
+            message=f"{config.execution_exchange.upper()} 市价买入请求已提交。",
             score=signal.score,
             price=price,
             quantity=position.quantity,
             quote_notional=position.quote_notional,
             response=response_payload,
+            exchange=config.execution_exchange.upper(),
         )
 
     def _close_position(
@@ -424,6 +460,7 @@ class AutoTrader:
                 realized_pnl=realized_pnl,
                 realized_pnl_pct=realized_pnl_pct,
                 exit_reason=exit_reason,
+                exchange=position.exchange,
             )
         if config.mode != "live":
             return TradingEvent(
@@ -436,6 +473,7 @@ class AutoTrader:
                 quantity=position.quantity,
                 quote_notional=position.quantity * price,
                 exit_reason=exit_reason,
+                exchange=position.exchange,
             )
         if not config.enabled:
             return TradingEvent(
@@ -448,6 +486,7 @@ class AutoTrader:
                 quantity=position.quantity,
                 quote_notional=position.quantity * price,
                 exit_reason=exit_reason,
+                exchange=position.exchange,
             )
         if not self._live_confirmed():
             return TradingEvent(
@@ -460,9 +499,10 @@ class AutoTrader:
                 quantity=position.quantity,
                 quote_notional=position.quantity * price,
                 exit_reason=exit_reason,
+                exchange=position.exchange,
             )
         try:
-            response = self.scanner.gateway.order_market_sell(
+            response = self.execution_gateway.order_market_sell(
                 symbol=position.symbol,
                 quantity=self._floor_quantity_for_symbol(position.symbol, position.quantity),
                 test=config.order_test_only,
@@ -479,6 +519,7 @@ class AutoTrader:
                 quantity=position.quantity,
                 quote_notional=position.quantity * price,
                 exit_reason=exit_reason,
+                exchange=position.exchange,
             )
         response_payload = response if isinstance(response, dict) else {"raw": response}
         executed_quantity = float(response_payload.get("executedQty") or position.quantity)
@@ -494,7 +535,7 @@ class AutoTrader:
             symbol=position.symbol,
             mode=config.mode,
             status="test_accepted" if config.order_test_only else "filled",
-            message=f"Binance 市价卖出请求已提交：{exit_reason}。",
+            message=f"{position.exchange.upper()} 市价卖出请求已提交：{exit_reason}。",
             price=price,
             quantity=executed_quantity,
             quote_notional=exit_notional,
@@ -502,12 +543,15 @@ class AutoTrader:
             realized_pnl_pct=None if config.order_test_only else realized_pnl_pct,
             exit_reason=exit_reason,
             response=response_payload,
+            exchange=position.exchange,
         )
 
     @staticmethod
     def _validate_config(config: AutoTradeDefaults) -> None:
         if config.mode not in {"paper", "live"}:
             raise ValueError("自动交易模式只能是 paper 或 live。")
+        if config.execution_exchange.lower() not in {"binance", "okx"}:
+            raise ValueError("自动交易执行交易所只能是 binance 或 okx。")
         if config.quote_order_qty <= 0:
             raise ValueError("单笔投入必须大于 0。")
         if config.max_open_positions < 1:
@@ -527,7 +571,7 @@ class AutoTrader:
 
     def _floor_quantity_for_symbol(self, symbol: str, quantity: float) -> float:
         try:
-            exchange_info = self.scanner.gateway.exchange_info()
+            exchange_info = self.execution_gateway.exchange_info()
             for item in exchange_info.get("symbols", []):
                 if item.get("symbol") != symbol:
                     continue
@@ -588,4 +632,5 @@ class AutoTrader:
             take_profit_price=entry_price * (1 + (position.take_profit_price - position.entry_price) / position.entry_price),
             mode=position.mode,
             client_order_id=position.client_order_id,
+            exchange=position.exchange,
         )

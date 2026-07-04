@@ -49,6 +49,14 @@ PUBLIC_DATA_PRESETS: tuple[PublicDataPreset, ...] = (
         "CoinGecko Keyless 市场数据；适合补充价格、趋势和全局市场指标。",
     ),
     PublicDataPreset(
+        "tradingview_unofficial",
+        "TradingView Unofficial",
+        "market",
+        False,
+        "TradingView WebSocket + local CSV cache",
+        "TradingView 非官方历史 K 线拉取；会先缓存为本地 CSV，再交给回测引擎读取，适合作为补充数据源。",
+    ),
+    PublicDataPreset(
         "open_multichain_keyless",
         "Open Multi-chain Keyless",
         "onchain",

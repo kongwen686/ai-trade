@@ -61,6 +61,24 @@ class FakeScanner:
 
 
 class TradingTests(unittest.TestCase):
+    def test_state_store_recovers_trailing_json_garbage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "state.json"
+            path.write_text(
+                '{"kind":"trading_state","version":1,"positions":[],"events":[]}'
+                '自动交易未启用，仅完成信号扫描和仓位检查。',
+                encoding="utf-8",
+            )
+            store = TradingStateStore(path)
+
+            events = store.load_events()
+            repaired = path.read_text(encoding="utf-8")
+            backups = list(Path(temp_dir).glob("state.json.corrupt-*"))
+
+        self.assertEqual(events, [])
+        self.assertIn('"events": []', repaired)
+        self.assertEqual(len(backups), 1)
+
     def test_paper_run_opens_position_from_high_score_signal(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = TradingStateStore(Path(temp_dir) / "state.json")

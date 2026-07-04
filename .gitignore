@@ -3,4 +3,6 @@ __pycache__/
 .venv/
 data/runtime_config.json
 data/trading_state.json
+data/*.corrupt-*
 data/spot/
+data/tradingview_klines/

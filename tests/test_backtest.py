@@ -13,6 +13,7 @@ from trade_signal_app.backtest import (
     archive_key,
     merge_candles,
     parse_args,
+    resolve_archive_paths,
     resolve_commission_from_account_payload,
     resolve_commission_from_symbol_payload,
     resolve_execution_config_from_binance,
@@ -103,6 +104,10 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(symbol, "BTCUSDT")
         self.assertEqual(interval, "4h")
 
+        symbol, interval = archive_key(Path("data/tradingview_klines/BINANCE/ETHUSDT/1h.csv"))
+        self.assertEqual(symbol, "ETHUSDT")
+        self.assertEqual(interval, "1h")
+
     def test_merge_candles_deduplicates(self) -> None:
         row1 = "1735689600000000,4.1,4.2,4.0,4.15,539.23,1735703999999999,2240.39,13,401.82,1669.98,0\n"
         row2 = "1735704000000000,4.15,4.3,4.1,4.25,640.00,1735718399999999,2720.00,18,480.00,2010.00,0\n"
@@ -119,6 +124,27 @@ class BacktestTests(unittest.TestCase):
             self.assertEqual(len(candles), 2)
             self.assertEqual(candles[0].close_price, 4.15)
             self.assertEqual(candles[1].close_price, 4.25)
+
+    def test_resolve_and_merge_tradingview_csv(self) -> None:
+        csv_rows = "\n".join(
+            [
+                "datetime,open,high,low,close,volume,quote_volume,trade_count",
+                "2025-01-01T00:00:00+00:00,100,105,98,104,10,1040,20",
+                "2025-01-01T04:00:00+00:00,104,108,102,107,12,1284,22",
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "BINANCE" / "BTCUSDT" / "4h.csv"
+            path.parent.mkdir(parents=True)
+            path.write_text(csv_rows, encoding="utf-8")
+
+            resolved = resolve_archive_paths([str(Path(temp_dir))])
+            self.assertEqual(resolved, [path.resolve()])
+            candles = merge_candles(resolved)
+            self.assertEqual(len(candles), 2)
+            self.assertEqual(candles[0].close_price, 104.0)
+            self.assertEqual(candles[1].quote_volume, 1284.0)
 
     def test_run_backtest_generates_positive_forward_stats(self) -> None:
         report = run_backtest_for_series(

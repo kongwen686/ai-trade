@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError, as_completed
 from dataclasses import dataclass
 from math import log10
 from typing import Callable
@@ -81,13 +81,18 @@ class OpenMultiChainOnchainProvider:
         requested.update(DEFAULT_ONCHAIN_SYMBOLS)
         configs = [config for config in OPEN_MULTICHAIN_CONFIGS if config.symbol in requested]
         events: list[OnchainMonitorEvent] = []
-        with ThreadPoolExecutor(max_workers=min(self.max_workers, len(configs) or 1)) as executor:
+        executor = ThreadPoolExecutor(max_workers=min(self.max_workers, len(configs) or 1))
+        try:
             future_map = {executor.submit(self._fetch_chain_events, config, price_map): config for config in configs}
-            for future in as_completed(future_map):
+            for future in as_completed(future_map, timeout=self.timeout):
                 try:
                     events.extend(future.result())
                 except Exception:  # noqa: BLE001
                     continue
+        except FutureTimeoutError:
+            pass
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
         return sorted(events, key=lambda event: event.severity, reverse=True)
 
     def _fetch_chain_events(self, config: OnchainChainConfig, price_map: dict[str, float]) -> list[OnchainMonitorEvent]:

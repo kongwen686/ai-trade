@@ -36,6 +36,10 @@ class CommunitySignal:
     mentions: int | None = None
     sentiment: float | None = None
     sample_size: int | None = None
+    summary: str = ""
+    drivers: list[str] = field(default_factory=list)
+    risks: list[str] = field(default_factory=list)
+    samples: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -96,6 +100,9 @@ class ScanSummary:
     min_quote_volume: float
     min_trade_count: int
     fetched_at: datetime
+    eligible_symbols: int = 0
+    candidate_symbols: int = 0
+    candidate_pool: int = 0
 
 
 @dataclass(frozen=True)
