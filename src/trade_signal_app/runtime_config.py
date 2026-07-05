@@ -147,6 +147,10 @@ class AutoTradeDefaults:
     min_buy_pressure: float = 0.52
     stop_loss_pct: float = 4.0
     take_profit_pct: float = 9.0
+    profit_protection_enabled: bool = True
+    profit_protection_trigger_pct: float = 3.0
+    profit_protection_lock_pct: float = 0.5
+    trailing_stop_pct: float = 2.0
     cooldown_minutes: int = 240
     order_test_only: bool = True
 

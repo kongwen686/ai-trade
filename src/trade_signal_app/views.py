@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from html import escape
 from urllib.parse import urlencode
 
@@ -112,6 +113,7 @@ _VALUE_LABELS = {
         "SKIP": "跳过",
         "stop_loss": "止损",
         "take_profit": "止盈",
+        "profit_protect_stop": "浮盈保护止损",
         "candidate_buy": "候选买入",
         "watch": "观察",
         "priority_watch": "优先观察",
@@ -197,6 +199,7 @@ _VALUE_LABELS = {
         "SKIP": "Skip",
         "stop_loss": "Stop Loss",
         "take_profit": "Take Profit",
+        "profit_protect_stop": "Profit Protection Stop",
         "candidate_buy": "Candidate Buy",
         "watch": "Watch",
         "priority_watch": "Priority Watch",
@@ -614,7 +617,7 @@ def _layout(
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
-  <body>
+  <body class="body-{escape(active_page)}">
     <main class="ant-layout app-shell">
       {_app_sidebar(active_page, active_lang, current_path)}
       <section class="ant-layout-content workspace page-{escape(active_page)}">
@@ -1053,7 +1056,7 @@ def _terminal_rows(items: list[dict[str, object]], columns: list[tuple[str, str]
     header = "".join(f"<th>{escape(label)}</th>" for label, _ in columns)
     rows = []
     for item in items:
-        cells = "".join(f"<td>{escape(_format_cell(item.get(key), lang))}</td>" for _, key in columns)
+        cells = "".join(f"<td>{escape(_format_cell(item.get(key), lang, key=key))}</td>" for _, key in columns)
         rows.append(f"<tr>{cells}</tr>")
     column_count = max(1, len(columns))
     width_class = "terminal-table-compact" if column_count <= 3 else "terminal-table-medium" if column_count <= 5 else "terminal-table-wide"
@@ -1193,9 +1196,38 @@ def _onchain_overview_content(events: object, sources: object, lang: str) -> str
     """
 
 
-def _format_cell(value: object, lang: str = "zh") -> str:
+_DATETIME_FIELD_KEYS = {
+    "created_at",
+    "updated_at",
+    "entry_time",
+    "exit_time",
+    "opened_at",
+    "closed_at",
+    "next_funding_time",
+}
+
+
+def _format_datetime_value(value: object) -> str:
     if value is None:
         return ""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    text = str(value).strip()
+    if not text:
+        return ""
+    normalized = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return text
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _format_cell(value: object, lang: str = "zh", *, key: str | None = None) -> str:
+    if value is None:
+        return ""
+    if key in _DATETIME_FIELD_KEYS:
+        return _format_datetime_value(value)
     if isinstance(value, float):
         if abs(value) >= 1000:
             return f"{value:,.2f}"
@@ -1203,6 +1235,13 @@ def _format_cell(value: object, lang: str = "zh") -> str:
     if isinstance(value, list):
         return " / ".join(_display_value(item, lang) for item in value[:3])
     return _display_value(value, lang)
+
+
+def _float_from_any(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _terminal_system_layers(lang: str = "zh") -> str:
@@ -1221,6 +1260,297 @@ def _terminal_system_layers(lang: str = "zh") -> str:
         """
         for name, *items in layers
     )
+
+
+def _terminal_dashboard_value(value: object, lang: str) -> str:
+    text = _display_value(value, lang)
+    return text if text else "-"
+
+
+def _terminal_status_chip(label: str, status: object, lang: str) -> str:
+    raw_status = str(status or "").lower()
+    if raw_status in {"ready", "configured", "ready_public", "api_live", "live", "enabled", "ok"}:
+        chip_class = "ready"
+    elif raw_status in {"guarded", "partial_configured", "fallback", "monitoring", "watch_only", "pending_scan"}:
+        chip_class = "pending"
+    elif raw_status in {"source_missing", "not_configured", "auth_failed", "empty", "error"}:
+        chip_class = "blocked"
+    else:
+        chip_class = "neutral"
+    return f"""
+      <span class="terminal-status-chip {chip_class}">
+        <i aria-hidden="true"></i>
+        <strong>{escape(label)}</strong>
+        <small>{escape(_terminal_dashboard_value(status, lang))}</small>
+      </span>
+    """
+
+
+def _terminal_sparkline(values: list[float], *, accent: str = "blue") -> str:
+    if not values:
+        values = [28.0, 36.0, 32.0, 44.0, 39.0, 52.0, 48.0, 61.0]
+    values = values[-14:]
+    minimum = min(values)
+    maximum = max(values)
+    span = maximum - minimum or 1.0
+    points = []
+    bars = []
+    for index, value in enumerate(values):
+        x = 8 + index * (144 / max(1, len(values) - 1))
+        y = 54 - ((value - minimum) / span) * 38
+        points.append(f"{x:.1f},{y:.1f}")
+        bar_height = max(4.0, 12 + ((value - minimum) / span) * 24)
+        bars.append(f'<rect x="{x - 3:.1f}" y="{72 - bar_height:.1f}" width="6" height="{bar_height:.1f}" rx="2"></rect>')
+    return f"""
+      <svg class="terminal-dashboard-chart chart-{escape(accent)}" viewBox="0 0 164 78" preserveAspectRatio="none" aria-hidden="true">
+        <path d="M8 54 H156 M8 36 H156 M8 18 H156" class="grid"></path>
+        <g class="bars">{"".join(bars)}</g>
+        <polyline points="{escape(" ".join(points))}"></polyline>
+      </svg>
+    """
+
+
+def _terminal_dashboard_table(rows: list[dict[str, object]], lang: str) -> str:
+    t = lambda zh, en: _text(lang, zh, en)
+    if not rows:
+        return f'<p class="helper-text">{escape(t("等待策略命中和交易事件刷新。", "Waiting for strategy hits and trading events."))}</p>'
+    body = []
+    for row in rows[:5]:
+        pnl_value = row.get("pnl")
+        pnl = _float_from_any(pnl_value)
+        pnl_class = "positive" if pnl >= 0 else "negative"
+        pnl_text = "-" if pnl_value is None else f"{pnl:+,.2f}"
+        body.append(
+            f"""
+            <tr>
+              <td><strong>{escape(str(row.get("name") or "-"))}</strong><span>{escape(str(row.get("meta") or ""))}</span></td>
+              <td>{escape(_terminal_dashboard_value(row.get("status"), lang))}</td>
+              <td>{escape(_terminal_dashboard_value(row.get("positions"), lang))}</td>
+              <td class="{pnl_class}">{escape(pnl_text)}</td>
+              <td>{escape(_terminal_dashboard_value(row.get("rate"), lang))}</td>
+            </tr>
+            """
+        )
+    return f"""
+      <table class="terminal-dashboard-table">
+        <thead>
+          <tr>
+            <th>{t("策略", "Strategy")}</th>
+            <th>{t("状态", "Status")}</th>
+            <th>{t("持仓", "Pos")}</th>
+            <th>{t("今日盈亏", "PnL")}</th>
+            <th>{t("胜率", "Win")}</th>
+          </tr>
+        </thead>
+        <tbody>{"".join(body)}</tbody>
+      </table>
+    """
+
+
+def _terminal_today_realized_pnl(events: list[dict[str, object]], symbol: str) -> float:
+    today = datetime.now(timezone.utc).date().isoformat()
+    symbol = symbol.upper()
+    total = 0.0
+    for event in events:
+        if str(event.get("symbol") or "").upper() != symbol:
+            continue
+        if not str(event.get("created_at") or "").startswith(today):
+            continue
+        total += _float_from_any(event.get("realized_pnl"))
+    return total
+
+
+def _terminal_closed_win_rate(events: list[dict[str, object]], symbol: str) -> str:
+    symbol = symbol.upper()
+    closed = [
+        event
+        for event in events
+        if str(event.get("symbol") or "").upper() == symbol and event.get("realized_pnl") is not None
+    ]
+    if not closed:
+        return "-"
+    wins = sum(1 for event in closed if _float_from_any(event.get("realized_pnl")) > 0)
+    return f"{(wins / len(closed)) * 100:.1f}%"
+
+
+def _terminal_market_intel_content(items: list[dict[str, object]], lang: str) -> str:
+    t = lambda zh, en: _text(lang, zh, en)
+    rows = []
+    for item in items[:6]:
+        symbol = str(item.get("symbol") or "-")
+        source = str(item.get("source") or "-")
+        title = str(item.get("title") or "")
+        severity = _float_from_any(item.get("severity"))
+        rows.append(
+            f"""
+            <li>
+              <button type="button" class="terminal-market-row" data-symbol="{escape(symbol, quote=True)}">
+                <span>
+                  <strong>{escape(symbol)}</strong>
+                  <small>{escape(source)}</small>
+                </span>
+                <em>{severity:.1f}</em>
+              </button>
+              <p>{escape(title)}</p>
+            </li>
+            """
+        )
+    if not rows:
+        return f'<p class="helper-text">{escape(t("暂无实时行情情报。", "No live market intelligence yet."))}</p>'
+    return f"""
+      <div class="terminal-market-live">
+        <div class="terminal-market-live-head">
+          <span>{t("实时 24h 行情", "Live 24h Market")}</span>
+          <a href="/terminal/market">{t("查看完整市场页", "Open market page")}</a>
+        </div>
+        <ul>{"".join(rows)}</ul>
+      </div>
+    """
+
+
+def _terminal_dashboard_feature_cards(lang: str) -> str:
+    t = lambda zh, en: _text(lang, zh, en)
+    cards = [
+        ("AT", t("自动交易", "Auto Trading"), t("策略信号驱动 paper/live 执行", "Strategy-driven paper/live execution"), "/terminal/trading"),
+        ("RC", t("风险控制", "Risk Control"), t("执行前阻断与风险因子明细", "Pre-trade gates and factors"), "/terminal/risk"),
+        ("OC", t("链上监控", "On-chain Monitor"), t("大额转账与交易所流向", "Large transfers and exchange flows"), "/terminal/onchain"),
+        ("CI", t("社区情报", "Community Intel"), t("交易所热点与账号监控", "Exchange heat and tracked accounts"), "/terminal/community"),
+        ("BT", t("回测分析", "Backtest"), t("策略参数和历史表现验证", "Strategy validation on history"), "/backtest"),
+        ("MI", t("数据概览", "Market Data"), t("行情、资金费率和价差", "Market, funding, and basis"), "/terminal/market"),
+    ]
+    return "".join(
+        f"""
+        <a class="terminal-feature-card" href="{escape(href, quote=True)}">
+          <span>{escape(icon)}</span>
+          <strong>{escape(title)}</strong>
+          <small>{escape(description)}</small>
+        </a>
+        """
+        for icon, title, description, href in cards
+    )
+
+
+def _terminal_dashboard_showcase(snapshot: dict[str, object], lang: str) -> str:
+    t = lambda zh, en: _text(lang, zh, en)
+    platform = snapshot["platform"] if isinstance(snapshot.get("platform"), dict) else {}
+    risk = snapshot["execution_risk"] if isinstance(snapshot.get("execution_risk"), dict) else {}
+    strategy_hits = [item for item in snapshot.get("strategy_hits", []) if isinstance(item, dict)] if isinstance(snapshot.get("strategy_hits"), list) else []
+    intel_items = [item for item in snapshot.get("intel_items", []) if isinstance(item, dict)] if isinstance(snapshot.get("intel_items"), list) else []
+    accounts = [item for item in platform.get("accounts", []) if isinstance(item, dict)] if isinstance(platform.get("accounts"), list) else []
+    components = [item for item in platform.get("components", []) if isinstance(item, dict)] if isinstance(platform.get("components"), list) else []
+    strategies = [item for item in platform.get("strategies", []) if isinstance(item, dict)] if isinstance(platform.get("strategies"), list) else []
+    source_rows = snapshot.get("market_sources", []) if isinstance(snapshot.get("market_sources"), list) else []
+    recent_events = [item for item in platform.get("recent_events", []) if isinstance(item, dict)] if isinstance(platform.get("recent_events"), list) else []
+
+    account_exposure = sum(_float_from_any(item.get("quote_exposure")) for item in accounts)
+    account_pnl = sum(_float_from_any(item.get("realized_pnl")) for item in accounts)
+    open_positions = sum(int(_float_from_any(item.get("open_positions"))) for item in accounts)
+    max_win_rate = max([_float_from_any(item.get("win_rate_pct")) for item in accounts] or [0.0])
+    risk_score = _float_from_any(risk.get("risk_score"))
+    allowed_symbols = risk.get("allowed_symbols") if isinstance(risk.get("allowed_symbols"), list) else []
+    blocked_symbols = risk.get("blocked_symbols") if isinstance(risk.get("blocked_symbols"), dict) else {}
+    market_values = [_float_from_any(item.get("severity")) for item in intel_items if _float_from_any(item.get("severity")) > 0]
+
+    component_status = {str(item.get("name") or "").lower(): item.get("status") for item in components}
+    exchange_chips = [
+        _terminal_status_chip("BINANCE", component_status.get("binance api", "ready_public"), lang),
+        _terminal_status_chip("OKX", component_status.get("okx api", "not_configured"), lang),
+    ]
+    source_chips = [
+        _terminal_status_chip(str(item.get("source") or "-").upper(), item.get("status"), lang)
+        for item in source_rows[:4]
+        if isinstance(item, dict)
+    ]
+
+    strategy_rows: list[dict[str, object]] = []
+    if strategy_hits:
+        for item in strategy_hits[:5]:
+            symbol = str(item.get("symbol") or "").upper()
+            strategy_rows.append(
+                {
+                    "name": item.get("strategy") or item.get("symbol"),
+                    "meta": symbol or item.get("source") or "",
+                    "status": item.get("action") or "hit",
+                    "positions": 0,
+                    "pnl": _terminal_today_realized_pnl(recent_events, symbol) if symbol else None,
+                    "rate": _terminal_closed_win_rate(recent_events, symbol) if symbol else "-",
+                }
+            )
+    else:
+        for index, item in enumerate(strategies[:5]):
+            strategy_rows.append(
+                {
+                    "name": item.get("name") or item.get("strategy_id") or "-",
+                    "meta": item.get("strategy_id") or "",
+                    "status": item.get("status") or "-",
+                    "positions": open_positions if index == 0 else "-",
+                    "pnl": account_pnl if index == 0 else None,
+                    "rate": f"{max_win_rate:.1f}%" if index == 0 else "-",
+                }
+            )
+
+    kpis = [
+        (t("今日信号", "Signals"), str(int(snapshot.get("returned_signals") or len(strategy_hits))), t("策略候选", "strategy candidates"), "blue"),
+        (t("账户权益", "Exposure"), f"{account_exposure:,.2f}", t("已用敞口 USDT", "used exposure USDT"), "green"),
+        (t("情报项", "Intel"), str(len(intel_items)), t("交易所/社区聚合", "exchange/community"), "cyan"),
+        (t("风险评分", "Risk"), f"{risk_score:.0f}", _terminal_dashboard_value(risk.get("status"), lang), "amber"),
+    ]
+    kpi_html = "".join(
+        f"""
+        <article class="terminal-dashboard-kpi {escape(accent)}">
+          <span>{escape(label)}</span>
+          <strong>{escape(value)}</strong>
+          <small>{escape(subtitle)}</small>
+        </article>
+        """
+        for index, (label, value, subtitle, accent) in enumerate(kpis)
+    )
+
+    return f"""
+      <section class="terminal-showcase" aria-label="{t("工作台总览", "Workbench Overview")}">
+        <div class="terminal-showcase-body">
+          <div class="terminal-showcase-content">
+            <div class="terminal-dashboard-kpis">{kpi_html}</div>
+            <div class="terminal-dashboard-main">
+              <section class="terminal-dashboard-card strategy-card">
+                <div class="terminal-dashboard-card-head">
+                  <div>
+                    <h3>{t("策略运行状态", "Strategy Runtime")}</h3>
+                    <p>{t("命中候选、执行意图和账户表现。", "Hit candidates, execution intent, and account performance.")}</p>
+                  </div>
+                  <a href="/terminal/strategies">{t("查看策略", "View")}</a>
+                </div>
+                <div class="terminal-dashboard-scroll">{_terminal_dashboard_table(strategy_rows, lang)}</div>
+              </section>
+              <section class="terminal-dashboard-card market-card">
+                <div class="terminal-dashboard-card-head">
+                  <div>
+                    <h3>{t("市场行情", "Market Tape")}</h3>
+                    <p>{t("基于当前交易所实时 ticker 和情报接口。", "Backed by current exchange ticker and intelligence feeds.")}</p>
+                  </div>
+                </div>
+                <div class="terminal-dashboard-scroll">{_terminal_market_intel_content(intel_items, lang)}</div>
+              </section>
+              <section class="terminal-dashboard-card side-card">
+                <h3>{t("交易所连接", "Exchange Links")}</h3>
+                <div class="terminal-dashboard-scroll side-card-scroll">
+                  <div class="terminal-connection-list">{"".join(exchange_chips)}</div>
+                  <h3>{t("风控概览", "Risk Summary")}</h3>
+                  <dl class="terminal-risk-mini">
+                    <div><dt>{t("总风险分", "Risk Score")}</dt><dd>{risk_score:.1f}</dd></div>
+                    <div><dt>{t("允许候选", "Allowed")}</dt><dd>{len(allowed_symbols)}</dd></div>
+                    <div><dt>{t("阻断标的", "Blocked")}</dt><dd>{len(blocked_symbols)}</dd></div>
+                  </dl>
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+        <div class="terminal-feature-strip">
+          {_terminal_dashboard_feature_cards(lang)}
+        </div>
+      </section>
+    """
 
 
 def _terminal_panel(title: str, subtitle: str, body: str, *, wide: bool = False) -> str:
@@ -1262,6 +1592,7 @@ def render_terminal_page(
     onchain_sources = snapshot.get("onchain_sources", [])
     spreads = snapshot["spreads"]
     funding_rates = snapshot.get("funding_rates", [])
+    market_sources = snapshot.get("market_sources", [])
     strategy_hits = snapshot["strategy_hits"]
     llm = snapshot["llm_insight"] if isinstance(snapshot.get("llm_insight"), dict) else {}
     risk = snapshot["execution_risk"]
@@ -1274,7 +1605,7 @@ def render_terminal_page(
     """
     panels = "".join(
         [
-            _terminal_panel(t("系统架构", "System Architecture"), t("交易所、社区、链上、策略与执行层统一监控。", "Unified monitoring for exchange, community, on-chain, strategy, and execution layers."), f'<div class="terminal-layers">{_terminal_system_layers(active_lang)}</div>', wide=True),
+            _terminal_dashboard_showcase(snapshot, active_lang),
             _terminal_panel(t("功能实现状态", "Capability Status"), t("架构组件、API 入口和配置状态。", "Architecture components, API endpoints, and configuration state."), _terminal_rows(platform["components"], [(t("层级", "Layer"), "layer"), (t("名称", "Name"), "name"), (t("状态", "Status"), "status"), (t("能力", "Capability"), "capability"), (t("接口", "Endpoint"), "endpoint")], lang=active_lang), wide=True),
             _terminal_panel(t("交易账户概览", "Trading Accounts"), t("模拟交易和真实交易账户状态。", "Paper and live account state."), _terminal_rows(platform["accounts"], [(t("交易所", "Exchange"), "exchange"), (t("模式", "Mode"), "mode"), (t("状态", "Status"), "status"), (t("持仓数", "Positions"), "open_positions"), (t("敞口", "Exposure"), "quote_exposure"), (t("已实现盈亏", "Realized PnL"), "realized_pnl"), (t("胜率", "Win Rate"), "win_rate_pct")], lang=active_lang), wide=True),
             _terminal_panel(t("大模型分析", "LLM Analysis"), t("基于行情、社区、链上、价差、资金费率和风控快照生成机会、风险和执行建议。", "Generates opportunity, risk, and execution suggestions from market, community, on-chain, basis, funding, and risk snapshots."), _llm_analysis_content(llm, active_lang), wide=True),
@@ -1580,7 +1911,7 @@ def _strategy_builder_result(result: dict[str, object], lang: str) -> str:
           </div>
           <div>
             <h3>{t("Paper 执行参数", "Paper Execution Parameters")}</h3>
-            {_strategy_param_table(autotrade_defaults, ["enabled", "mode", "quote_order_qty", "max_open_positions", "max_total_quote_exposure", "score_threshold", "min_volume_ratio", "min_buy_pressure", "stop_loss_pct", "take_profit_pct", "cooldown_minutes", "order_test_only"], lang)}
+            {_strategy_param_table(autotrade_defaults, ["enabled", "mode", "quote_order_qty", "max_open_positions", "max_total_quote_exposure", "score_threshold", "min_volume_ratio", "min_buy_pressure", "stop_loss_pct", "take_profit_pct", "profit_protection_enabled", "profit_protection_trigger_pct", "profit_protection_lock_pct", "trailing_stop_pct", "cooldown_minutes", "order_test_only"], lang)}
           </div>
         </div>
         {warnings_html}
@@ -1621,6 +1952,7 @@ def _trading_position_rows(positions: list[dict[str, object]], lang: str = "zh")
               <td class="pnl-cell{return_class}">{escape(pnl_text)}</td>
               <td class="pnl-cell{return_class}">{escape(return_text)}</td>
               <td>{float(position["score"]):.1f} / {escape(str(position["grade"]))}</td>
+              <td>{float(position.get("highest_price") or position["entry_price"]):.8f}</td>
               <td>{float(position["stop_price"]):.8f}</td>
               <td>{float(position["take_profit_price"]):.8f}</td>
               <td>{escape(_display_value(position["mode"], lang))}</td>
@@ -1638,7 +1970,8 @@ def _trading_position_rows(positions: list[dict[str, object]], lang: str = "zh")
           <th>{t("浮动盈亏", "Unrealized PnL")}</th>
           <th>{t("收益率", "Return")}</th>
           <th>{t("信号", "Signal")}</th>
-          <th>{t("止损", "Stop")}</th>
+          <th>{t("最高价", "High")}</th>
+          <th>{t("保护止损", "Protected Stop")}</th>
           <th>{t("止盈", "Take Profit")}</th>
           <th>{t("模式", "Mode")}</th>
         </tr>
@@ -1657,7 +1990,7 @@ def _trading_event_rows(events: list[dict[str, object]], lang: str = "zh") -> st
         rows.append(
             f"""
             <tr>
-              <td>{escape(str(event["created_at"]))}</td>
+              <td>{escape(_format_datetime_value(event.get("created_at")))}</td>
               <td>{escape(_display_value(event["action"], lang))}</td>
               <td>{escape(str(event["symbol"]))}</td>
               <td>{escape(_display_value(event["status"], lang))}</td>
@@ -1755,6 +2088,10 @@ def _settings_description_map(lang: str) -> dict[str, str]:
         "Min Buy Pressure": ("主动买入占比门槛，用于过滤买盘不足的信号。", "Minimum taker-buy pressure ratio."),
         "Stop Loss %": ("价格相对入场价下跌到该比例时触发止损。", "Stop loss percentage from entry price."),
         "Take Profit %": ("价格相对入场价上涨到该比例时触发止盈。", "Take profit percentage from entry price."),
+        "Enable profit protection": ("开启后，浮盈达到触发阈值会自动抬高止损，避免盈利单回撤成亏损单。", "Raises the stop after a profit threshold so winners do not fall back into losing trades."),
+        "Profit Guard Trigger %": ("浮盈达到该比例后启动保护止损。", "Unrealized gain required before protected stop starts."),
+        "Profit Lock %": ("保护启动后，止损至少抬到入场价上方的锁盈比例。", "Minimum locked profit once protection starts."),
+        "Trailing Stop %": ("按持仓最高价回撤该比例移动保护止损；值越小越容易提前落袋。", "Trailing pullback from the highest price; smaller values exit sooner."),
         "Cooldown Minutes": ("自动交易开仓或平仓后的冷却时间，避免连续追单。", "Cooldown after automated trades to avoid repeated entries."),
         "Use exchange order precheck/test": ("勾选时 live 模式只做交易所订单预检或测试，不会真实成交。", "When checked, live mode uses exchange order precheck/test without filling real orders."),
         "Default Preset": ("回测页默认使用的策略参数模板。", "Default strategy preset for the backtest page."),
@@ -1881,6 +2218,8 @@ def render_trading_page(
           <div class="mini-stat"><span>{t("单笔金额", "Order Qty")}</span><strong>{float(config["quote_order_qty"]):.2f}</strong></div>
           <div class="mini-stat"><span>{t("止损", "Stop Loss")}</span><strong>{float(config["stop_loss_pct"]):.1f}%</strong></div>
           <div class="mini-stat"><span>{t("止盈", "Take Profit")}</span><strong>{float(config["take_profit_pct"]):.1f}%</strong></div>
+          <div class="mini-stat"><span>{t("浮盈保护", "Profit Guard")}</span><strong>{float(config.get("profit_protection_trigger_pct", 0)):.1f}%</strong><small>{t("锁盈", "lock")} {float(config.get("profit_protection_lock_pct", 0)):.1f}%</small></div>
+          <div class="mini-stat"><span>{t("移动止损", "Trailing Stop")}</span><strong>{float(config.get("trailing_stop_pct", 0)):.1f}%</strong></div>
         </div>
       </section>
 
@@ -2203,6 +2542,10 @@ def render_settings_page(
           <label><span>Min Buy Pressure</span><input type="number" step="0.01" min="0" max="1" name="autotrade_min_buy_pressure" value="{float(params['autotrade_min_buy_pressure']):.2f}" /></label>
           <label><span>Stop Loss %</span><input type="number" step="0.1" min="0.1" name="autotrade_stop_loss_pct" value="{float(params['autotrade_stop_loss_pct']):.1f}" /></label>
           <label><span>Take Profit %</span><input type="number" step="0.1" min="0.1" name="autotrade_take_profit_pct" value="{float(params['autotrade_take_profit_pct']):.1f}" /></label>
+          <label class="inline-check"><input type="hidden" name="autotrade_profit_protection_enabled" value="0" /><input type="checkbox" name="autotrade_profit_protection_enabled" value="1" {"checked" if params.get("autotrade_profit_protection_enabled") else ""} /><span>Enable profit protection</span></label>
+          <label><span>Profit Guard Trigger %</span><input type="number" step="0.1" min="0" name="autotrade_profit_protection_trigger_pct" value="{float(params.get('autotrade_profit_protection_trigger_pct', 3.0)):.1f}" /></label>
+          <label><span>Profit Lock %</span><input type="number" step="0.1" min="0" name="autotrade_profit_protection_lock_pct" value="{float(params.get('autotrade_profit_protection_lock_pct', 0.5)):.1f}" /></label>
+          <label><span>Trailing Stop %</span><input type="number" step="0.1" min="0" name="autotrade_trailing_stop_pct" value="{float(params.get('autotrade_trailing_stop_pct', 2.0)):.1f}" /></label>
           <label><span>Cooldown Minutes</span><input type="number" min="0" name="autotrade_cooldown_minutes" value="{int(params['autotrade_cooldown_minutes'])}" /></label>
           <label class="inline-check"><input type="hidden" name="autotrade_order_test_only" value="0" /><input type="checkbox" name="autotrade_order_test_only" value="1" {"checked" if params["autotrade_order_test_only"] else ""} /><span>Use exchange order precheck/test</span></label>
           </div>

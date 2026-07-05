@@ -199,6 +199,11 @@ def _validate_runtime_config(config: RuntimeConfig) -> None:
     _validate_range(autotrade.min_buy_pressure, "Auto Trade Min Buy Pressure", minimum=0, maximum=1)
     _validate_range(autotrade.stop_loss_pct, "Auto Trade Stop Loss", minimum=0.1)
     _validate_range(autotrade.take_profit_pct, "Auto Trade Take Profit", minimum=0.1)
+    _validate_range(autotrade.profit_protection_trigger_pct, "Auto Trade Profit Protection Trigger", minimum=0)
+    _validate_range(autotrade.profit_protection_lock_pct, "Auto Trade Profit Protection Lock", minimum=0)
+    _validate_range(autotrade.trailing_stop_pct, "Auto Trade Trailing Stop", minimum=0)
+    if autotrade.profit_protection_enabled and autotrade.profit_protection_lock_pct > autotrade.profit_protection_trigger_pct:
+        raise ValueError("Auto Trade Profit Protection Lock 不能大于 Trigger。")
     _validate_range(autotrade.cooldown_minutes, "Auto Trade Cooldown", minimum=0)
 
     intelligence = config.intelligence_defaults
@@ -337,6 +342,10 @@ def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "autotrade_min_buy_pressure": autotrade.min_buy_pressure,
         "autotrade_stop_loss_pct": autotrade.stop_loss_pct,
         "autotrade_take_profit_pct": autotrade.take_profit_pct,
+        "autotrade_profit_protection_enabled": autotrade.profit_protection_enabled,
+        "autotrade_profit_protection_trigger_pct": autotrade.profit_protection_trigger_pct,
+        "autotrade_profit_protection_lock_pct": autotrade.profit_protection_lock_pct,
+        "autotrade_trailing_stop_pct": autotrade.trailing_stop_pct,
         "autotrade_cooldown_minutes": autotrade.cooldown_minutes,
         "autotrade_order_test_only": autotrade.order_test_only,
         "intelligence_enabled": intelligence.enabled,
@@ -551,6 +560,7 @@ def _serialize_trading_position(position: TradingPosition, latest_price: float |
         "opened_at": position.opened_at.isoformat(),
         "stop_price": position.stop_price,
         "take_profit_price": position.take_profit_price,
+        "highest_price": position.highest_price or position.entry_price,
         "mode": position.mode,
         "client_order_id": position.client_order_id,
         "exchange": position.exchange,
@@ -3603,6 +3613,10 @@ def _build_runtime_config(form: dict[str, list[str]]) -> RuntimeConfig:
             min_buy_pressure=_parse_float_value(_get_first(form, "autotrade_min_buy_pressure", str(current_config.autotrade_defaults.min_buy_pressure)), "Auto Trade Min Buy Pressure"),
             stop_loss_pct=_parse_float_value(_get_first(form, "autotrade_stop_loss_pct", str(current_config.autotrade_defaults.stop_loss_pct)), "Auto Trade Stop Loss"),
             take_profit_pct=_parse_float_value(_get_first(form, "autotrade_take_profit_pct", str(current_config.autotrade_defaults.take_profit_pct)), "Auto Trade Take Profit"),
+            profit_protection_enabled=_runtime_bool(form, "autotrade_profit_protection_enabled", current_config.autotrade_defaults.profit_protection_enabled),
+            profit_protection_trigger_pct=_parse_float_value(_get_first(form, "autotrade_profit_protection_trigger_pct", str(current_config.autotrade_defaults.profit_protection_trigger_pct)), "Auto Trade Profit Protection Trigger"),
+            profit_protection_lock_pct=_parse_float_value(_get_first(form, "autotrade_profit_protection_lock_pct", str(current_config.autotrade_defaults.profit_protection_lock_pct)), "Auto Trade Profit Protection Lock"),
+            trailing_stop_pct=_parse_float_value(_get_first(form, "autotrade_trailing_stop_pct", str(current_config.autotrade_defaults.trailing_stop_pct)), "Auto Trade Trailing Stop"),
             cooldown_minutes=_parse_int_value(_get_first(form, "autotrade_cooldown_minutes", str(current_config.autotrade_defaults.cooldown_minutes)), "Auto Trade Cooldown"),
             order_test_only=_runtime_bool(form, "autotrade_order_test_only", current_config.autotrade_defaults.order_test_only),
         ),

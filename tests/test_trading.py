@@ -220,6 +220,59 @@ class TradingTests(unittest.TestCase):
         self.assertAlmostEqual(report.events[0].realized_pnl_pct, 10.0)
         self.assertEqual(stored_events[0].realized_pnl, 5.0)
 
+    def test_profit_protection_moves_stop_and_exits_before_winner_turns_loss(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            store.save(
+                [
+                    TradingPosition(
+                        symbol="BTCUSDT",
+                        quantity=0.5,
+                        entry_price=100.0,
+                        quote_notional=50.0,
+                        score=82.0,
+                        grade="A",
+                        opened_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                        stop_price=96.0,
+                        take_profit_price=109.0,
+                        mode="paper",
+                    )
+                ]
+            )
+
+            trader = AutoTrader(scanner=FakeScanner([_signal(price=104.0)]), state_store=store)
+            first_report = trader.run_once(
+                AutoTradeDefaults(
+                    enabled=True,
+                    mode="paper",
+                    score_threshold=99.0,
+                    profit_protection_trigger_pct=3.0,
+                    profit_protection_lock_pct=0.5,
+                    trailing_stop_pct=2.0,
+                )
+            )
+            protected_position = store.load()[0]
+
+            trader = AutoTrader(scanner=FakeScanner([_signal(price=101.5)]), state_store=store)
+            second_report = trader.run_once(
+                AutoTradeDefaults(
+                    enabled=True,
+                    mode="paper",
+                    score_threshold=99.0,
+                    profit_protection_trigger_pct=3.0,
+                    profit_protection_lock_pct=0.5,
+                    trailing_stop_pct=2.0,
+                )
+            )
+
+        self.assertEqual(len(first_report.open_positions), 1)
+        self.assertAlmostEqual(protected_position.highest_price or 0.0, 104.0)
+        self.assertAlmostEqual(protected_position.stop_price, 101.92)
+        self.assertEqual(second_report.open_positions, [])
+        self.assertEqual(second_report.events[0].exit_reason, "profit_protect_stop")
+        self.assertAlmostEqual(second_report.events[0].realized_pnl, 0.75)
+        self.assertGreater(second_report.events[0].realized_pnl or 0.0, 0.0)
+
     def test_exit_check_uses_ticker_price_for_positions_outside_signal_list(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = TradingStateStore(Path(temp_dir) / "state.json")

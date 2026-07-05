@@ -27,6 +27,7 @@ class TradingPosition:
     mode: str = "paper"
     client_order_id: str = ""
     exchange: str = "BINANCE"
+    highest_price: float | None = None
 
 
 @dataclass
@@ -129,10 +130,12 @@ class TradingStateStore:
 
     @staticmethod
     def _position_from_dict(payload: dict[str, object]) -> TradingPosition:
+        entry_price = float(payload["entry_price"])
+        highest_price = payload.get("highest_price")
         return TradingPosition(
             symbol=str(payload["symbol"]),
             quantity=float(payload["quantity"]),
-            entry_price=float(payload["entry_price"]),
+            entry_price=entry_price,
             quote_notional=float(payload["quote_notional"]),
             score=float(payload["score"]),
             grade=str(payload["grade"]),
@@ -142,6 +145,7 @@ class TradingStateStore:
             mode=str(payload.get("mode", "paper")),
             client_order_id=str(payload.get("client_order_id", "")),
             exchange=str(payload.get("exchange", "BINANCE")).upper(),
+            highest_price=float(highest_price) if highest_price is not None else entry_price,
         )
 
     @staticmethod
@@ -321,9 +325,10 @@ class AutoTrader:
             if price is None:
                 remaining.append(position)
                 continue
+            position = self._apply_profit_protection(position, price, config)
             exit_reason = ""
             if price <= position.stop_price:
-                exit_reason = "stop_loss"
+                exit_reason = "profit_protect_stop" if position.stop_price >= position.entry_price else "stop_loss"
             elif price >= position.take_profit_price:
                 exit_reason = "take_profit"
             if not exit_reason:
@@ -379,6 +384,7 @@ class AutoTrader:
             take_profit_price=price * (1 + config.take_profit_pct / 100),
             mode=config.mode,
             client_order_id=client_order_id,
+            highest_price=price,
         )
         if config.mode == "paper":
             return position, TradingEvent(
@@ -560,6 +566,14 @@ class AutoTrader:
             raise ValueError("最大总敞口不能小于单笔投入。")
         if config.stop_loss_pct <= 0 or config.take_profit_pct <= 0:
             raise ValueError("止损和止盈比例必须大于 0。")
+        if config.profit_protection_trigger_pct < 0:
+            raise ValueError("浮盈保护触发比例不能小于 0。")
+        if config.profit_protection_lock_pct < 0:
+            raise ValueError("浮盈保护锁盈比例不能小于 0。")
+        if config.trailing_stop_pct < 0:
+            raise ValueError("移动止损回撤比例不能小于 0。")
+        if config.profit_protection_enabled and config.profit_protection_lock_pct > config.profit_protection_trigger_pct:
+            raise ValueError("浮盈保护锁盈比例不能大于触发比例。")
 
     @staticmethod
     def _live_confirmed() -> bool:
@@ -633,4 +647,25 @@ class AutoTrader:
             mode=position.mode,
             client_order_id=position.client_order_id,
             exchange=position.exchange,
+            highest_price=entry_price,
         )
+
+    @staticmethod
+    def _apply_profit_protection(
+        position: TradingPosition,
+        price: float,
+        config: AutoTradeDefaults,
+    ) -> TradingPosition:
+        highest_price = max(position.highest_price or position.entry_price, price)
+        if not config.profit_protection_enabled or position.entry_price <= 0:
+            position.highest_price = highest_price
+            return position
+        peak_return_pct = ((highest_price - position.entry_price) / position.entry_price) * 100
+        if peak_return_pct < config.profit_protection_trigger_pct:
+            position.highest_price = highest_price
+            return position
+        locked_stop = position.entry_price * (1 + config.profit_protection_lock_pct / 100)
+        trailing_stop = highest_price * (1 - config.trailing_stop_pct / 100) if config.trailing_stop_pct > 0 else locked_stop
+        position.highest_price = highest_price
+        position.stop_price = max(position.stop_price, locked_stop, trailing_stop)
+        return position

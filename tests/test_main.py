@@ -1131,6 +1131,8 @@ class MainTests(unittest.TestCase):
         self.assertIn('href="/terminal/market"', html)
         self.assertIn('href="/terminal/community"', html)
         self.assertIn('href="/terminal/trading"', html)
+        self.assertIn("2026-04-28 00:00:00", html)
+        self.assertNotIn("2026-04-28T00:00:00+00:00", html)
 
     def test_fast_market_module_payload_uses_live_exchange_interfaces(self) -> None:
         config = RuntimeConfig()
@@ -1680,6 +1682,8 @@ class MainTests(unittest.TestCase):
         self.assertIn("Run Auto Trade Once", html)
         self.assertIn("Paper Filled", html)
         self.assertIn("Paper buy recorded.", html)
+        self.assertIn("2026-04-28 00:00:00", html)
+        self.assertNotIn("2026-04-28T00:00:00+00:00", html)
 
     def test_render_trading_page_shows_latest_events_first(self) -> None:
         html = render_trading_page(
