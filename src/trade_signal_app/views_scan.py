@@ -278,6 +278,22 @@ def _signal_table(signals: list[dict[str, object]], lang: str) -> str:
     """
 
 
+def _signal_score_sort_key(signal: dict[str, object]) -> tuple[float, float, str]:
+    try:
+        score = float(signal.get("score") or 0.0)
+    except (TypeError, ValueError):
+        score = 0.0
+    try:
+        quote_volume_m = float(signal.get("quote_volume_m") or 0.0)
+    except (TypeError, ValueError):
+        quote_volume_m = 0.0
+    return (-score, -quote_volume_m, str(signal.get("symbol") or ""))
+
+
+def _sort_signals_by_score(signals: list[dict[str, object]]) -> list[dict[str, object]]:
+    return sorted(signals, key=_signal_score_sort_key)
+
+
 def render_index_page(
     summary: dict[str, object],
     signals: list[dict[str, object]],
@@ -293,10 +309,11 @@ def render_index_page(
         view_mode = "cards"
     cards_class = "active" if view_mode == "cards" else ""
     table_class = "active" if view_mode == "table" else ""
+    ordered_signals = _sort_signals_by_score(signals)
     signal_results = (
-        _signal_table(signals, active_lang)
+        _signal_table(ordered_signals, active_lang)
         if view_mode == "table"
-        else f'<section class="signal-grid">{"".join(_signal_card(signal) for signal in signals) or _signal_empty_state(active_lang)}</section>'
+        else f'<section class="signal-grid">{"".join(_signal_card(signal) for signal in ordered_signals) or _signal_empty_state(active_lang)}</section>'
     )
     scan_warning = str(summary.get("warning") or "")
     scan_notice = ""
@@ -359,7 +376,7 @@ def render_index_page(
         <p class="helper-text">
           {t("数据来自 Binance Spot 市场接口。社区热度支持 Binance/OKX 官方热点、X/Twitter、Reddit 和本地", "Market data comes from Binance Spot APIs. Community heat supports Binance/OKX official trends, X/Twitter, Reddit, and local")} <code>data/community_scores.csv</code>{t("，未配置时会自动忽略不可用来源。", "; unavailable sources are skipped automatically.")}
         </p>
-        {_community_operation_panel(params, signals, active_lang)}
+        {_community_operation_panel(params, ordered_signals, active_lang)}
         <div class="scan-view-bar">
           <span>{t("展示模式", "View Mode")}</span>
           <div class="view-toggle" aria-label="{t("展示模式", "View mode")}">
@@ -394,5 +411,6 @@ __all__ = [
     '_signal_empty_state',
     '_signal_card',
     '_signal_table',
+    '_sort_signals_by_score',
     'render_index_page',
 ]

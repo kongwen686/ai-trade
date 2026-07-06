@@ -56,12 +56,35 @@ def _scan_cache_key(params: dict[str, object]) -> tuple[object, ...]:
     )
 
 
+def _signal_sort_key(signal: dict[str, object]) -> tuple[float, float, str]:
+    try:
+        score = float(signal.get("score") or 0.0)
+    except (TypeError, ValueError):
+        score = 0.0
+    try:
+        quote_volume_m = float(signal.get("quote_volume_m") or 0.0)
+    except (TypeError, ValueError):
+        quote_volume_m = 0.0
+    return (-score, -quote_volume_m, str(signal.get("symbol") or ""))
+
+
+def _sort_scan_payload_signals(payload: dict[str, object]) -> dict[str, object]:
+    signals = payload.get("signals")
+    if isinstance(signals, list):
+        payload = dict(payload)
+        payload["signals"] = sorted(
+            [signal for signal in signals if isinstance(signal, dict)],
+            key=_signal_sort_key,
+        )
+    return payload
+
+
 def _cached_scan_payload(cache_key: tuple[object, ...]) -> dict[str, object] | None:
     now = now_app_time()
     with _SCAN_CACHE_LOCK:
         cached = _SCAN_PAYLOAD_CACHE.get(cache_key)
         if cached and cached[0] > now:
-            payload = dict(cached[1])
+            payload = _sort_scan_payload_signals(dict(cached[1]))
             payload["cached"] = True
             return payload
     return None
@@ -76,6 +99,7 @@ def _store_scan_payload(cache_key: tuple[object, ...], payload: dict[str, object
 
 
 def _annotate_scan_summary(payload: dict[str, object]) -> dict[str, object]:
+    payload = _sort_scan_payload_signals(payload)
     summary = payload.get("summary")
     if isinstance(summary, dict):
         summary["fallback"] = bool(payload.get("fallback"))
@@ -351,6 +375,8 @@ __all__ = [
     '_SCAN_INFLIGHT',
     '_SCAN_EXECUTOR',
     '_scan_cache_key',
+    '_signal_sort_key',
+    '_sort_scan_payload_signals',
     '_cached_scan_payload',
     '_store_scan_payload',
     '_annotate_scan_summary',

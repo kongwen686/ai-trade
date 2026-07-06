@@ -362,6 +362,50 @@ class MainTests(unittest.TestCase):
         self.assertEqual(len(payload["signals"]), 30)
         self.assertEqual(payload["signals"][0]["symbol"], "TEST00USDT")
 
+    def test_scan_payload_sorts_signals_by_score_descending(self) -> None:
+        def signal(symbol: str, score: float, quote_volume: float) -> SimpleNamespace:
+            return SimpleNamespace(
+                symbol=symbol,
+                score=score,
+                grade="B",
+                reasons=[],
+                warnings=[],
+                ticker=SimpleNamespace(
+                    last_price=100.0,
+                    price_change_percent=1.0,
+                    quote_volume=quote_volume,
+                ),
+                indicators=SimpleNamespace(
+                    rsi_14=55.0,
+                    ema_spread_pct=0.5,
+                    volume_ratio=1.2,
+                    macd_hist=0.01,
+                ),
+            )
+
+        scanner = Mock()
+        scanner.scan.return_value = (
+            {"scanned_symbols": 3, "returned_signals": 3, "quote_asset": "USDT", "interval": "4h", "min_quote_volume": 0},
+            [
+                signal("MIDUSDT", 72.0, 30_000_000.0),
+                signal("HIGHUSDT", 86.0, 10_000_000.0),
+                signal("LOWUSDT", 61.0, 50_000_000.0),
+            ],
+        )
+        config = RuntimeConfig()
+        with app_main._SCAN_CACHE_LOCK:
+            app_main._SCAN_PAYLOAD_CACHE.clear()
+            app_main._SCAN_INFLIGHT.clear()
+        try:
+            with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, scanner)):
+                payload, _ = _scan_payload({}, force_refresh=True)
+        finally:
+            with app_main._SCAN_CACHE_LOCK:
+                app_main._SCAN_PAYLOAD_CACHE.clear()
+                app_main._SCAN_INFLIGHT.clear()
+
+        self.assertEqual([item["symbol"] for item in payload["signals"]], ["HIGHUSDT", "MIDUSDT", "LOWUSDT"])
+
     def test_render_index_page_supports_table_view_mode(self) -> None:
         html = render_index_page(
             summary={
@@ -427,6 +471,61 @@ class MainTests(unittest.TestCase):
         self.assertIn("PAGE_SIZE = 15", html)
         self.assertIn('document.querySelectorAll("table.data-table")', html)
         self.assertIn('document.querySelectorAll(".signal-grid")', html)
+
+    def test_render_index_page_orders_cards_and_table_by_score(self) -> None:
+        def signal(symbol: str, score: float) -> dict[str, object]:
+            return {
+                "symbol": symbol,
+                "grade": "B",
+                "score": score,
+                "reasons": ["reason"],
+                "warnings": [],
+                "last_price": 100.0,
+                "quote_volume_m": 10.0,
+                "price_change_percent": 1.0,
+                "rsi_14": 55.0,
+                "ema_spread_pct": 0.5,
+                "volume_ratio": 1.2,
+                "macd_hist": 0.01,
+                "community_score": None,
+                "community_source": None,
+                "community_mentions": None,
+                "community_sentiment": None,
+                "community_summary": "",
+                "community_drivers": [],
+                "community_risks": [],
+                "community_samples": [],
+                "breakdown": {"trend": 60, "momentum": 50},
+                "sparkline_points": "0,20 80,10 160,4",
+            }
+
+        summary = {
+            "scanned_symbols": 3,
+            "returned_signals": 3,
+            "eligible_symbols": 3,
+            "candidate_symbols": 3,
+            "candidate_pool": 3,
+            "quote_asset": "USDT",
+            "interval": "4h",
+            "min_quote_volume": 0,
+        }
+        params = {
+            "quote_asset": "USDT",
+            "interval": "4h",
+            "candidate_pool": 5,
+            "min_quote_volume": 0,
+            "min_trade_count": 0,
+            "view_mode": "cards",
+        }
+        signals = [signal("LOWUSDT", 61.0), signal("HIGHUSDT", 86.0), signal("MIDUSDT", 72.0)]
+
+        cards_html = render_index_page(summary=summary, signals=signals, params=params, intervals=["4h"])
+        table_html = render_index_page(summary=summary, signals=signals, params={**params, "view_mode": "table"}, intervals=["4h"])
+
+        self.assertLess(cards_html.find("HIGHUSDT"), cards_html.find("MIDUSDT"))
+        self.assertLess(cards_html.find("MIDUSDT"), cards_html.find("LOWUSDT"))
+        self.assertLess(table_html.find("HIGHUSDT"), table_html.find("MIDUSDT"))
+        self.assertLess(table_html.find("MIDUSDT"), table_html.find("LOWUSDT"))
 
     def test_render_index_page_shows_token_community_detail_on_cards(self) -> None:
         html = render_index_page(

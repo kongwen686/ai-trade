@@ -7316,3 +7316,109 @@ body {
     width: 100%;
   }
 }
+
+/* Signal scan cards can receive long symbols, social summaries, and tags from
+   external sources. Keep every scan result self-contained inside the card. */
+.signal-grid {
+  align-items: stretch;
+}
+
+.signal-card {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.signal-card *,
+.signal-table * {
+  min-width: 0;
+}
+
+.signal-topline > div:first-child {
+  min-width: 0;
+}
+
+.signal-card .symbol {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.signal-card .subline,
+.metric-row strong,
+.card-footer span,
+.community-detail-body,
+.community-detail-body p,
+.community-samples li,
+.table-tags,
+.table-tag,
+.community-cell,
+.community-cell-main span {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.signal-card .score-badge {
+  flex: 0 0 auto;
+}
+
+.signal-card .metric-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+}
+
+.signal-card .metric-row > div {
+  min-width: 0;
+}
+
+.signal-card .chips {
+  max-width: 100%;
+}
+
+.signal-card .chip,
+.signal-card .ant-tag {
+  max-width: 100%;
+  white-space: normal;
+  line-height: 1.35;
+}
+
+.signal-card .community-detail {
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.signal-card .community-detail-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.signal-card .card-footer {
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.signal-table {
+  table-layout: fixed;
+}
+
+.signal-table th,
+.signal-table td {
+  vertical-align: top;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.signal-table .numeric {
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .signal-card .metric-row,
+  .signal-card .community-detail-grid {
+    grid-template-columns: 1fr;
+  }
+}
