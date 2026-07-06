@@ -14,6 +14,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .models import Candlestick, MarketTicker, utc_datetime_from_epoch
+from .ssl_compat import create_default_ssl_context
 
 
 class BinancePublicAPIError(RuntimeError):
@@ -42,6 +43,7 @@ class BinanceSpotGateway:
         self._cache: dict[str, TimedValue] = {}
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self._ssl_context = create_default_ssl_context()
         self._api_key = api_key
         self._api_secret = api_secret
         self._recv_window_ms = recv_window_ms
@@ -75,7 +77,7 @@ class BinanceSpotGateway:
         last_error: Exception | None = None
         for attempt in range(3):
             try:
-                with urlopen(request, timeout=self._timeout) as response:
+                with urlopen(request, timeout=self._timeout, context=self._ssl_context) as response:
                     return json.load(response)
             except HTTPError as exc:
                 detail = self._extract_http_error_detail(exc)
@@ -124,7 +126,7 @@ class BinanceSpotGateway:
             },
         )
         try:
-            with urlopen(request, timeout=self._timeout) as response:
+            with urlopen(request, timeout=self._timeout, context=self._ssl_context) as response:
                 return json.load(response)
         except HTTPError as exc:
             detail = self._extract_http_error_detail(exc)

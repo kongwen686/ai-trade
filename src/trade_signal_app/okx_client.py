@@ -13,6 +13,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from .ssl_compat import create_default_ssl_context
+
 
 class OKXAPIError(RuntimeError):
     pass
@@ -40,6 +42,7 @@ class OKXSpotGateway:
         self._cache: dict[str, TimedValue] = {}
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self._ssl_context = create_default_ssl_context()
         self._api_key = api_key
         self._api_secret = api_secret
         self._passphrase = passphrase
@@ -124,7 +127,7 @@ class OKXSpotGateway:
         last_error: Exception | None = None
         for attempt in range(3):
             try:
-                with urlopen(request, timeout=self._timeout) as response:
+                with urlopen(request, timeout=self._timeout, context=self._ssl_context) as response:
                     data = json.load(response)
                 if isinstance(data, dict) and str(data.get("code", "0")) not in {"0", ""}:
                     message = str(data.get("msg") or data.get("code") or "OKX API error")

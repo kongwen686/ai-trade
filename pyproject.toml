@@ -7,7 +7,7 @@ name = "trade-signal-app"
 description = "A Binance-powered spot signal scanner with an extensible scoring engine."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["certifi>=2024.2.2"]
 dynamic = ["version"]
 
 [project.scripts]
