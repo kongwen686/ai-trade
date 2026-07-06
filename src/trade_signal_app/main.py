@@ -7,8 +7,6 @@ from http.cookies import SimpleCookie
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import argparse
-import csv
-import io
 import json
 import os
 from threading import Event, RLock, Thread
@@ -16,32 +14,22 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from . import __version__
 from .app_state import AppState
-from .backtest import (
-    bars_per_day,
-    group_archives,
-    merge_candles,
-    resolve_archive_paths,
-    resolve_execution_config_from_binance,
-    run_backtest_for_series,
-    run_overnight_seasonality_backtest,
-    run_portfolio_backtest,
-    run_rebalance_premium_backtest,
-)
+from .backtest import resolve_execution_config_from_binance
 from .binance_client import BinancePublicAPIError, parse_ticker
 from .config import BASE_DIR, SETTINGS
-from .data_services import LLM_PROVIDER_PRESETS, PUBLIC_DATA_PRESETS, get_llm_provider, llm_provider_ids, public_data_preset_ids
 from .feishu import FeishuNotificationError, FeishuTradeNotifier
 from .intelligence import IntelligenceHub, IntelligenceSnapshot, LlmInsightClient
 from .okx_client import OKXSpotGateway
 from .onchain import DEFAULT_ONCHAIN_SYMBOLS, OPEN_MULTICHAIN_CONFIGS, OpenMultiChainOnchainProvider
 from .platform import build_platform_snapshot, okx_credential_state
-from .presets import apply_backtest_preset, list_backtest_presets
-from .runtime_config import AutoTradeDefaults, BacktestDefaults, IntelligenceDefaults, RuntimeConfig, ScanDefaults
-from .strategy import EntryRuleConfig, ExecutionConfig, ExitRuleConfig
+from .presets import list_backtest_presets
+from .runtime_config import AutoTradeDefaults, RuntimeConfig
+from . import main_settings as settings_handlers
+from . import main_backtest as backtest_handlers
+from . import main_scan as scan_handlers
+from .main_request_body import _read_body, _strategy_description_from_body
 from .strategy_builder import compile_strategy
 from .trading import AutoTrader, LIVE_CONFIRM_VALUE, TradingEvent, TradingPosition, TradingRunReport, TradingStateStore
-from .tradingview_data import TRADINGVIEW_INTERVALS, fetch_tradingview_history
-from .ui import format_backtest_report, format_portfolio_report, format_rebalance_premium_report, format_signal_row
 from .views import normalize_language, render_backtest_page, render_index_page, render_settings_page, render_terminal_module_page, render_terminal_page, render_trading_page
 
 RUNTIME_CONFIG_PATH = BASE_DIR / "data" / "runtime_config.json"
@@ -55,7 +43,6 @@ ONCHAIN_SYNC_TIMEOUT_SECONDS = 6.0
 ONCHAIN_WORKBENCH_SYNC_TIMEOUT_SECONDS = 6.0
 LLM_WORKBENCH_TIMEOUT_SECONDS = 8
 OKX_GATEWAY_TIMEOUT_SECONDS = 5
-SCAN_SYNC_TIMEOUT_SECONDS = 0.8
 TERMINAL_MODULES = {"market", "community", "onchain", "basis", "strategies", "trading", "risk"}
 _TERMINAL_CACHE_LOCK = RLock()
 _TERMINAL_CACHE: dict[str, object] = {"key": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc), "payload": None}
@@ -65,10 +52,6 @@ _ONCHAIN_MODULE_CACHE_LOCK = RLock()
 _ONCHAIN_MODULE_CACHE: dict[str, object] = {"key": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc), "payload": None}
 _ONCHAIN_INFLIGHT: dict[tuple[object, ...], Future] = {}
 _ONCHAIN_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="onchain-refresh")
-_SCAN_CACHE_LOCK = RLock()
-_SCAN_PAYLOAD_CACHE: dict[tuple[object, ...], tuple[datetime, dict[str, object]]] = {}
-_SCAN_INFLIGHT: dict[tuple[object, ...], Future] = {}
-_SCAN_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="scan-refresh")
 PAPER_AUTO_DEFAULT_INTERVAL_SECONDS = 300
 PAPER_AUTO_MIN_INTERVAL_SECONDS = 30
 _PAPER_AUTO_LOCK = RLock()
@@ -84,20 +67,37 @@ _PAPER_AUTO_STATE: dict[str, object] = {
     "run_count": 0,
     "last_result": None,
 }
-SCAN_INTERVALS = {"15m", "1h", "4h", "1d"}
-SCAN_VIEW_MODES = {"cards", "table"}
-AUTOTRADE_MODES = {"paper", "live"}
-AUTOTRADE_EXCHANGES = {"binance", "okx"}
-X_ACCOUNT_MODES = {"off", "blend", "only"}
-X_PROVIDERS = {"official_api", "nitter_rss", "session_scrape"}
-FEE_MODELS = {"flat", "maker_taker"}
-FEE_SOURCES = {"manual", "account", "symbol"}
-FEE_ROLES = {"maker", "taker"}
-SLIPPAGE_MODELS = {"fixed", "dynamic"}
-TRADINGVIEW_INTERVAL_CHOICES = set(TRADINGVIEW_INTERVALS)
-MARKET_DATA_PRESETS = public_data_preset_ids("market")
-ONCHAIN_DATA_PRESETS = public_data_preset_ids("onchain")
-LLM_PROVIDERS = llm_provider_ids()
+_validate_runtime_config = settings_handlers._validate_runtime_config
+_scan_params_from_config = settings_handlers._scan_params_from_config
+_backtest_params_from_config = settings_handlers._backtest_params_from_config
+_settings_params_from_config = settings_handlers._settings_params_from_config
+
+
+def _settings_status_from_config(config: RuntimeConfig) -> dict[str, object]:
+    return settings_handlers._settings_status_from_config(
+        config,
+        storage_mode=APP_STATE.storage_mode_label(),
+        tradingview_cache_dir=TRADINGVIEW_CACHE_DIR,
+    )
+
+
+def _settings_context() -> tuple[dict[str, object], dict[str, object]]:
+    runtime_config, _ = APP_STATE.snapshot()
+    return _settings_params_from_config(runtime_config), _settings_status_from_config(runtime_config)
+
+
+def _import_runtime_config_template(form: dict[str, list[str]]) -> RuntimeConfig:
+    current_config, _ = APP_STATE.snapshot()
+    return settings_handlers._import_runtime_config_template(
+        form,
+        current_config=current_config,
+        settings=SETTINGS,
+    )
+
+
+def _build_runtime_config(form: dict[str, list[str]]) -> RuntimeConfig:
+    current_config, _ = APP_STATE.snapshot()
+    return settings_handlers._build_runtime_config(form, current_config=current_config)
 
 
 def _to_jsonable(value: object) -> object:
@@ -149,261 +149,6 @@ def _validate_range(value: float, label: str, *, minimum: float | None = None, m
         raise ValueError(f"{label} 不能小于 {minimum:g}。")
     if maximum is not None and value > maximum:
         raise ValueError(f"{label} 不能大于 {maximum:g}。")
-
-
-def _validate_runtime_config(config: RuntimeConfig) -> None:
-    _validate_choice(config.scan_defaults.interval, "Scan Interval", SCAN_INTERVALS)
-    _validate_choice(config.autotrade_defaults.mode, "Auto Trade Mode", AUTOTRADE_MODES)
-    _validate_choice(config.autotrade_defaults.execution_exchange, "Auto Trade Exchange", AUTOTRADE_EXCHANGES)
-    _validate_choice(config.x_account_mode, "X Account Mode", X_ACCOUNT_MODES)
-    _validate_choice(config.x_provider, "X Provider", X_PROVIDERS)
-    _validate_choice(config.market_data_preset, "Market Data Preset", MARKET_DATA_PRESETS)
-    _validate_choice(config.tradingview_interval, "TradingView Interval", TRADINGVIEW_INTERVAL_CHOICES)
-    _validate_choice(config.onchain_data_preset, "On-chain Data Preset", ONCHAIN_DATA_PRESETS)
-    _validate_choice(config.llm_provider, "LLM Provider", LLM_PROVIDERS)
-    _validate_choice(config.backtest_defaults.fee_model, "Backtest Fee Model", FEE_MODELS)
-    _validate_choice(config.backtest_defaults.fee_source, "Backtest Fee Source", FEE_SOURCES)
-    _validate_choice(config.backtest_defaults.entry_fee_role, "Backtest Entry Fee Role", FEE_ROLES)
-    _validate_choice(config.backtest_defaults.exit_fee_role, "Backtest Exit Fee Role", FEE_ROLES)
-    _validate_choice(config.backtest_defaults.slippage_model, "Backtest Slippage Model", SLIPPAGE_MODELS)
-    preset_ids = {str(item["preset_id"]) for item in list_backtest_presets()}
-    _validate_choice(config.backtest_defaults.preset, "Backtest Preset", preset_ids)
-
-    _validate_range(config.binance_recv_window_ms, "Binance RecvWindow", minimum=1)
-    _validate_range(config.x_recent_window_hours, "X Window Hours", minimum=1)
-    _validate_range(config.x_recent_max_results, "X Max Results", minimum=10, maximum=100)
-    _validate_range(config.reddit_recent_window_hours, "Reddit Window Hours", minimum=1)
-    _validate_range(config.reddit_max_results, "Reddit Max Results", minimum=5, maximum=100)
-    _validate_range(config.x_account_weight_pct, "Account Weight", minimum=0, maximum=100)
-    _validate_range(config.tradingview_bars, "TradingView Bars", minimum=100, maximum=50000)
-    if config.feishu_webhook_url and not config.feishu_webhook_url.startswith(("http://", "https://")):
-        raise ValueError("Feishu Webhook URL 必须以 http:// 或 https:// 开头。")
-    if not config.tradingview_exchange.strip().isalnum():
-        raise ValueError("TradingView Exchange 只能包含字母和数字。")
-    if not config.tradingview_symbols:
-        raise ValueError("TradingView Symbols 至少需要填写一个标的。")
-    for symbol in config.tradingview_symbols:
-        if not symbol.replace("-", "").replace("_", "").isalnum():
-            raise ValueError("TradingView Symbols 只能包含字母、数字、横线或下划线。")
-
-    scan = config.scan_defaults
-    _validate_range(scan.candidate_pool, "Candidate Pool", minimum=5, maximum=40)
-    _validate_range(scan.min_quote_volume, "Min Quote Volume", minimum=0)
-    _validate_range(scan.min_trade_count, "Min Trade Count", minimum=0)
-    if not scan.quote_asset.strip().isalnum():
-        raise ValueError("Quote Asset 只能包含字母和数字。")
-
-    autotrade = config.autotrade_defaults
-    _validate_range(autotrade.quote_order_qty, "Auto Trade Quote Order Qty", minimum=0.01)
-    _validate_range(autotrade.max_open_positions, "Auto Trade Max Open Positions", minimum=1)
-    _validate_range(autotrade.max_total_quote_exposure, "Auto Trade Max Exposure", minimum=0.01)
-    _validate_range(autotrade.score_threshold, "Auto Trade Score Threshold", minimum=0, maximum=100)
-    _validate_range(autotrade.min_volume_ratio, "Auto Trade Min Volume Ratio", minimum=0)
-    _validate_range(autotrade.min_buy_pressure, "Auto Trade Min Buy Pressure", minimum=0, maximum=1)
-    _validate_range(autotrade.stop_loss_pct, "Auto Trade Stop Loss", minimum=0.1)
-    _validate_range(autotrade.take_profit_pct, "Auto Trade Take Profit", minimum=0.1)
-    _validate_range(autotrade.profit_protection_trigger_pct, "Auto Trade Profit Protection Trigger", minimum=0)
-    _validate_range(autotrade.profit_protection_lock_pct, "Auto Trade Profit Protection Lock", minimum=0)
-    _validate_range(autotrade.trailing_stop_pct, "Auto Trade Trailing Stop", minimum=0)
-    if autotrade.profit_protection_enabled and autotrade.profit_protection_lock_pct > autotrade.profit_protection_trigger_pct:
-        raise ValueError("Auto Trade Profit Protection Lock 不能大于 Trigger。")
-    _validate_range(autotrade.cooldown_minutes, "Auto Trade Cooldown", minimum=0)
-
-    intelligence = config.intelligence_defaults
-    _validate_range(intelligence.min_intel_severity, "Intelligence Min Severity", minimum=0, maximum=100)
-    _validate_range(intelligence.min_spread_bps, "Intelligence Min Spread", minimum=0)
-    _validate_range(intelligence.whale_transfer_threshold_usd, "Whale Transfer Threshold", minimum=0)
-
-    backtest = config.backtest_defaults
-    _validate_range(backtest.lookback_bars, "Lookback Bars", minimum=60)
-    _validate_range(backtest.portfolio_top_n, "Portfolio Top N", minimum=0)
-    _validate_range(backtest.cooldown_bars, "Cooldown Bars", minimum=0)
-    _validate_range(backtest.stop_loss_pct, "Backtest Stop Loss", minimum=0)
-    _validate_range(backtest.take_profit_pct, "Backtest Take Profit", minimum=0)
-    _validate_range(backtest.max_holding_bars, "Max Holding Bars", minimum=1)
-    _validate_range(backtest.fee_bps, "Fee bps", minimum=0)
-    _validate_range(backtest.maker_fee_bps, "Maker Fee", minimum=0)
-    _validate_range(backtest.taker_fee_bps, "Taker Fee", minimum=0)
-    _validate_range(backtest.fee_discount_pct, "Fee Discount", minimum=0, maximum=100)
-    _validate_range(backtest.slippage_bps, "Slippage bps", minimum=0)
-    _validate_range(backtest.min_slippage_bps, "Min Slippage", minimum=0)
-    _validate_range(backtest.max_slippage_bps, "Max Slippage", minimum=0)
-    _validate_range(backtest.slippage_window_bars, "Slip Window", minimum=1)
-    _validate_range(backtest.capital_fraction_pct, "Capital", minimum=0, maximum=100)
-    _validate_range(backtest.max_portfolio_exposure_pct, "Max Exposure", minimum=0, maximum=100)
-    _validate_range(backtest.max_concurrent_positions, "Max Concurrent", minimum=0)
-    _validate_range(backtest.min_volume_ratio, "Backtest Min Volume Ratio", minimum=0)
-    _validate_range(backtest.min_buy_pressure, "Backtest Min Buy Pressure", minimum=0, maximum=1)
-    _validate_range(backtest.min_rsi, "Min RSI", minimum=0, maximum=100)
-    _validate_range(backtest.max_rsi, "Max RSI", minimum=0, maximum=100)
-    if backtest.min_rsi > backtest.max_rsi:
-        raise ValueError("Min RSI 不能大于 Max RSI。")
-
-
-def _scan_params_from_config(config: RuntimeConfig) -> dict[str, object]:
-    return {
-        "quote_asset": config.scan_defaults.quote_asset,
-        "interval": config.scan_defaults.interval,
-        "candidate_pool": config.scan_defaults.candidate_pool,
-        "min_quote_volume": int(config.scan_defaults.min_quote_volume),
-        "min_trade_count": config.scan_defaults.min_trade_count,
-    }
-
-
-def _backtest_params_from_config(config: RuntimeConfig) -> dict[str, object]:
-    defaults = config.backtest_defaults
-    params = {
-        "preset": defaults.preset,
-        "archives": defaults.archives,
-        "lookback_bars": defaults.lookback_bars,
-        "score_threshold": defaults.score_threshold,
-        "holding_periods": defaults.holding_periods,
-        "portfolio_top_n": defaults.portfolio_top_n,
-        "cooldown_bars": defaults.cooldown_bars,
-        "stop_loss_pct": defaults.stop_loss_pct,
-        "take_profit_pct": defaults.take_profit_pct,
-        "max_holding_bars": defaults.max_holding_bars,
-        "fee_bps": defaults.fee_bps,
-        "fee_model": defaults.fee_model,
-        "fee_source": defaults.fee_source,
-        "maker_fee_bps": defaults.maker_fee_bps,
-        "taker_fee_bps": defaults.taker_fee_bps,
-        "entry_fee_role": defaults.entry_fee_role,
-        "exit_fee_role": defaults.exit_fee_role,
-        "fee_discount_pct": defaults.fee_discount_pct,
-        "no_binance_discount": defaults.no_binance_discount,
-        "slippage_bps": defaults.slippage_bps,
-        "slippage_model": defaults.slippage_model,
-        "min_slippage_bps": defaults.min_slippage_bps,
-        "max_slippage_bps": defaults.max_slippage_bps,
-        "slippage_window_bars": defaults.slippage_window_bars,
-        "capital_fraction_pct": defaults.capital_fraction_pct,
-        "max_portfolio_exposure_pct": defaults.max_portfolio_exposure_pct,
-        "max_concurrent_positions": defaults.max_concurrent_positions,
-        "min_volume_ratio": defaults.min_volume_ratio,
-        "min_buy_pressure": defaults.min_buy_pressure,
-        "min_rsi": defaults.min_rsi,
-        "max_rsi": defaults.max_rsi,
-        "no_kdj_confirmation": defaults.no_kdj_confirmation,
-    }
-    return apply_backtest_preset(params, defaults.preset)
-
-
-def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
-    backtest = _backtest_params_from_config(config)
-    autotrade = config.autotrade_defaults
-    intelligence = config.intelligence_defaults
-    okx_state = okx_credential_state(config)
-    return {
-        "binance_recv_window_ms": config.binance_recv_window_ms,
-        "okx_auth_configured": bool(okx_state["configured"]),
-        "okx_auth_partial": bool(okx_state["partial"]),
-        "okx_auth_status": okx_state["status"],
-        "okx_auth_label": okx_state["label"],
-        "okx_auth_message": okx_state["message"],
-        "market_data_preset": config.market_data_preset,
-        "tradingview_username": config.tradingview_username,
-        "tradingview_exchange": config.tradingview_exchange,
-        "tradingview_symbols": config.tradingview_symbols,
-        "tradingview_interval": config.tradingview_interval,
-        "tradingview_bars": config.tradingview_bars,
-        "tradingview_cache_enabled": config.tradingview_cache_enabled,
-        "onchain_data_preset": config.onchain_data_preset,
-        "onchain_api_base_url": config.onchain_api_base_url,
-        "community_provider": config.community_provider,
-        "x_provider": config.x_provider,
-        "x_api_base_url": config.x_api_base_url,
-        "x_nitter_base_url": config.x_nitter_base_url,
-        "x_session_command": config.x_session_command,
-        "x_recent_window_hours": config.x_recent_window_hours,
-        "x_recent_max_results": config.x_recent_max_results,
-        "x_language": config.x_language,
-        "reddit_api_base_url": config.reddit_api_base_url,
-        "reddit_recent_window_hours": config.reddit_recent_window_hours,
-        "reddit_max_results": config.reddit_max_results,
-        "reddit_user_agent": config.reddit_user_agent,
-        "llm_provider": config.llm_provider,
-        "llm_base_url": config.llm_base_url,
-        "llm_model": config.llm_model,
-        "openai_model": config.openai_model,
-        "feishu_webhook_configured": bool(config.feishu_webhook_url),
-        "x_account_mode": config.x_account_mode,
-        "x_account_weight_pct": config.x_account_weight_pct,
-        "x_tracked_accounts": config.x_tracked_accounts,
-        "scan_quote_asset": config.scan_defaults.quote_asset,
-        "scan_interval": config.scan_defaults.interval,
-        "scan_candidate_pool": config.scan_defaults.candidate_pool,
-        "scan_min_quote_volume": int(config.scan_defaults.min_quote_volume),
-        "scan_min_trade_count": config.scan_defaults.min_trade_count,
-        "autotrade_enabled": autotrade.enabled,
-        "autotrade_mode": autotrade.mode,
-        "autotrade_execution_exchange": autotrade.execution_exchange,
-        "autotrade_quote_order_qty": autotrade.quote_order_qty,
-        "autotrade_max_open_positions": autotrade.max_open_positions,
-        "autotrade_max_total_quote_exposure": autotrade.max_total_quote_exposure,
-        "autotrade_score_threshold": autotrade.score_threshold,
-        "autotrade_min_volume_ratio": autotrade.min_volume_ratio,
-        "autotrade_min_buy_pressure": autotrade.min_buy_pressure,
-        "autotrade_stop_loss_pct": autotrade.stop_loss_pct,
-        "autotrade_take_profit_pct": autotrade.take_profit_pct,
-        "autotrade_profit_protection_enabled": autotrade.profit_protection_enabled,
-        "autotrade_profit_protection_trigger_pct": autotrade.profit_protection_trigger_pct,
-        "autotrade_profit_protection_lock_pct": autotrade.profit_protection_lock_pct,
-        "autotrade_trailing_stop_pct": autotrade.trailing_stop_pct,
-        "autotrade_cooldown_minutes": autotrade.cooldown_minutes,
-        "autotrade_order_test_only": autotrade.order_test_only,
-        "intelligence_enabled": intelligence.enabled,
-        "intelligence_llm_enabled": intelligence.llm_enabled,
-        "intelligence_llm_provider": intelligence.llm_provider,
-        "intelligence_llm_base_url": intelligence.llm_base_url,
-        "intelligence_llm_model": intelligence.llm_model,
-        "intelligence_openai_model": intelligence.openai_model,
-        "intelligence_min_intel_severity": intelligence.min_intel_severity,
-        "intelligence_min_spread_bps": intelligence.min_spread_bps,
-        "intelligence_whale_transfer_threshold_usd": intelligence.whale_transfer_threshold_usd,
-        **{f"backtest_{key}": value for key, value in backtest.items()},
-    }
-
-
-def _settings_status_from_config(config: RuntimeConfig) -> dict[str, object]:
-    okx_state = okx_credential_state(config)
-    return {
-        "binance_auth_configured": bool(config.binance_api_key and config.binance_api_secret),
-        "binance_auth_label": "API key + secret 已配置" if config.binance_api_key and config.binance_api_secret else "未配置",
-        "okx_auth_configured": bool(okx_state["configured"]),
-        "okx_auth_partial": bool(okx_state["partial"]),
-        "okx_auth_status": okx_state["status"],
-        "okx_auth_label": okx_state["label"],
-        "okx_auth_message": okx_state["message"],
-        "x_auth_configured": bool(config.x_bearer_token),
-        "x_provider": config.x_provider,
-        "x_provider_configured": (
-            bool(config.x_bearer_token)
-            if config.x_provider == "official_api"
-            else bool(config.x_nitter_base_url)
-            if config.x_provider == "nitter_rss"
-            else bool(config.x_session_command)
-        ),
-        "tracked_account_count": len(config.x_tracked_accounts),
-        "exchange_community_configured": bool(SETTINGS.exchange_community_urls),
-        "tradingview_auth_configured": bool(config.tradingview_username and config.tradingview_password),
-        "tradingview_cache_dir": str(TRADINGVIEW_CACHE_DIR),
-        "storage_mode": APP_STATE.storage_mode_label(),
-        "autotrade_enabled": config.autotrade_defaults.enabled,
-        "autotrade_mode": config.autotrade_defaults.mode,
-        "feishu_webhook_configured": bool(config.feishu_webhook_url),
-        "intelligence_enabled": config.intelligence_defaults.enabled,
-        "llm_enabled": config.intelligence_defaults.llm_enabled,
-        "llm_provider": config.intelligence_defaults.llm_provider,
-        "llm_configured": bool(config.intelligence_defaults.llm_api_key or config.intelligence_defaults.openai_api_key),
-        "public_data_presets": [preset.__dict__ for preset in PUBLIC_DATA_PRESETS],
-        "llm_provider_presets": [preset.__dict__ for preset in LLM_PROVIDER_PRESETS],
-    }
-
-
-def _settings_context() -> tuple[dict[str, object], dict[str, object]]:
-    runtime_config, _ = APP_STATE.snapshot()
-    return _settings_params_from_config(runtime_config), _settings_status_from_config(runtime_config)
 
 
 def _health_payload() -> dict[str, object]:
@@ -2545,303 +2290,28 @@ def _compiled_strategy_backtest_url(defaults: object) -> str:
     return f"/backtest?{urlencode(query)}" if query else "/backtest"
 
 
-def _read_body(handler: BaseHTTPRequestHandler) -> str:
-    length = int(handler.headers.get("Content-Length", "0"))
-    if length <= 0:
-        return ""
-    return handler.rfile.read(length).decode("utf-8")
-
-
-def _strategy_description_from_body(handler: BaseHTTPRequestHandler) -> tuple[str, dict[str, list[str]]]:
-    raw = _read_body(handler)
-    content_type = handler.headers.get("Content-Type", "")
-    if "application/json" in content_type:
-        try:
-            payload = json.loads(raw or "{}")
-        except json.JSONDecodeError as exc:
-            raise ValueError("JSON 请求体无效。") from exc
-        if not isinstance(payload, dict):
-            raise ValueError("JSON 请求体根节点必须是对象。")
-        description = str(payload.get("description") or payload.get("strategy_description") or "")
-        lang = str(payload.get("lang") or "")
-        form = {"strategy_description": [description]}
-        if lang:
-            form["lang"] = [lang]
-        return description.strip(), form
-    form = parse_qs(raw)
-    description = _get_first(form, "strategy_description", _get_first(form, "description", ""))
-    return description.strip(), form
-
-
-def _import_runtime_config_template(form: dict[str, list[str]]) -> RuntimeConfig:
-    raw_template = _get_first(form, "config_template", "").strip()
-    if not raw_template:
-        raise ValueError("请先粘贴配置模板 JSON。")
-
-    try:
-        payload = json.loads(raw_template)
-    except json.JSONDecodeError as exc:
-        raise ValueError("配置模板不是合法 JSON。") from exc
-    if not isinstance(payload, dict):
-        raise ValueError("配置模板根节点必须是 JSON 对象。")
-
-    current_config, _ = APP_STATE.snapshot()
-    config = RuntimeConfig.from_template_payload(payload, SETTINGS, current_config=current_config)
-    _validate_runtime_config(config)
-    return config
-
-
-def _scan_cache_key(params: dict[str, object]) -> tuple[object, ...]:
-    return (
-        params["quote_asset"],
-        params["interval"],
-        params["candidate_pool"],
-        params["min_quote_volume"],
-        params["min_trade_count"],
-        params.get("community_provider", ""),
-        params.get("x_provider", ""),
-        params.get("x_account_mode", ""),
-    )
-
-
-def _cached_scan_payload(cache_key: tuple[object, ...]) -> dict[str, object] | None:
-    now = datetime.now(timezone.utc)
-    with _SCAN_CACHE_LOCK:
-        cached = _SCAN_PAYLOAD_CACHE.get(cache_key)
-        if cached and cached[0] > now:
-            payload = dict(cached[1])
-            payload["cached"] = True
-            return payload
-    return None
-
-
-def _store_scan_payload(cache_key: tuple[object, ...], payload: dict[str, object]) -> None:
-    with _SCAN_CACHE_LOCK:
-        _SCAN_PAYLOAD_CACHE[cache_key] = (
-            datetime.now(timezone.utc) + timedelta(seconds=SETTINGS.scan_ttl_seconds),
-            dict(payload),
-        )
-
-
-def _annotate_scan_summary(payload: dict[str, object]) -> dict[str, object]:
-    summary = payload.get("summary")
-    if isinstance(summary, dict):
-        summary["fallback"] = bool(payload.get("fallback"))
-        warning = str(payload.get("warning") or "")
-        if warning:
-            summary["warning"] = warning
-    return payload
-
-
-def _run_scan_payload(scanner: object, params: dict[str, object]) -> dict[str, object]:
-    try:
-        summary, signals = scanner.scan(
-            quote_asset=str(params["quote_asset"]),
-            interval=str(params["interval"]),
-            candidate_pool=int(params["candidate_pool"]),
-            min_quote_volume=float(params["min_quote_volume"]),
-            min_trade_count=int(params["min_trade_count"]),
-        )
-    except TypeError:
-        summary, signals = scanner.scan()
-    return {
-        "summary": _to_jsonable(summary),
-        "signals": [_format_scan_signal_row(signal) for signal in signals],
-        "cached": False,
-        "fallback": False,
-    }
-
-
-def _format_scan_signal_row(signal: object) -> dict[str, object]:
-    try:
-        return format_signal_row(signal)  # type: ignore[arg-type]
-    except AttributeError:
-        ticker = getattr(signal, "ticker", object())
-        indicators = getattr(signal, "indicators", object())
-        return {
-            "symbol": getattr(signal, "symbol", ""),
-            "score": float(getattr(signal, "score", 0.0) or 0.0),
-            "grade": getattr(signal, "grade", "C"),
-            "reasons": list(getattr(signal, "reasons", []) or []),
-            "warnings": list(getattr(signal, "warnings", []) or []),
-            "last_price": float(getattr(ticker, "last_price", 0.0) or 0.0),
-            "quote_volume_m": float(getattr(ticker, "quote_volume", 0.0) or 0.0) / 1_000_000,
-            "price_change_percent": float(getattr(ticker, "price_change_percent", 0.0) or 0.0),
-            "rsi_14": float(getattr(indicators, "rsi_14", 50.0) or 50.0),
-            "ema_spread_pct": float(getattr(indicators, "ema_spread_pct", 0.0) or 0.0),
-            "volume_ratio": float(getattr(indicators, "volume_ratio", 1.0) or 1.0),
-            "macd_hist": float(getattr(indicators, "macd_hist", 0.0) or 0.0),
-            "community_score": None,
-            "community_source": None,
-            "community_mentions": None,
-            "community_sentiment": None,
-            "community_sample_size": None,
-            "community_summary": "",
-            "community_drivers": [],
-            "community_risks": [],
-            "community_samples": [],
-            "breakdown": {
-                "trend": 50.0,
-                "momentum": 50.0,
-                "timing": 50.0,
-                "volume": 50.0,
-                "liquidity": 50.0,
-                "market": 50.0,
-                "community": 0.0,
-            },
-            "sparkline_points": "",
-        }
-
-
-def _complete_scan_future(cache_key: tuple[object, ...], future: Future) -> None:
-    try:
-        payload = future.result()
-    except Exception:  # noqa: BLE001
-        payload = None
-    with _SCAN_CACHE_LOCK:
-        _SCAN_INFLIGHT.pop(cache_key, None)
-    if isinstance(payload, dict):
-        _store_scan_payload(cache_key, _annotate_scan_summary(payload))
+SCAN_SYNC_TIMEOUT_SECONDS = scan_handlers.SCAN_SYNC_TIMEOUT_SECONDS
+_SCAN_CACHE_LOCK = scan_handlers._SCAN_CACHE_LOCK
+_SCAN_PAYLOAD_CACHE = scan_handlers._SCAN_PAYLOAD_CACHE
+_SCAN_INFLIGHT = scan_handlers._SCAN_INFLIGHT
+_SCAN_EXECUTOR = scan_handlers._SCAN_EXECUTOR
+_scan_cache_key = scan_handlers._scan_cache_key
+_cached_scan_payload = scan_handlers._cached_scan_payload
+_store_scan_payload = scan_handlers._store_scan_payload
+_annotate_scan_summary = scan_handlers._annotate_scan_summary
+_run_scan_payload = scan_handlers._run_scan_payload
+_format_scan_signal_row = scan_handlers._format_scan_signal_row
+_complete_scan_future = scan_handlers._complete_scan_future
 
 
 def _fallback_scan_payload(params: dict[str, object], warning: str) -> dict[str, object]:
     _, scanner = APP_STATE.snapshot()
-    quote_asset = str(params["quote_asset"]).upper()
-    ticker_rows = []
-    ticker24hr_symbols = getattr(getattr(scanner, "gateway", None), "ticker24hr_symbols", None)
-    if callable(ticker24hr_symbols):
-        try:
-            ticker_rows = ticker24hr_symbols([symbol for symbol in MARKET_TICKER_SYMBOLS if symbol.endswith(quote_asset)])
-        except Exception:  # noqa: BLE001
-            ticker_rows = []
-    tickers = []
-    for row in ticker_rows:
-        try:
-            ticker = parse_ticker(row)
-        except (KeyError, TypeError, ValueError):
-            continue
-        if ticker.quote_volume >= float(params["min_quote_volume"]) and ticker.trade_count >= int(params["min_trade_count"]):
-            tickers.append(ticker)
-    tickers.sort(key=lambda item: item.quote_volume, reverse=True)
-    selected_tickers = tickers[: int(params["candidate_pool"])]
-    signals = []
-    for ticker in selected_tickers:
-        score = min(82.0, 50.0 + abs(ticker.price_change_percent) * 3 + min(ticker.quote_volume / 1_000_000_000, 10.0))
-        signals.append(
-            {
-                "symbol": ticker.symbol,
-                "score": round(score, 2),
-                "grade": "B" if score >= 70 else "C",
-                "reasons": ["实时 ticker 快速返回", f"24h 成交额 {ticker.quote_volume / 1_000_000:.1f}M"],
-                "warnings": [warning],
-                "last_price": ticker.last_price,
-                "quote_volume_m": ticker.quote_volume / 1_000_000,
-                "price_change_percent": ticker.price_change_percent,
-                "rsi_14": 50.0,
-                "ema_spread_pct": 0.0,
-                "volume_ratio": 1.0,
-                "macd_hist": 0.0,
-                "community_score": None,
-                "community_source": None,
-                "community_mentions": None,
-                "community_sentiment": None,
-                "community_sample_size": None,
-                "community_summary": "",
-                "community_drivers": [],
-                "community_risks": [],
-                "community_samples": [],
-                "breakdown": {
-                    "trend": 50.0,
-                    "momentum": 50.0,
-                    "timing": 50.0,
-                    "volume": 50.0,
-                    "liquidity": min(100.0, ticker.quote_volume / 10_000_000),
-                    "market": 50.0,
-                    "community": 0.0,
-                },
-                "sparkline_points": "",
-            }
-        )
-    return {
-        "summary": {
-            "quote_asset": quote_asset,
-            "interval": str(params["interval"]),
-            "scanned_symbols": len(selected_tickers),
-            "returned_signals": len(signals),
-            "min_quote_volume": float(params["min_quote_volume"]),
-            "min_trade_count": int(params["min_trade_count"]),
-            "fetched_at": datetime.now(timezone.utc).isoformat(),
-            "eligible_symbols": len(tickers),
-            "candidate_symbols": len(selected_tickers),
-            "candidate_pool": int(params["candidate_pool"]),
-        },
-        "signals": signals,
-        "cached": False,
-        "fallback": True,
-        "warning": warning,
-    }
+    return scan_handlers._fallback_scan_payload(params, warning, scanner=scanner)
 
 
 def _scan_payload(query: dict[str, list[str]]) -> tuple[dict[str, object], dict[str, object]]:
     runtime_config, scanner = APP_STATE.snapshot()
-    scan_defaults = runtime_config.scan_defaults
-    quote_asset = query.get("quote_asset", [scan_defaults.quote_asset])[0].upper()
-    interval = query.get("interval", [scan_defaults.interval])[0]
-    view_mode = _get_first(query, "view_mode", "cards")
-    _validate_choice(interval, "Scan Interval", SCAN_INTERVALS)
-    _validate_choice(view_mode, "Scan View Mode", SCAN_VIEW_MODES)
-    candidate_pool = _parse_query_int(query, "candidate_pool", scan_defaults.candidate_pool, "Candidate Pool")
-    min_quote_volume = _parse_query_float(query, "min_quote_volume", scan_defaults.min_quote_volume, "Min Quote Volume")
-    min_trade_count = _parse_query_int(query, "min_trade_count", scan_defaults.min_trade_count, "Min Trade Count")
-    _validate_range(candidate_pool, "Candidate Pool", minimum=5, maximum=40)
-    _validate_range(min_quote_volume, "Min Quote Volume", minimum=0)
-    _validate_range(min_trade_count, "Min Trade Count", minimum=0)
-
-    params = {
-        "quote_asset": quote_asset,
-        "interval": interval,
-        "candidate_pool": candidate_pool,
-        "min_quote_volume": int(min_quote_volume),
-        "min_trade_count": min_trade_count,
-        "view_mode": view_mode,
-        "community_provider": runtime_config.community_provider,
-        "x_provider": runtime_config.x_provider,
-        "x_account_mode": runtime_config.x_account_mode,
-        "x_provider_configured": (
-            bool(runtime_config.x_bearer_token)
-            if runtime_config.x_provider == "official_api"
-            else bool(runtime_config.x_nitter_base_url)
-            if runtime_config.x_provider == "nitter_rss"
-            else bool(runtime_config.x_session_command)
-        ),
-        "community_local_configured": any(
-            path.exists()
-            for path in (
-                SETTINGS.community_csv,
-                SETTINGS.community_news_csv,
-                SETTINGS.community_telegram_csv,
-            )
-        ),
-        "exchange_community_configured": bool(SETTINGS.exchange_community_urls),
-        "tracked_account_count": len(runtime_config.x_tracked_accounts),
-    }
-    cache_key = _scan_cache_key(params)
-    cached_payload = _cached_scan_payload(cache_key)
-    if cached_payload is not None:
-        return cached_payload, params
-    with _SCAN_CACHE_LOCK:
-        future = _SCAN_INFLIGHT.get(cache_key)
-        if future is None:
-            future = _SCAN_EXECUTOR.submit(_run_scan_payload, scanner, dict(params))
-            _SCAN_INFLIGHT[cache_key] = future
-            future.add_done_callback(lambda completed, key=cache_key: _complete_scan_future(key, completed))
-    try:
-        payload = future.result(timeout=SCAN_SYNC_TIMEOUT_SECONDS)
-    except FutureTimeoutError:
-        payload = _fallback_scan_payload(params, f"完整扫描超过 {SCAN_SYNC_TIMEOUT_SECONDS} 秒，已返回实时 ticker 快速结果，后台继续刷新。")
-    payload = _annotate_scan_summary(payload)
-    _store_scan_payload(cache_key, payload)
-    return payload, params
+    return scan_handlers._scan_payload(query, runtime_config=runtime_config, scanner=scanner)
 
 
 def _get_first(query: dict[str, list[str]], key: str, default: str) -> str:
@@ -2858,859 +2328,39 @@ def _runtime_bool(form: dict[str, list[str]], key: str, current: bool) -> bool:
     return _parse_bool_flag(form, key)
 
 
-def _path_with_lang(path: str, lang: str, **params: object) -> str:
-    query_params = {key: value for key, value in params.items() if value is not None}
-    if normalize_language(lang) == "en":
-        query_params["lang"] = "en"
-    if not query_params:
-        return path
-    return f"{path}?{urlencode(query_params)}"
-
-
-def _split_archives(value: str) -> list[str]:
-    items = []
-    for raw in value.replace(",", "\n").splitlines():
-        item = raw.strip()
-        if item:
-            items.append(item)
-    return items
+_path_with_lang = backtest_handlers._path_with_lang
+_split_archives = backtest_handlers._split_archives
+_empty_backtest_payload = backtest_handlers._empty_backtest_payload
+_backtest_export_csv = backtest_handlers._backtest_export_csv
 
 
 def _tradingview_fetch_result(form: dict[str, list[str]]) -> dict[str, object]:
     runtime_config, _ = APP_STATE.snapshot()
-    symbol = _get_first(
+    return backtest_handlers._tradingview_fetch_result(
         form,
-        "tradingview_symbol",
-        runtime_config.tradingview_symbols[0] if runtime_config.tradingview_symbols else "BTCUSDT",
-    ).strip().upper()
-    exchange = _get_first(form, "tradingview_exchange", runtime_config.tradingview_exchange).strip().upper() or "BINANCE"
-    interval = _get_first(form, "tradingview_interval", runtime_config.tradingview_interval).strip() or runtime_config.tradingview_interval
-    bars = _parse_int_value(_get_first(form, "tradingview_bars", str(runtime_config.tradingview_bars)), "TradingView Bars")
-    _validate_range(bars, "TradingView Bars", minimum=100, maximum=50000)
-
-    result = fetch_tradingview_history(
-        cache_root=TRADINGVIEW_CACHE_DIR,
-        exchange=exchange,
-        symbol=symbol,
-        interval=interval,
-        bars=bars,
-        username=runtime_config.tradingview_username,
-        password=runtime_config.tradingview_password,
-        cache_enabled=True,
+        runtime_config=runtime_config,
+        tradingview_cache_dir=TRADINGVIEW_CACHE_DIR,
     )
-    return {
-        "exchange": result.exchange,
-        "symbol": result.symbol,
-        "interval": result.interval,
-        "bars": result.candle_count,
-        "source": result.source,
-        "cache_path": str(result.cache_path),
-    }
 
 
 def _tradingview_backtest_redirect(form: dict[str, list[str]], lang: str) -> str:
-    result = _tradingview_fetch_result(form)
     runtime_config, _ = APP_STATE.snapshot()
-    params = _backtest_params_from_config(runtime_config)
-    params["archives"] = result["cache_path"]
-    params["tradingview_exchange"] = result["exchange"]
-    params["tradingview_symbol"] = result["symbol"]
-    params["tradingview_interval"] = result["interval"]
-    params["tradingview_bars"] = result["bars"]
-    for key in ("preset", "lookback_bars", "score_threshold", "holding_periods", "portfolio_top_n"):
-        if key in form:
-            params[key] = _get_first(form, key, str(params.get(key, "")))
-    if normalize_language(lang) == "en":
-        params["lang"] = "en"
-    params["tv_fetched"] = 1
-    return f"/backtest?{urlencode({key: _to_jsonable(value) for key, value in params.items()})}"
+    return backtest_handlers._tradingview_backtest_redirect(
+        form,
+        lang,
+        runtime_config=runtime_config,
+        tradingview_cache_dir=TRADINGVIEW_CACHE_DIR,
+    )
 
 
 def _backtest_payload(query: dict[str, list[str]]) -> tuple[dict[str, object], dict[str, object], str | None]:
     runtime_config, scanner = APP_STATE.snapshot()
-    defaults = _backtest_params_from_config(runtime_config)
-    preset_id = _get_first(query, "preset", str(defaults["preset"]))
-    base_params = apply_backtest_preset(dict(defaults), preset_id)
-    params = {
-        "preset": preset_id,
-        "archives": _get_first(query, "archives", str(base_params["archives"])),
-        "lookback_bars": _parse_query_int(query, "lookback_bars", base_params["lookback_bars"], "Lookback Bars"),
-        "score_threshold": _parse_query_float(query, "score_threshold", base_params["score_threshold"], "Score Threshold"),
-        "holding_periods": _get_first(query, "holding_periods", str(base_params["holding_periods"])),
-        "portfolio_top_n": _parse_query_int(query, "portfolio_top_n", base_params["portfolio_top_n"], "Portfolio Top N"),
-        "cooldown_bars": _parse_query_int(query, "cooldown_bars", base_params["cooldown_bars"], "Cooldown Bars"),
-        "stop_loss_pct": _parse_query_float(query, "stop_loss_pct", base_params["stop_loss_pct"], "Stop Loss"),
-        "take_profit_pct": _parse_query_float(query, "take_profit_pct", base_params["take_profit_pct"], "Take Profit"),
-        "max_holding_bars": _parse_query_int(query, "max_holding_bars", base_params["max_holding_bars"], "Max Holding Bars"),
-        "fee_bps": _parse_query_float(query, "fee_bps", base_params["fee_bps"], "Fee bps"),
-        "fee_model": _get_first(query, "fee_model", str(base_params["fee_model"])),
-        "fee_source": _get_first(query, "fee_source", str(base_params["fee_source"])),
-        "maker_fee_bps": _parse_query_float(query, "maker_fee_bps", base_params["maker_fee_bps"], "Maker Fee"),
-        "taker_fee_bps": _parse_query_float(query, "taker_fee_bps", base_params["taker_fee_bps"], "Taker Fee"),
-        "entry_fee_role": _get_first(query, "entry_fee_role", str(base_params["entry_fee_role"])),
-        "exit_fee_role": _get_first(query, "exit_fee_role", str(base_params["exit_fee_role"])),
-        "fee_discount_pct": _parse_query_float(query, "fee_discount_pct", base_params["fee_discount_pct"], "Fee Discount"),
-        "no_binance_discount": _parse_bool_flag(query, "no_binance_discount"),
-        "slippage_bps": _parse_query_float(query, "slippage_bps", base_params["slippage_bps"], "Slippage bps"),
-        "slippage_model": _get_first(query, "slippage_model", str(base_params["slippage_model"])),
-        "min_slippage_bps": _parse_query_float(query, "min_slippage_bps", base_params["min_slippage_bps"], "Min Slippage"),
-        "max_slippage_bps": _parse_query_float(query, "max_slippage_bps", base_params["max_slippage_bps"], "Max Slippage"),
-        "slippage_window_bars": _parse_query_int(query, "slippage_window_bars", base_params["slippage_window_bars"], "Slip Window"),
-        "capital_fraction_pct": _parse_query_float(query, "capital_fraction_pct", base_params["capital_fraction_pct"], "Capital"),
-        "max_portfolio_exposure_pct": _parse_query_float(query, "max_portfolio_exposure_pct", base_params["max_portfolio_exposure_pct"], "Max Exposure"),
-        "max_concurrent_positions": _parse_query_int(query, "max_concurrent_positions", base_params["max_concurrent_positions"], "Max Concurrent"),
-        "min_volume_ratio": _parse_query_float(query, "min_volume_ratio", base_params["min_volume_ratio"], "Min Volume Ratio"),
-        "min_buy_pressure": _parse_query_float(query, "min_buy_pressure", base_params["min_buy_pressure"], "Min Buy Pressure"),
-        "min_rsi": _parse_query_float(query, "min_rsi", base_params["min_rsi"], "Min RSI"),
-        "max_rsi": _parse_query_float(query, "max_rsi", base_params["max_rsi"], "Max RSI"),
-        "no_kdj_confirmation": _parse_bool_flag(query, "no_kdj_confirmation"),
-        "stability_checks": _parse_bool_flag(query, "stability_checks"),
-        "tradingview_exchange": _get_first(query, "tradingview_exchange", runtime_config.tradingview_exchange),
-        "tradingview_symbol": _get_first(
-            query,
-            "tradingview_symbol",
-            runtime_config.tradingview_symbols[0] if runtime_config.tradingview_symbols else "BTCUSDT",
-        ),
-        "tradingview_interval": _get_first(query, "tradingview_interval", runtime_config.tradingview_interval),
-        "tradingview_bars": _parse_query_int(query, "tradingview_bars", runtime_config.tradingview_bars, "TradingView Bars"),
-        "tv_fetched": _parse_bool_flag(query, "tv_fetched"),
-    }
-    if "no_binance_discount" not in query:
-        params["no_binance_discount"] = bool(base_params["no_binance_discount"])
-    if "no_kdj_confirmation" not in query:
-        params["no_kdj_confirmation"] = bool(base_params["no_kdj_confirmation"])
-
-    archive_patterns = _split_archives(str(params["archives"]))
-    if not archive_patterns:
-        return _empty_backtest_payload(params), params, None
-
-    paths = resolve_archive_paths(archive_patterns)
-    if not paths:
-        return _empty_backtest_payload(params), params, "没有匹配到任何 ZIP/CSV 历史 K 线文件。"
-
-    holding_periods = [int(item) for item in str(params["holding_periods"]).split(",") if item.strip()]
-    entry_config = EntryRuleConfig(
-        min_score=float(params["score_threshold"]),
-        min_volume_ratio=float(params["min_volume_ratio"]),
-        min_buy_pressure_ratio=float(params["min_buy_pressure"]),
-        min_rsi=float(params["min_rsi"]),
-        max_rsi=float(params["max_rsi"]),
-        require_kdj_confirmation=not bool(params["no_kdj_confirmation"]),
+    return backtest_handlers._backtest_payload(
+        query,
+        runtime_config=runtime_config,
+        scanner=scanner,
+        resolve_execution_config=resolve_execution_config_from_binance,
     )
-    exit_config = ExitRuleConfig(
-        max_holding_bars=int(params["max_holding_bars"]),
-        stop_loss_pct=float(params["stop_loss_pct"]),
-        take_profit_pct=float(params["take_profit_pct"]),
-        cooldown_bars_after_exit=int(params["cooldown_bars"]),
-    )
-    execution_config = ExecutionConfig(
-        fee_bps=float(params["fee_bps"]),
-        fee_model=str(params["fee_model"]),
-        fee_source=str(params["fee_source"]),
-        maker_fee_bps=float(params["maker_fee_bps"]),
-        taker_fee_bps=float(params["taker_fee_bps"]),
-        entry_fee_role=str(params["entry_fee_role"]),
-        exit_fee_role=str(params["exit_fee_role"]),
-        fee_discount_pct=float(params["fee_discount_pct"]),
-        apply_binance_discount=not bool(params["no_binance_discount"]),
-        slippage_bps=float(params["slippage_bps"]),
-        capital_fraction_pct=float(params["capital_fraction_pct"]),
-        slippage_model=str(params["slippage_model"]),
-        min_slippage_bps=float(params["min_slippage_bps"]),
-        max_slippage_bps=float(params["max_slippage_bps"]),
-        slippage_window_bars=int(params["slippage_window_bars"]),
-        max_portfolio_exposure_pct=float(params["max_portfolio_exposure_pct"]),
-        max_concurrent_positions=int(params["max_concurrent_positions"]),
-    )
-
-    grouped = group_archives(paths)
-    series_reports = []
-    reports_by_interval: dict[str, list] = {}
-    try:
-        account_execution_config = (
-            resolve_execution_config_from_binance(
-                gateway=scanner.gateway,
-                execution_config=execution_config,
-                symbol=None,
-            )
-            if execution_config.fee_source == "account"
-            else execution_config
-        )
-    except Exception as exc:  # noqa: BLE001
-        return _empty_backtest_payload(params), params, str(exc)
-    candles_by_interval: dict[str, dict[str, list]] = {}
-    series_contexts = []
-    for (symbol, interval), archive_paths in sorted(grouped.items()):
-        candles = merge_candles(archive_paths)
-        candles_by_interval.setdefault(interval, {})[symbol] = candles
-        try:
-            report_execution_config = (
-                resolve_execution_config_from_binance(
-                    gateway=scanner.gateway,
-                    execution_config=account_execution_config,
-                    symbol=symbol,
-                )
-                if execution_config.fee_source == "symbol"
-                else account_execution_config
-            )
-        except Exception as exc:  # noqa: BLE001
-            return _empty_backtest_payload(params), params, str(exc)
-        if str(params["preset"]) == "btc_overnight_seasonality":
-            report = run_overnight_seasonality_backtest(
-                symbol=symbol,
-                interval=interval,
-                candles=candles,
-                execution_config=report_execution_config,
-            )
-        else:
-            report = run_backtest_for_series(
-                symbol=symbol,
-                interval=interval,
-                candles=candles,
-                lookback_bars=int(params["lookback_bars"]),
-                score_threshold=float(params["score_threshold"]),
-                holding_periods=holding_periods,
-                entry_config=entry_config,
-                exit_config=exit_config,
-                execution_config=report_execution_config,
-                cooldown_bars=int(params["cooldown_bars"]) or None,
-            )
-        reports_by_interval.setdefault(interval, []).append(report)
-        series_reports.append(format_backtest_report(report))
-        series_contexts.append((symbol, interval, candles, report_execution_config))
-
-    portfolio_reports = []
-    if int(params["portfolio_top_n"]) > 0:
-        for _, interval_reports in sorted(reports_by_interval.items()):
-            portfolio_report = run_portfolio_backtest(
-                interval_reports,
-                top_n=int(params["portfolio_top_n"]),
-                max_concurrent_positions=execution_config.max_concurrent_positions or None,
-                max_portfolio_exposure_pct=execution_config.max_portfolio_exposure_pct,
-            )
-            if portfolio_report is not None:
-                portfolio_reports.append(format_portfolio_report(portfolio_report))
-
-    rebalance_reports = []
-    if str(params["preset"]) == "crypto_rebalance_premium":
-        for interval, interval_candles in sorted(candles_by_interval.items()):
-            sample_candles = next(iter(interval_candles.values()), [])
-            rebalance_interval_bars = max(1, bars_per_day(sample_candles)) if sample_candles else 1
-            rebalance_report = run_rebalance_premium_backtest(
-                interval_candles,
-                interval=interval,
-                rebalance_interval_bars=rebalance_interval_bars,
-                fee_bps=execution_config.fee_bps,
-                slippage_bps=execution_config.slippage_bps,
-            )
-            if rebalance_report is not None:
-                rebalance_reports.append(format_rebalance_premium_report(rebalance_report))
-
-    stability_checks = (
-        _run_backtest_stability_checks(
-            series_contexts=series_contexts,
-            params=params,
-            holding_periods=holding_periods,
-            entry_config=entry_config,
-            exit_config=exit_config,
-        )
-        if bool(params["stability_checks"]) and str(params["preset"]) not in {"btc_overnight_seasonality", "crypto_rebalance_premium"}
-        else []
-    )
-
-    return {
-        "series_reports": series_reports,
-        "portfolio_reports": portfolio_reports,
-        "rebalance_reports": rebalance_reports,
-        "strategy_explanation": _build_backtest_strategy_explanation(
-            params=params,
-            series_reports=series_reports,
-            portfolio_reports=portfolio_reports,
-            rebalance_reports=rebalance_reports,
-            stability_checks=stability_checks,
-        ),
-    }, params, None
-
-
-def _empty_backtest_payload(params: dict[str, object]) -> dict[str, object]:
-    return {
-        "series_reports": [],
-        "portfolio_reports": [],
-        "rebalance_reports": [],
-        "strategy_explanation": _build_backtest_strategy_explanation(
-            params=params,
-            series_reports=[],
-            portfolio_reports=[],
-            rebalance_reports=[],
-            stability_checks=[],
-        ),
-    }
-
-
-def _run_backtest_stability_checks(
-    *,
-    series_contexts: list[tuple[str, str, list, ExecutionConfig]],
-    params: dict[str, object],
-    holding_periods: list[int],
-    entry_config: EntryRuleConfig,
-    exit_config: ExitRuleConfig,
-) -> list[dict[str, object]]:
-    checks: list[dict[str, object]] = []
-    base_score = float(params["score_threshold"])
-    base_slippage = float(params["slippage_bps"])
-    for symbol, interval, candles, execution_config in series_contexts[:2]:
-        variants = [
-            ("score_minus_3", candles, replace(entry_config, min_score=max(0.0, base_score - 3.0)), execution_config),
-            ("score_plus_3", candles, replace(entry_config, min_score=min(100.0, base_score + 3.0)), execution_config),
-            ("slippage_plus_5bps", candles, entry_config, replace(execution_config, slippage_bps=base_slippage + 5.0)),
-        ]
-        for check_name, variant_candles, variant_entry_config, variant_execution_config in variants:
-            checks.append(
-                _run_single_stability_check(
-                    symbol=symbol,
-                    interval=interval,
-                    check_name=check_name,
-                    candles=variant_candles,
-                    params=params,
-                    holding_periods=holding_periods,
-                    entry_config=variant_entry_config,
-                    exit_config=exit_config,
-                    execution_config=variant_execution_config,
-                )
-            )
-        walk_forward_windows = _walk_forward_validation_windows(
-            candles,
-            holding_periods=holding_periods,
-            max_holding_bars=exit_config.max_holding_bars,
-        )
-        if not walk_forward_windows:
-            checks.append(
-                {
-                    "symbol": symbol,
-                    "interval": interval,
-                    "check": "walk_forward",
-                    "status": "error",
-                    "message": "样本不足，无法构造滚动训练/验证窗口。",
-                }
-            )
-        for index, window in enumerate(walk_forward_windows, start=1):
-            validation_candles = candles[window["validation_start"] : window["validation_end"]]
-            item = _run_single_stability_check(
-                symbol=symbol,
-                interval=interval,
-                check_name=f"walk_forward_fold_{index}",
-                candles=validation_candles,
-                params=params,
-                holding_periods=holding_periods,
-                entry_config=entry_config,
-                exit_config=exit_config,
-                execution_config=execution_config,
-            )
-            item.update(window)
-            checks.append(item)
-    return checks
-
-
-def _run_single_stability_check(
-    *,
-    symbol: str,
-    interval: str,
-    check_name: str,
-    candles: list,
-    params: dict[str, object],
-    holding_periods: list[int],
-    entry_config: EntryRuleConfig,
-    exit_config: ExitRuleConfig,
-    execution_config: ExecutionConfig,
-) -> dict[str, object]:
-    try:
-        report = run_backtest_for_series(
-            symbol=symbol,
-            interval=interval,
-            candles=candles,
-            lookback_bars=int(params["lookback_bars"]),
-            score_threshold=float(entry_config.min_score),
-            holding_periods=holding_periods,
-            entry_config=entry_config,
-            exit_config=exit_config,
-            execution_config=execution_config,
-            cooldown_bars=int(params["cooldown_bars"]) or None,
-        )
-        return {
-            "symbol": symbol,
-            "interval": interval,
-            "check": check_name,
-            "status": "ok",
-            "score_threshold": entry_config.min_score,
-            "slippage_bps": execution_config.slippage_bps,
-            "candle_count": len(candles),
-            "final_equity": report.equity_curve[-1].equity if report.equity_curve else 1.0,
-            "max_drawdown_pct": min((point.drawdown_pct for point in report.equity_curve), default=0.0),
-            "signal_count": report.signal_count,
-            "profit_factor": report.trade_stat.profit_factor if report.trade_stat is not None else 0.0,
-        }
-    except Exception as exc:  # noqa: BLE001
-        return {
-            "symbol": symbol,
-            "interval": interval,
-            "check": check_name,
-            "status": "error",
-            "message": str(exc),
-        }
-
-
-def _walk_forward_validation_windows(
-    candles: list,
-    *,
-    holding_periods: list[int],
-    max_holding_bars: int,
-) -> list[dict[str, int]]:
-    max_horizon = max([*holding_periods, max_holding_bars, 1]) + 1
-    min_validation_bars = 60 + max_horizon + 5
-    min_train_bars = max(90, min_validation_bars)
-    if len(candles) < min_train_bars + min_validation_bars:
-        return []
-
-    validation_bars = max(min_validation_bars, len(candles) // 5)
-    train_bars = min_train_bars
-    step = validation_bars
-    windows: list[dict[str, int]] = []
-    start = 0
-    while len(windows) < 3:
-        train_start = start
-        train_end = train_start + train_bars
-        validation_start = train_end
-        validation_end = validation_start + validation_bars
-        if validation_end > len(candles):
-            break
-        windows.append(
-            {
-                "train_start": train_start,
-                "train_end": train_end,
-                "validation_start": validation_start,
-                "validation_end": validation_end,
-                "train_bars": train_end - train_start,
-                "validation_bars": validation_end - validation_start,
-            }
-        )
-        start += step
-    return windows
-
-
-def _build_backtest_strategy_explanation(
-    *,
-    params: dict[str, object],
-    series_reports: list[dict[str, object]],
-    portfolio_reports: list[dict[str, object]],
-    rebalance_reports: list[dict[str, object]],
-    stability_checks: list[dict[str, object]],
-) -> dict[str, object]:
-    preset = str(params.get("preset", "custom"))
-    strategy_type, strategy_summary = _backtest_strategy_type(preset)
-    total_series_trades = sum(int(report.get("signal_count", 0)) for report in series_reports)
-    total_portfolio_batches = sum(int(report.get("batch_count", 0)) for report in portfolio_reports)
-    best_series = max(series_reports, key=lambda item: float(item.get("final_equity", 0.0)), default=None)
-    best_portfolio = max(portfolio_reports, key=lambda item: float(item.get("final_equity", 0.0)), default=None)
-    trade_stats = [
-        report.get("trade_stat")
-        for report in [*series_reports, *portfolio_reports]
-        if isinstance(report.get("trade_stat"), dict)
-    ]
-    max_drawdown = min(
-        [float(report.get("max_drawdown_pct", 0.0)) for report in [*series_reports, *portfolio_reports]],
-        default=0.0,
-    )
-    min_profit_factor = min((float(stat.get("profit_factor", 0.0)) for stat in trade_stats), default=0.0)
-    best_equity = max(
-        [float(report.get("final_equity", 0.0)) for report in [*series_reports, *portfolio_reports]],
-        default=0.0,
-    )
-    diagnostics = _backtest_diagnostics(
-        total_series_trades=total_series_trades,
-        total_portfolio_batches=total_portfolio_batches,
-        min_profit_factor=min_profit_factor,
-        max_drawdown=max_drawdown,
-        best_equity=best_equity,
-        series_count=len(series_reports),
-        stability_enabled=bool(params.get("stability_checks")),
-        stability_checks=stability_checks,
-    )
-    cost_notes = _backtest_cost_notes(params)
-    notes = [
-        strategy_summary,
-        f"入场过滤：score >= {float(params.get('score_threshold', 0.0)):.1f}, volume_ratio >= {float(params.get('min_volume_ratio', 0.0)):.2f}, buy_pressure >= {float(params.get('min_buy_pressure', 0.0)):.2f}。",
-        f"退出假设：止损 {float(params.get('stop_loss_pct', 0.0)):.1f}%，止盈 {float(params.get('take_profit_pct', 0.0)):.1f}%，最多持有 {int(params.get('max_holding_bars', 0))} 根 K 线。",
-        *cost_notes,
-        *diagnostics,
-    ]
-    return {
-        "preset": preset,
-        "strategy_type": strategy_type,
-        "summary": strategy_summary,
-        "sample": {
-            "series_count": len(series_reports),
-            "portfolio_count": len(portfolio_reports),
-            "rebalance_count": len(rebalance_reports),
-            "series_trades": total_series_trades,
-            "portfolio_batches": total_portfolio_batches,
-        },
-        "best": {
-            "series": None
-            if best_series is None
-            else {
-                "symbol": best_series.get("symbol", ""),
-                "interval": best_series.get("interval", ""),
-                "final_equity": best_series.get("final_equity", 0.0),
-                "max_drawdown_pct": best_series.get("max_drawdown_pct", 0.0),
-            },
-            "portfolio": None
-            if best_portfolio is None
-            else {
-                "interval": best_portfolio.get("interval", ""),
-                "final_equity": best_portfolio.get("final_equity", 0.0),
-                "max_drawdown_pct": best_portfolio.get("max_drawdown_pct", 0.0),
-            },
-        },
-        "diagnostics": diagnostics,
-        "cost_notes": cost_notes,
-        "stability_enabled": bool(params.get("stability_checks")),
-        "stability_checks": stability_checks,
-        "notes": notes,
-    }
-
-
-def _backtest_strategy_type(preset: str) -> tuple[str, str]:
-    mapping = {
-        "breakout_aggressive": ("breakout", "区间突破 / 动量延续模板，强调高评分、强量能和较短持有周期。"),
-        "portfolio_rotation": ("momentum_rotation", "动量轮动模板，先横截面筛选强势标的，再用组合层 top N 控制集中度。"),
-        "balanced_swing": ("balanced_swing", "均衡波段模板，在趋势、动量、量能和买压之间取折中。"),
-        "crypto_rebalance_premium": ("rebalance", "等权再平衡研究模板，用于比较定期再平衡和自然漂移组合。"),
-        "btc_overnight_seasonality": ("seasonality", "BTC 时间窗口模板，研究 UTC 固定时段持有的季节性收益。"),
-        "btc_cycle_trend": ("trend_following", "BTC 趋势跟随模板，强调 EMA 多头结构、趋势评分和中等持仓周期。"),
-        "btc_core_trading": ("core_satellite", "BTC 核心仓加交易仓模板，围绕主方向做较积极的仓位调整。"),
-        "btc_compounding_risk_off": ("risk_off_compounding", "偏复利和回撤控制模板，降低暴露并重视账户生存。"),
-    }
-    return mapping.get(preset, ("custom", "自定义参数模板，策略含义取决于当前阈值组合。"))
-
-
-def _backtest_cost_notes(params: dict[str, object]) -> list[str]:
-    fee_model = str(params.get("fee_model", "flat"))
-    fee_source = str(params.get("fee_source", "manual"))
-    slippage_model = str(params.get("slippage_model", "fixed"))
-    notes = [
-        f"成本假设：fee_model={fee_model}, fee_source={fee_source}, slippage_model={slippage_model}。",
-    ]
-    if slippage_model == "fixed":
-        notes.append(f"当前固定滑点 {float(params.get('slippage_bps', 0.0)):.1f}bps；建议再用更高滑点复测做成本敏感性检查。")
-    else:
-        notes.append(
-            f"动态滑点范围 {float(params.get('min_slippage_bps', 0.0)):.1f}-{float(params.get('max_slippage_bps', 0.0)):.1f}bps，结果更接近真实成交约束。"
-        )
-    return notes
-
-
-def _backtest_diagnostics(
-    *,
-    total_series_trades: int,
-    total_portfolio_batches: int,
-    min_profit_factor: float,
-    max_drawdown: float,
-    best_equity: float,
-    series_count: int,
-    stability_enabled: bool,
-    stability_checks: list[dict[str, object]],
-) -> list[str]:
-    diagnostics: list[str] = []
-    if series_count == 0:
-        diagnostics.append("尚未产生单币种回测结果；需要先提供本地历史 K 线 ZIP。")
-        return diagnostics
-    if total_series_trades < 20:
-        diagnostics.append("交易样本少于 20 笔，统计稳定性不足，不建议据此直接调高实盘权重。")
-    if total_portfolio_batches and total_portfolio_batches < 8:
-        diagnostics.append("组合批次数少于 8 次，轮动策略稳定性仍需更多历史样本。")
-    if best_equity <= 1.0:
-        diagnostics.append("最佳权益未超过 1.0，当前参数没有表现出正收益优势。")
-    if max_drawdown <= -20.0:
-        diagnostics.append("最大回撤超过 20%，需要降低仓位、提高过滤阈值或缩短持有周期。")
-    if min_profit_factor and min_profit_factor < 1.1:
-        diagnostics.append("存在 Profit Factor 低于 1.10 的结果，交易成本或假信号可能侵蚀收益。")
-    if not diagnostics:
-        diagnostics.append("基础稳定性检查未发现明显红旗；仍需做样本外和参数邻域验证。")
-    if not stability_enabled:
-        diagnostics.append("高级稳定性检查未运行；勾选 Stability Checks 后会额外执行参数邻域和滚动 walk-forward 复测。")
-    elif not stability_checks:
-        diagnostics.append("高级稳定性检查未产生结果；当前预设可能不适用该检查或样本不足。")
-    elif any(item.get("status") == "error" for item in stability_checks):
-        diagnostics.append("部分高级稳定性检查失败；请查看检查表中的错误信息。")
-    elif any(float(item.get("final_equity", 1.0)) <= 1.0 for item in stability_checks if item.get("status") == "ok"):
-        diagnostics.append("参数邻域或样本外检查中出现权益不高于 1.0 的结果，策略稳健性需要继续验证。")
-    else:
-        diagnostics.append("高级稳定性检查全部完成，参数邻域和滚动 walk-forward 未出现明显失效。")
-    return diagnostics
-
-
-def _backtest_export_csv(payload: dict[str, object], params: dict[str, object], error: str | None) -> str:
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow(["section", "name", "interval", "metric", "value"])
-    writer.writerow(["meta", "backtest", "", "error", error or ""])
-    explanation = payload.get("strategy_explanation")
-    if isinstance(explanation, dict):
-        writer.writerow(["meta", "strategy", "", "strategy_type", explanation.get("strategy_type", "")])
-        writer.writerow(["meta", "strategy", "", "summary", explanation.get("summary", "")])
-        for index, note in enumerate(explanation.get("notes", []) if isinstance(explanation.get("notes"), list) else [], start=1):
-            writer.writerow(["meta", "strategy", "", f"note_{index}", note])
-        for item in explanation.get("stability_checks", []) if isinstance(explanation.get("stability_checks"), list) else []:
-            if not isinstance(item, dict):
-                continue
-            name = f'{item.get("symbol", "")}:{item.get("check", "")}'
-            writer.writerow(["stability", name, item.get("interval", ""), "status", item.get("status", "")])
-            if item.get("status") == "ok":
-                writer.writerow(["stability", name, item.get("interval", ""), "final_equity", item.get("final_equity", "")])
-                writer.writerow(["stability", name, item.get("interval", ""), "max_drawdown_pct", item.get("max_drawdown_pct", "")])
-                writer.writerow(["stability", name, item.get("interval", ""), "profit_factor", item.get("profit_factor", "")])
-                if "train_bars" in item:
-                    writer.writerow(["stability", name, item.get("interval", ""), "train_bars", item.get("train_bars", "")])
-                    writer.writerow(["stability", name, item.get("interval", ""), "validation_bars", item.get("validation_bars", "")])
-            else:
-                writer.writerow(["stability", name, item.get("interval", ""), "message", item.get("message", "")])
-    for key, value in params.items():
-        writer.writerow(["param", "backtest", "", key, value])
-
-    for report in payload["series_reports"]:
-        writer.writerow(["series", report["symbol"], report["interval"], "final_equity", report["final_equity"]])
-        writer.writerow(["series", report["symbol"], report["interval"], "buy_hold_final_equity", report.get("buy_hold_final_equity", 1.0)])
-        writer.writerow(["series", report["symbol"], report["interval"], "buy_hold_return_pct", report.get("buy_hold_return_pct", 0.0)])
-        writer.writerow(["series", report["symbol"], report["interval"], "max_drawdown_pct", report["max_drawdown_pct"]])
-        writer.writerow(["series", report["symbol"], report["interval"], "signal_count", report["signal_count"]])
-        trade_stat = report.get("trade_stat")
-        if trade_stat:
-            writer.writerow(["series", report["symbol"], report["interval"], "win_rate_pct", trade_stat["win_rate_pct"]])
-            writer.writerow(["series", report["symbol"], report["interval"], "profit_factor", trade_stat["profit_factor"]])
-
-    for report in payload["portfolio_reports"]:
-        name = f'portfolio_top_{report["top_n"]}'
-        writer.writerow(["portfolio", name, report["interval"], "final_equity", report["final_equity"]])
-        writer.writerow(["portfolio", name, report["interval"], "max_drawdown_pct", report["max_drawdown_pct"]])
-        writer.writerow(["portfolio", name, report["interval"], "batch_count", report["batch_count"]])
-        trade_stat = report.get("trade_stat")
-        if trade_stat:
-            writer.writerow(["portfolio", name, report["interval"], "win_rate_pct", trade_stat["win_rate_pct"]])
-            writer.writerow(["portfolio", name, report["interval"], "profit_factor", trade_stat["profit_factor"]])
-
-    for report in payload.get("rebalance_reports", []):
-        name = "crypto_rebalance_premium"
-        writer.writerow(["rebalance", name, report["interval"], "rebalanced_final_equity", report["rebalanced_final_equity"]])
-        writer.writerow(["rebalance", name, report["interval"], "buy_hold_final_equity", report["buy_hold_final_equity"]])
-        writer.writerow(["rebalance", name, report["interval"], "premium_pct", report["premium_pct"]])
-        writer.writerow(["rebalance", name, report["interval"], "rebalance_count", report["rebalance_count"]])
-        writer.writerow(["rebalance", name, report["interval"], "avg_turnover_pct", report["avg_turnover_pct"]])
-
-    return buffer.getvalue()
-
-
-def _build_runtime_config(form: dict[str, list[str]]) -> RuntimeConfig:
-    current_config, _ = APP_STATE.snapshot()
-    keep_binance_key = current_config.binance_api_key
-    keep_binance_secret = current_config.binance_api_secret
-    keep_okx_key = current_config.okx_api_key
-    keep_okx_secret = current_config.okx_api_secret
-    keep_okx_passphrase = current_config.okx_api_passphrase
-    keep_x_bearer_token = current_config.x_bearer_token
-    keep_onchain_api_key = current_config.onchain_api_key
-    keep_tradingview_password = current_config.tradingview_password
-    keep_llm_api_key = current_config.llm_api_key or current_config.openai_api_key
-    keep_feishu_webhook_url = current_config.feishu_webhook_url
-    if _parse_bool_flag(form, "clear_binance_auth"):
-        keep_binance_key = ""
-        keep_binance_secret = ""
-    else:
-        candidate = _get_first(form, "binance_api_key", "").strip()
-        if candidate:
-            keep_binance_key = candidate
-        candidate = _get_first(form, "binance_api_secret", "").strip()
-        if candidate:
-            keep_binance_secret = candidate
-    if _parse_bool_flag(form, "clear_okx_auth"):
-        keep_okx_key = ""
-        keep_okx_secret = ""
-        keep_okx_passphrase = ""
-    else:
-        candidate = _get_first(form, "okx_api_key", "").strip()
-        if candidate:
-            keep_okx_key = candidate
-        candidate = _get_first(form, "okx_api_secret", "").strip()
-        if candidate:
-            keep_okx_secret = candidate
-        candidate = _get_first(form, "okx_api_passphrase", "").strip()
-        if candidate:
-            keep_okx_passphrase = candidate
-    if _parse_bool_flag(form, "clear_x_auth"):
-        keep_x_bearer_token = ""
-    else:
-        candidate = _get_first(form, "x_bearer_token", "").strip()
-        if candidate:
-            keep_x_bearer_token = candidate
-    if _parse_bool_flag(form, "clear_onchain_auth"):
-        keep_onchain_api_key = ""
-    else:
-        candidate = _get_first(form, "onchain_api_key", "").strip()
-        if candidate:
-            keep_onchain_api_key = candidate
-    if _parse_bool_flag(form, "clear_tradingview_auth"):
-        keep_tradingview_password = ""
-    else:
-        candidate = _get_first(form, "tradingview_password", "").strip()
-        if candidate:
-            keep_tradingview_password = candidate
-    if _parse_bool_flag(form, "clear_llm_auth"):
-        keep_llm_api_key = ""
-    else:
-        candidate = _get_first(form, "llm_api_key", "").strip() or _get_first(form, "openai_api_key", "").strip()
-        if candidate:
-            keep_llm_api_key = candidate
-    if _parse_bool_flag(form, "clear_feishu_webhook"):
-        keep_feishu_webhook_url = ""
-    else:
-        candidate = _get_first(form, "feishu_webhook_url", "").strip()
-        if candidate:
-            keep_feishu_webhook_url = candidate
-
-    llm_provider = _get_first(form, "llm_provider", current_config.llm_provider).strip() or "openai"
-    llm_model = _get_first(
-        form,
-        "llm_model",
-        _get_first(form, "intelligence_openai_model", current_config.llm_model),
-    ).strip() or get_llm_provider(llm_provider).default_model
-    llm_base_url = _get_first(form, "llm_base_url", current_config.llm_base_url).strip()
-
-    config = RuntimeConfig(
-        binance_api_key=keep_binance_key,
-        binance_api_secret=keep_binance_secret,
-        binance_recv_window_ms=_parse_float_value(_get_first(form, "binance_recv_window_ms", str(current_config.binance_recv_window_ms)), "Binance RecvWindow"),
-        okx_api_key=keep_okx_key,
-        okx_api_secret=keep_okx_secret,
-        okx_api_passphrase=keep_okx_passphrase,
-        market_data_preset=_get_first(form, "market_data_preset", current_config.market_data_preset).strip() or "binance_public",
-        tradingview_username=_get_first(form, "tradingview_username", current_config.tradingview_username).strip(),
-        tradingview_password=keep_tradingview_password,
-        tradingview_exchange=_get_first(form, "tradingview_exchange", current_config.tradingview_exchange).strip().upper() or current_config.tradingview_exchange,
-        tradingview_symbols=[
-            item.upper()
-            for item in _parse_multiline_list(
-                _get_first(form, "tradingview_symbols", "\n".join(current_config.tradingview_symbols))
-            )
-        ],
-        tradingview_interval=_get_first(form, "tradingview_interval", current_config.tradingview_interval).strip() or current_config.tradingview_interval,
-        tradingview_bars=_parse_int_value(_get_first(form, "tradingview_bars", str(current_config.tradingview_bars)), "TradingView Bars"),
-        tradingview_cache_enabled=_runtime_bool(form, "tradingview_cache_enabled", current_config.tradingview_cache_enabled),
-        onchain_data_preset=_get_first(form, "onchain_data_preset", current_config.onchain_data_preset).strip() or "open_multichain_keyless",
-        onchain_api_key=keep_onchain_api_key,
-        onchain_api_base_url=_get_first(form, "onchain_api_base_url", current_config.onchain_api_base_url).strip(),
-        community_provider=_get_first(form, "community_provider", current_config.community_provider).strip() or "auto",
-        x_provider=_get_first(form, "x_provider", current_config.x_provider).strip() or "official_api",
-        x_bearer_token=keep_x_bearer_token,
-        x_api_base_url=_get_first(form, "x_api_base_url", current_config.x_api_base_url).strip() or current_config.x_api_base_url,
-        x_nitter_base_url=_get_first(form, "x_nitter_base_url", current_config.x_nitter_base_url).strip(),
-        x_session_command=_get_first(form, "x_session_command", current_config.x_session_command).strip(),
-        x_recent_window_hours=_parse_int_value(_get_first(form, "x_recent_window_hours", str(current_config.x_recent_window_hours)), "X Window Hours"),
-        x_recent_max_results=_parse_int_value(_get_first(form, "x_recent_max_results", str(current_config.x_recent_max_results)), "X Max Results"),
-        x_language=_get_first(form, "x_language", current_config.x_language).strip() or current_config.x_language,
-        reddit_api_base_url=_get_first(form, "reddit_api_base_url", current_config.reddit_api_base_url).strip() or current_config.reddit_api_base_url,
-        reddit_recent_window_hours=_parse_int_value(_get_first(form, "reddit_recent_window_hours", str(current_config.reddit_recent_window_hours)), "Reddit Window Hours"),
-        reddit_max_results=_parse_int_value(_get_first(form, "reddit_max_results", str(current_config.reddit_max_results)), "Reddit Max Results"),
-        reddit_user_agent=_get_first(form, "reddit_user_agent", current_config.reddit_user_agent).strip() or current_config.reddit_user_agent,
-        llm_provider=llm_provider,
-        llm_api_key=keep_llm_api_key,
-        llm_base_url=llm_base_url,
-        llm_model=llm_model,
-        x_account_mode=_get_first(form, "x_account_mode", current_config.x_account_mode).strip() or current_config.x_account_mode,
-        x_account_weight_pct=_parse_float_value(_get_first(form, "x_account_weight_pct", str(current_config.x_account_weight_pct)), "Account Weight"),
-        x_tracked_accounts=_parse_multiline_list(_get_first(form, "x_tracked_accounts", "\n".join(current_config.x_tracked_accounts))),
-        openai_api_key=keep_llm_api_key if llm_provider == "openai" else current_config.openai_api_key,
-        openai_model=llm_model if llm_provider == "openai" else current_config.openai_model,
-        feishu_webhook_url=keep_feishu_webhook_url,
-        scan_defaults=ScanDefaults(
-            quote_asset=_get_first(form, "scan_quote_asset", current_config.scan_defaults.quote_asset).strip().upper() or current_config.scan_defaults.quote_asset,
-            interval=_get_first(form, "scan_interval", current_config.scan_defaults.interval).strip() or current_config.scan_defaults.interval,
-            candidate_pool=_parse_int_value(_get_first(form, "scan_candidate_pool", str(current_config.scan_defaults.candidate_pool)), "Candidate Pool"),
-            min_quote_volume=_parse_float_value(_get_first(form, "scan_min_quote_volume", str(current_config.scan_defaults.min_quote_volume)), "Min Quote Volume"),
-            min_trade_count=_parse_int_value(_get_first(form, "scan_min_trade_count", str(current_config.scan_defaults.min_trade_count)), "Min Trade Count"),
-        ),
-        autotrade_defaults=AutoTradeDefaults(
-            enabled=_runtime_bool(form, "autotrade_enabled", current_config.autotrade_defaults.enabled),
-            mode=_get_first(form, "autotrade_mode", current_config.autotrade_defaults.mode).strip() or "paper",
-            execution_exchange=_get_first(
-                form,
-                "autotrade_execution_exchange",
-                current_config.autotrade_defaults.execution_exchange,
-            ).strip().lower()
-            or "binance",
-            quote_order_qty=_parse_float_value(_get_first(form, "autotrade_quote_order_qty", str(current_config.autotrade_defaults.quote_order_qty)), "Auto Trade Quote Order Qty"),
-            max_open_positions=_parse_int_value(_get_first(form, "autotrade_max_open_positions", str(current_config.autotrade_defaults.max_open_positions)), "Auto Trade Max Open Positions"),
-            max_total_quote_exposure=_parse_float_value(_get_first(form, "autotrade_max_total_quote_exposure", str(current_config.autotrade_defaults.max_total_quote_exposure)), "Auto Trade Max Exposure"),
-            score_threshold=_parse_float_value(_get_first(form, "autotrade_score_threshold", str(current_config.autotrade_defaults.score_threshold)), "Auto Trade Score Threshold"),
-            min_volume_ratio=_parse_float_value(_get_first(form, "autotrade_min_volume_ratio", str(current_config.autotrade_defaults.min_volume_ratio)), "Auto Trade Min Volume Ratio"),
-            min_buy_pressure=_parse_float_value(_get_first(form, "autotrade_min_buy_pressure", str(current_config.autotrade_defaults.min_buy_pressure)), "Auto Trade Min Buy Pressure"),
-            stop_loss_pct=_parse_float_value(_get_first(form, "autotrade_stop_loss_pct", str(current_config.autotrade_defaults.stop_loss_pct)), "Auto Trade Stop Loss"),
-            take_profit_pct=_parse_float_value(_get_first(form, "autotrade_take_profit_pct", str(current_config.autotrade_defaults.take_profit_pct)), "Auto Trade Take Profit"),
-            profit_protection_enabled=_runtime_bool(form, "autotrade_profit_protection_enabled", current_config.autotrade_defaults.profit_protection_enabled),
-            profit_protection_trigger_pct=_parse_float_value(_get_first(form, "autotrade_profit_protection_trigger_pct", str(current_config.autotrade_defaults.profit_protection_trigger_pct)), "Auto Trade Profit Protection Trigger"),
-            profit_protection_lock_pct=_parse_float_value(_get_first(form, "autotrade_profit_protection_lock_pct", str(current_config.autotrade_defaults.profit_protection_lock_pct)), "Auto Trade Profit Protection Lock"),
-            trailing_stop_pct=_parse_float_value(_get_first(form, "autotrade_trailing_stop_pct", str(current_config.autotrade_defaults.trailing_stop_pct)), "Auto Trade Trailing Stop"),
-            cooldown_minutes=_parse_int_value(_get_first(form, "autotrade_cooldown_minutes", str(current_config.autotrade_defaults.cooldown_minutes)), "Auto Trade Cooldown"),
-            order_test_only=_runtime_bool(form, "autotrade_order_test_only", current_config.autotrade_defaults.order_test_only),
-        ),
-        intelligence_defaults=IntelligenceDefaults(
-            enabled=_runtime_bool(form, "intelligence_enabled", current_config.intelligence_defaults.enabled),
-            llm_enabled=_runtime_bool(form, "intelligence_llm_enabled", current_config.intelligence_defaults.llm_enabled),
-            llm_provider=llm_provider,
-            llm_api_key=keep_llm_api_key,
-            llm_base_url=llm_base_url,
-            llm_model=llm_model,
-            openai_api_key=keep_llm_api_key if llm_provider == "openai" else current_config.openai_api_key,
-            openai_model=llm_model if llm_provider == "openai" else current_config.openai_model,
-            min_intel_severity=_parse_float_value(_get_first(form, "intelligence_min_intel_severity", str(current_config.intelligence_defaults.min_intel_severity)), "Intelligence Min Severity"),
-            min_spread_bps=_parse_float_value(_get_first(form, "intelligence_min_spread_bps", str(current_config.intelligence_defaults.min_spread_bps)), "Intelligence Min Spread"),
-            whale_transfer_threshold_usd=_parse_float_value(_get_first(form, "intelligence_whale_transfer_threshold_usd", str(current_config.intelligence_defaults.whale_transfer_threshold_usd)), "Whale Transfer Threshold"),
-        ),
-        backtest_defaults=BacktestDefaults(
-            preset=_get_first(form, "backtest_preset", current_config.backtest_defaults.preset).strip() or "custom",
-            archives=_get_first(form, "backtest_archives", current_config.backtest_defaults.archives),
-            lookback_bars=_parse_int_value(_get_first(form, "backtest_lookback_bars", str(current_config.backtest_defaults.lookback_bars)), "Lookback Bars"),
-            score_threshold=_parse_float_value(_get_first(form, "backtest_score_threshold", str(current_config.backtest_defaults.score_threshold)), "Score Threshold"),
-            holding_periods=_get_first(form, "backtest_holding_periods", current_config.backtest_defaults.holding_periods),
-            portfolio_top_n=_parse_int_value(_get_first(form, "backtest_portfolio_top_n", str(current_config.backtest_defaults.portfolio_top_n)), "Portfolio Top N"),
-            cooldown_bars=_parse_int_value(_get_first(form, "backtest_cooldown_bars", str(current_config.backtest_defaults.cooldown_bars)), "Cooldown Bars"),
-            stop_loss_pct=_parse_float_value(_get_first(form, "backtest_stop_loss_pct", str(current_config.backtest_defaults.stop_loss_pct)), "Stop Loss"),
-            take_profit_pct=_parse_float_value(_get_first(form, "backtest_take_profit_pct", str(current_config.backtest_defaults.take_profit_pct)), "Take Profit"),
-            max_holding_bars=_parse_int_value(_get_first(form, "backtest_max_holding_bars", str(current_config.backtest_defaults.max_holding_bars)), "Max Holding Bars"),
-            fee_bps=_parse_float_value(_get_first(form, "backtest_fee_bps", str(current_config.backtest_defaults.fee_bps)), "Fee bps"),
-            fee_model=_get_first(form, "backtest_fee_model", current_config.backtest_defaults.fee_model),
-            fee_source=_get_first(form, "backtest_fee_source", current_config.backtest_defaults.fee_source),
-            maker_fee_bps=_parse_float_value(_get_first(form, "backtest_maker_fee_bps", str(current_config.backtest_defaults.maker_fee_bps)), "Maker Fee"),
-            taker_fee_bps=_parse_float_value(_get_first(form, "backtest_taker_fee_bps", str(current_config.backtest_defaults.taker_fee_bps)), "Taker Fee"),
-            entry_fee_role=_get_first(form, "backtest_entry_fee_role", current_config.backtest_defaults.entry_fee_role),
-            exit_fee_role=_get_first(form, "backtest_exit_fee_role", current_config.backtest_defaults.exit_fee_role),
-            fee_discount_pct=_parse_float_value(_get_first(form, "backtest_fee_discount_pct", str(current_config.backtest_defaults.fee_discount_pct)), "Fee Discount"),
-            no_binance_discount=_runtime_bool(form, "backtest_no_binance_discount", current_config.backtest_defaults.no_binance_discount),
-            slippage_bps=_parse_float_value(_get_first(form, "backtest_slippage_bps", str(current_config.backtest_defaults.slippage_bps)), "Slippage bps"),
-            slippage_model=_get_first(form, "backtest_slippage_model", current_config.backtest_defaults.slippage_model),
-            min_slippage_bps=_parse_float_value(_get_first(form, "backtest_min_slippage_bps", str(current_config.backtest_defaults.min_slippage_bps)), "Min Slippage"),
-            max_slippage_bps=_parse_float_value(_get_first(form, "backtest_max_slippage_bps", str(current_config.backtest_defaults.max_slippage_bps)), "Max Slippage"),
-            slippage_window_bars=_parse_int_value(_get_first(form, "backtest_slippage_window_bars", str(current_config.backtest_defaults.slippage_window_bars)), "Slip Window"),
-            capital_fraction_pct=_parse_float_value(_get_first(form, "backtest_capital_fraction_pct", str(current_config.backtest_defaults.capital_fraction_pct)), "Capital"),
-            max_portfolio_exposure_pct=_parse_float_value(_get_first(form, "backtest_max_portfolio_exposure_pct", str(current_config.backtest_defaults.max_portfolio_exposure_pct)), "Max Exposure"),
-            max_concurrent_positions=_parse_int_value(_get_first(form, "backtest_max_concurrent_positions", str(current_config.backtest_defaults.max_concurrent_positions)), "Max Concurrent"),
-            min_volume_ratio=_parse_float_value(_get_first(form, "backtest_min_volume_ratio", str(current_config.backtest_defaults.min_volume_ratio)), "Min Volume Ratio"),
-            min_buy_pressure=_parse_float_value(_get_first(form, "backtest_min_buy_pressure", str(current_config.backtest_defaults.min_buy_pressure)), "Min Buy Pressure"),
-            min_rsi=_parse_float_value(_get_first(form, "backtest_min_rsi", str(current_config.backtest_defaults.min_rsi)), "Min RSI"),
-            max_rsi=_parse_float_value(_get_first(form, "backtest_max_rsi", str(current_config.backtest_defaults.max_rsi)), "Max RSI"),
-            no_kdj_confirmation=_runtime_bool(form, "backtest_no_kdj_confirmation", current_config.backtest_defaults.no_kdj_confirmation),
-        ),
-    )
-    _validate_runtime_config(config)
-    return config
 
 
 class RequestHandler(BaseHTTPRequestHandler):
