@@ -112,6 +112,7 @@ class AppSettings:
     llm_model: str = os.getenv("LLM_MODEL", os.getenv("OPENAI_MODEL", "gpt-5.5"))
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-5.5")
+    feishu_webhook_url: str = os.getenv("FEISHU_WEBHOOK_URL", "")
     exchange_intel_csv: Path = BASE_DIR / os.getenv("EXCHANGE_INTEL_CSV", "data/exchange_intel.csv")
     onchain_events_csv: Path = BASE_DIR / os.getenv("ONCHAIN_EVENTS_CSV", "data/onchain_events.csv")
     futures_basis_csv: Path = BASE_DIR / os.getenv("FUTURES_BASIS_CSV", "data/futures_basis.csv")

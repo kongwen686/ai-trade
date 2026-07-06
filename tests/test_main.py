@@ -835,6 +835,7 @@ class MainTests(unittest.TestCase):
                 "llm_base_url": "",
                 "llm_model": "gpt-5.5",
                 "openai_model": "gpt-5.5",
+                "feishu_webhook_configured": True,
                 "x_account_mode": "blend",
                 "x_account_weight_pct": 35.0,
                 "x_tracked_accounts": ["lookonchain", "wu_blockchain"],
@@ -915,6 +916,7 @@ class MainTests(unittest.TestCase):
                 "storage_mode": "Encrypted",
                 "autotrade_enabled": False,
                 "autotrade_mode": "paper",
+                "feishu_webhook_configured": True,
                 "intelligence_enabled": True,
                 "llm_enabled": False,
                 "llm_provider": "openai",
@@ -969,6 +971,9 @@ class MainTests(unittest.TestCase):
         self.assertIn("Twitter Intel", html)
         self.assertIn("Tracked Accounts", html)
         self.assertIn("Backtest Defaults", html)
+        self.assertIn("Feishu Webhook URL", html)
+        self.assertIn("Clear Feishu webhook", html)
+        self.assertIn("买入成交和卖出执行后", html)
         self.assertIn("运行配置已保存", html)
         self.assertIn("导出模板 JSON", html)
         self.assertIn("导入配置模板", html)
@@ -1772,11 +1777,13 @@ class MainTests(unittest.TestCase):
         config.autotrade_defaults.mode = "live"
         config.autotrade_defaults.quote_order_qty = 25.0
         config.autotrade_defaults.score_threshold = 75.0
+        notifier = Mock()
         with tempfile.TemporaryDirectory() as temp_dir:
             store = TradingStateStore(Path(temp_dir) / "state.json")
             with (
                 patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, scanner)),
                 patch("trade_signal_app.main._trading_store", return_value=store),
+                patch("trade_signal_app.main._feishu_trade_notifier", return_value=notifier),
             ):
                 payload = _run_trading_once(force_paper=True)
 
@@ -1784,6 +1791,7 @@ class MainTests(unittest.TestCase):
         self.assertEqual(payload["mode"], "paper")
         self.assertEqual(payload["events"][0]["status"], "paper_filled")
         self.assertEqual(payload["open_positions"][0]["symbol"], "BTCUSDT")
+        notifier.notify_trade.assert_called_once()
 
     def test_build_runtime_config_parses_runtime_form(self) -> None:
         current = RuntimeConfig()
@@ -1796,6 +1804,7 @@ class MainTests(unittest.TestCase):
         current.onchain_api_key = "keep-onchain-key"
         current.tradingview_password = "keep-tv-password"
         current.llm_api_key = "keep-llm-key"
+        current.feishu_webhook_url = "https://open.feishu.cn/webhook/keep"
 
         with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(current, None)):
             config = _build_runtime_config(
@@ -1844,6 +1853,7 @@ class MainTests(unittest.TestCase):
                     "autotrade_take_profit_pct": ["8"],
                     "autotrade_cooldown_minutes": ["180"],
                     "autotrade_order_test_only": ["on"],
+                    "feishu_webhook_url": ["https://open.feishu.cn/webhook/new"],
                     "intelligence_enabled": ["on"],
                     "intelligence_llm_enabled": ["on"],
                     "llm_provider": ["deepseek"],
@@ -1917,6 +1927,7 @@ class MainTests(unittest.TestCase):
         self.assertEqual(config.reddit_recent_window_hours, 18)
         self.assertEqual(config.reddit_max_results, 15)
         self.assertEqual(config.reddit_user_agent, "trade-signal-app/test")
+        self.assertEqual(config.feishu_webhook_url, "https://open.feishu.cn/webhook/new")
         self.assertEqual(config.backtest_defaults.preset, "portfolio_rotation")
         self.assertEqual(config.scan_defaults.quote_asset, "FDUSD")
         self.assertTrue(config.autotrade_defaults.enabled)
@@ -1952,6 +1963,7 @@ class MainTests(unittest.TestCase):
         current.tradingview_cache_enabled = True
         current.autotrade_defaults.enabled = True
         current.autotrade_defaults.order_test_only = True
+        current.feishu_webhook_url = "https://open.feishu.cn/webhook/keep"
         current.intelligence_defaults.enabled = True
         current.intelligence_defaults.llm_enabled = True
         current.backtest_defaults.no_binance_discount = True
@@ -1973,6 +1985,7 @@ class MainTests(unittest.TestCase):
         self.assertTrue(scan_config.tradingview_cache_enabled)
         self.assertTrue(scan_config.autotrade_defaults.enabled)
         self.assertTrue(scan_config.autotrade_defaults.order_test_only)
+        self.assertEqual(scan_config.feishu_webhook_url, "https://open.feishu.cn/webhook/keep")
         self.assertTrue(scan_config.intelligence_defaults.enabled)
         self.assertTrue(scan_config.intelligence_defaults.llm_enabled)
         self.assertTrue(scan_config.backtest_defaults.no_binance_discount)
@@ -1999,6 +2012,11 @@ class MainTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Auto Trade Mode"):
                 _build_runtime_config({"autotrade_mode": ["real"]})
 
+    def test_build_runtime_config_rejects_invalid_feishu_webhook(self) -> None:
+        with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(RuntimeConfig(), None)):
+            with self.assertRaisesRegex(ValueError, "Feishu Webhook URL"):
+                _build_runtime_config({"feishu_webhook_url": ["open.feishu.cn/webhook/test"]})
+
     def test_import_runtime_config_template_rejects_invalid_ranges(self) -> None:
         current = RuntimeConfig()
         config_payload = current.to_dict()
@@ -2020,12 +2038,13 @@ class MainTests(unittest.TestCase):
         current.okx_api_secret = "keep-okx-secret"
         current.okx_api_passphrase = "keep-okx-pass"
         current.x_bearer_token = "keep-token"
+        current.feishu_webhook_url = "https://open.feishu.cn/webhook/keep"
 
         with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(current, None)):
             imported = _import_runtime_config_template(
                 {
                     "config_template": [
-                        '{"kind":"runtime_config_template","version":1,"config":{"binance_api_key":"","binance_api_secret":"","x_bearer_token":"","scan_defaults":{"quote_asset":"FDUSD"}}}'
+                        '{"kind":"runtime_config_template","version":1,"config":{"binance_api_key":"","binance_api_secret":"","x_bearer_token":"","feishu_webhook_url":"","scan_defaults":{"quote_asset":"FDUSD"}}}'
                     ]
                 }
             )
@@ -2036,6 +2055,7 @@ class MainTests(unittest.TestCase):
         self.assertEqual(imported.okx_api_secret, "keep-okx-secret")
         self.assertEqual(imported.okx_api_passphrase, "keep-okx-pass")
         self.assertEqual(imported.x_bearer_token, "keep-token")
+        self.assertEqual(imported.feishu_webhook_url, "https://open.feishu.cn/webhook/keep")
         self.assertEqual(imported.scan_defaults.quote_asset, "FDUSD")
 
     def test_export_runtime_config_template_redacts_secrets(self) -> None:
@@ -2046,6 +2066,7 @@ class MainTests(unittest.TestCase):
         current.okx_api_secret = "keep-okx-secret"
         current.okx_api_passphrase = "keep-okx-pass"
         current.x_bearer_token = "keep-token"
+        current.feishu_webhook_url = "https://open.feishu.cn/webhook/keep"
 
         with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(current, None)):
             payload = _export_runtime_config_template(include_secrets=False)
@@ -2056,6 +2077,7 @@ class MainTests(unittest.TestCase):
         self.assertEqual(payload["config"]["okx_api_secret"], "")
         self.assertEqual(payload["config"]["okx_api_passphrase"], "")
         self.assertEqual(payload["config"]["x_bearer_token"], "")
+        self.assertEqual(payload["config"]["feishu_webhook_url"], "")
 
     def test_backtest_export_csv_contains_core_rows(self) -> None:
         csv_text = _backtest_export_csv(

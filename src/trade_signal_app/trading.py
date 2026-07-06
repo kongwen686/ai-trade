@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 
+from .feishu import FeishuTradeNotifier
 from .runtime_config import AutoTradeDefaults
 from .service import SignalScanner
 
@@ -189,11 +190,13 @@ class AutoTrader:
         scanner: SignalScanner,
         state_store: TradingStateStore,
         blocked_symbols: dict[str, str] | None = None,
+        trade_notifier: FeishuTradeNotifier | None = None,
     ) -> None:
         self.scanner = scanner
         self.execution_gateway = getattr(scanner, "gateway", None)
         self.state_store = state_store
         self.blocked_symbols = blocked_symbols or {}
+        self.trade_notifier = trade_notifier
 
     def set_execution_gateway(self, gateway: object) -> None:
         self.execution_gateway = gateway
@@ -296,6 +299,7 @@ class AutoTrader:
             events.append(event)
             if event.status in {"filled", "paper_filled"}:
                 positions.append(position)
+                self._notify_trade_event(event=event, position=position)
                 open_symbols.add(position.symbol)
                 exposure += position.quote_notional
 
@@ -337,9 +341,23 @@ class AutoTrader:
             event = self._close_position(position, price, config, exit_reason)
             events.append(event)
             if event.status in {"filled", "paper_filled"}:
+                self._notify_trade_event(event=event, position=position)
                 continue
             remaining.append(position)
         return remaining
+
+    def _notify_trade_event(
+        self,
+        *,
+        event: TradingEvent,
+        position: TradingPosition | None = None,
+    ) -> None:
+        if self.trade_notifier is None:
+            return
+        try:
+            self.trade_notifier.notify_trade(event=event, position=position)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Feishu trade notification failed for {event.action} {event.symbol}: {exc}")
 
     def _latest_prices_for_positions(
         self,

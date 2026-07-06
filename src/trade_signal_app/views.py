@@ -2094,6 +2094,8 @@ def _settings_description_map(lang: str) -> dict[str, str]:
         "Trailing Stop %": ("按持仓最高价回撤该比例移动保护止损；值越小越容易提前落袋。", "Trailing pullback from the highest price; smaller values exit sooner."),
         "Cooldown Minutes": ("自动交易开仓或平仓后的冷却时间，避免连续追单。", "Cooldown after automated trades to avoid repeated entries."),
         "Use exchange order precheck/test": ("勾选时 live 模式只做交易所订单预检或测试，不会真实成交。", "When checked, live mode uses exchange order precheck/test without filling real orders."),
+        "Feishu Webhook URL": ("飞书机器人 Webhook 地址。留空会保留原值；在买入成交和卖出执行时推送结构化消息。", "Feishu bot webhook URL. Leave blank to keep the saved value; filled buy and sell trades send structured notifications."),
+        "Clear Feishu webhook": ("勾选后保存会清空已保存的飞书机器人 Webhook。", "When checked, saving clears the saved Feishu bot webhook."),
         "Default Preset": ("回测页默认使用的策略参数模板。", "Default strategy preset for the backtest page."),
         "Default Archives": ("本地 Binance public-data ZIP 路径或 glob，可多行填写。", "Local Binance public-data ZIP paths or globs; multiple lines are supported."),
         "Lookback Bars": ("计算指标时使用的历史 K 线数量。", "Number of historical bars used for indicators."),
@@ -2548,6 +2550,13 @@ def render_settings_page(
           <label><span>Trailing Stop %</span><input type="number" step="0.1" min="0" name="autotrade_trailing_stop_pct" value="{float(params.get('autotrade_trailing_stop_pct', 2.0)):.1f}" /></label>
           <label><span>Cooldown Minutes</span><input type="number" min="0" name="autotrade_cooldown_minutes" value="{int(params['autotrade_cooldown_minutes'])}" /></label>
           <label class="inline-check"><input type="hidden" name="autotrade_order_test_only" value="0" /><input type="checkbox" name="autotrade_order_test_only" value="1" {"checked" if params["autotrade_order_test_only"] else ""} /><span>Use exchange order precheck/test</span></label>
+          </div>
+          </div>
+          <div class="settings-group">
+          <div class="settings-group-head"><h3>消息推送</h3><p>买入成交和卖出执行后，会把标的、价格、仓位、盈亏等关键信息推送给飞书机器人。当前状态：{"已配置" if status.get("feishu_webhook_configured") else "未配置"}。</p></div>
+          <div class="settings-grid">
+          <label class="full-span"><span>Feishu Webhook URL</span><input type="password" name="feishu_webhook_url" value="" placeholder="留空保持当前" autocomplete="off" /></label>
+          <label class="inline-check"><input type="checkbox" name="clear_feishu_webhook" /><span>Clear Feishu webhook</span></label>
           </div>
           </div>
           <div class="settings-submit-bar">

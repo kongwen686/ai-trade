@@ -80,6 +80,7 @@ class RuntimeConfigTests(unittest.TestCase):
         config.onchain_api_key = "onchain-key"
         config.llm_api_key = "llm-key"
         config.openai_api_key = "openai-key"
+        config.feishu_webhook_url = "https://open.feishu.cn/webhook/test"
         config.intelligence_defaults.llm_api_key = "nested-llm-key"
 
         payload = config.to_template_payload()
@@ -95,6 +96,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(payload["config"]["onchain_api_key"], "")
         self.assertEqual(payload["config"]["llm_api_key"], "")
         self.assertEqual(payload["config"]["openai_api_key"], "")
+        self.assertEqual(payload["config"]["feishu_webhook_url"], "")
         self.assertEqual(payload["config"]["intelligence_defaults"]["llm_api_key"], "")
         self.assertEqual(payload["config"]["intelligence_defaults"]["openai_api_key"], "")
 
@@ -110,6 +112,7 @@ class RuntimeConfigTests(unittest.TestCase):
         current.onchain_api_key = "keep-onchain"
         current.llm_api_key = "keep-llm"
         current.openai_api_key = "keep-openai"
+        current.feishu_webhook_url = "https://open.feishu.cn/webhook/keep"
 
         imported = RuntimeConfig.from_template_payload(
             {
@@ -125,6 +128,7 @@ class RuntimeConfigTests(unittest.TestCase):
                     "onchain_api_key": "",
                     "llm_api_key": "",
                     "openai_api_key": "",
+                    "feishu_webhook_url": "",
                     "scan_defaults": {"quote_asset": "FDUSD"},
                 },
             },
@@ -141,6 +145,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(imported.onchain_api_key, "keep-onchain")
         self.assertEqual(imported.llm_api_key, "keep-llm")
         self.assertEqual(imported.openai_api_key, "keep-openai")
+        self.assertEqual(imported.feishu_webhook_url, "https://open.feishu.cn/webhook/keep")
         self.assertEqual(imported.scan_defaults.quote_asset, "FDUSD")
 
 

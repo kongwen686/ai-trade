@@ -24,6 +24,7 @@ SECRET_FIELDS = (
     "tradingview_password",
     "llm_api_key",
     "openai_api_key",
+    "feishu_webhook_url",
 )
 
 
@@ -211,6 +212,7 @@ class RuntimeConfig:
     llm_model: str = "gpt-5.5"
     openai_api_key: str = ""
     openai_model: str = "gpt-5.5"
+    feishu_webhook_url: str = ""
     scan_defaults: ScanDefaults = field(default_factory=ScanDefaults)
     backtest_defaults: BacktestDefaults = field(default_factory=BacktestDefaults)
     autotrade_defaults: AutoTradeDefaults = field(default_factory=AutoTradeDefaults)
@@ -249,6 +251,7 @@ class RuntimeConfig:
             llm_model=settings.llm_model,
             openai_api_key=settings.openai_api_key,
             openai_model=settings.openai_model,
+            feishu_webhook_url=settings.feishu_webhook_url,
             intelligence_defaults=IntelligenceDefaults(
                 llm_provider=settings.llm_provider,
                 llm_api_key=settings.llm_api_key,
@@ -335,6 +338,7 @@ class RuntimeConfig:
             llm_model=llm_model,
             openai_api_key=str(payload.get("openai_api_key", defaults.openai_api_key)),
             openai_model=str(payload.get("openai_model", defaults.openai_model)),
+            feishu_webhook_url=str(payload.get("feishu_webhook_url", defaults.feishu_webhook_url)),
             scan_defaults=ScanDefaults(
                 **{
                     **asdict(defaults.scan_defaults),

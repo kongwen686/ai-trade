@@ -60,6 +60,15 @@ class FakeScanner:
         return SimpleNamespace(scanned_symbols=10, returned_signals=len(self.signals)), self.signals
 
 
+class FakeTradeNotifier:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str]] = []
+
+    def notify_trade(self, *, event, position=None) -> bool:
+        self.calls.append((event.action, event.symbol, position.symbol if position is not None else ""))
+        return True
+
+
 class TradingTests(unittest.TestCase):
     def test_state_store_recovers_trailing_json_garbage(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -83,7 +92,8 @@ class TradingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = TradingStateStore(Path(temp_dir) / "state.json")
             scanner = FakeScanner([_signal()])
-            trader = AutoTrader(scanner=scanner, state_store=store)
+            notifier = FakeTradeNotifier()
+            trader = AutoTrader(scanner=scanner, state_store=store, trade_notifier=notifier)
 
             report = trader.run_once(
                 AutoTradeDefaults(
@@ -100,6 +110,7 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(report.events[0].status, "paper_filled")
         self.assertEqual(stored_events[0].status, "paper_filled")
         self.assertEqual(scanner.gateway.buy_calls, [])
+        self.assertEqual(notifier.calls, [("BUY", "BTCUSDT", "BTCUSDT")])
 
     def test_risk_blocked_symbol_does_not_open_position(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -148,7 +159,8 @@ class TradingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = TradingStateStore(Path(temp_dir) / "state.json")
             scanner = FakeScanner([_signal()])
-            trader = AutoTrader(scanner=scanner, state_store=store)
+            notifier = FakeTradeNotifier()
+            trader = AutoTrader(scanner=scanner, state_store=store, trade_notifier=notifier)
 
             with patch.dict("os.environ", {"AI_TRADE_LIVE_CONFIRM": LIVE_CONFIRM_VALUE}):
                 report = trader.run_once(
@@ -162,6 +174,7 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(report.events[0].status, "test_accepted")
         self.assertEqual(len(report.open_positions), 0)
         self.assertEqual(scanner.gateway.buy_calls[0]["test"], True)
+        self.assertEqual(notifier.calls, [])
 
     def test_live_filled_position_uses_exchange_executed_quantity(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -208,7 +221,8 @@ class TradingTests(unittest.TestCase):
                 ]
             )
             scanner = FakeScanner([_signal(price=110.0)])
-            trader = AutoTrader(scanner=scanner, state_store=store)
+            notifier = FakeTradeNotifier()
+            trader = AutoTrader(scanner=scanner, state_store=store, trade_notifier=notifier)
 
             report = trader.run_once(AutoTradeDefaults(enabled=True, mode="paper", score_threshold=99.0))
             stored_events = store.load_events()
@@ -219,6 +233,7 @@ class TradingTests(unittest.TestCase):
         self.assertAlmostEqual(report.events[0].realized_pnl, 5.0)
         self.assertAlmostEqual(report.events[0].realized_pnl_pct, 10.0)
         self.assertEqual(stored_events[0].realized_pnl, 5.0)
+        self.assertEqual(notifier.calls, [("SELL", "BTCUSDT", "BTCUSDT")])
 
     def test_profit_protection_moves_stop_and_exits_before_winner_turns_loss(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

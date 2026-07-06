@@ -30,6 +30,7 @@ from .backtest import (
 from .binance_client import BinancePublicAPIError, parse_ticker
 from .config import BASE_DIR, SETTINGS
 from .data_services import LLM_PROVIDER_PRESETS, PUBLIC_DATA_PRESETS, get_llm_provider, llm_provider_ids, public_data_preset_ids
+from .feishu import FeishuNotificationError, FeishuTradeNotifier
 from .intelligence import IntelligenceHub, IntelligenceSnapshot, LlmInsightClient
 from .okx_client import OKXSpotGateway
 from .onchain import DEFAULT_ONCHAIN_SYMBOLS, OPEN_MULTICHAIN_CONFIGS, OpenMultiChainOnchainProvider
@@ -175,6 +176,8 @@ def _validate_runtime_config(config: RuntimeConfig) -> None:
     _validate_range(config.reddit_max_results, "Reddit Max Results", minimum=5, maximum=100)
     _validate_range(config.x_account_weight_pct, "Account Weight", minimum=0, maximum=100)
     _validate_range(config.tradingview_bars, "TradingView Bars", minimum=100, maximum=50000)
+    if config.feishu_webhook_url and not config.feishu_webhook_url.startswith(("http://", "https://")):
+        raise ValueError("Feishu Webhook URL 必须以 http:// 或 https:// 开头。")
     if not config.tradingview_exchange.strip().isalnum():
         raise ValueError("TradingView Exchange 只能包含字母和数字。")
     if not config.tradingview_symbols:
@@ -323,6 +326,7 @@ def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "llm_base_url": config.llm_base_url,
         "llm_model": config.llm_model,
         "openai_model": config.openai_model,
+        "feishu_webhook_configured": bool(config.feishu_webhook_url),
         "x_account_mode": config.x_account_mode,
         "x_account_weight_pct": config.x_account_weight_pct,
         "x_tracked_accounts": config.x_tracked_accounts,
@@ -387,6 +391,7 @@ def _settings_status_from_config(config: RuntimeConfig) -> dict[str, object]:
         "storage_mode": APP_STATE.storage_mode_label(),
         "autotrade_enabled": config.autotrade_defaults.enabled,
         "autotrade_mode": config.autotrade_defaults.mode,
+        "feishu_webhook_configured": bool(config.feishu_webhook_url),
         "intelligence_enabled": config.intelligence_defaults.enabled,
         "llm_enabled": config.intelligence_defaults.llm_enabled,
         "llm_provider": config.intelligence_defaults.llm_provider,
@@ -498,6 +503,27 @@ def _execution_gateway(runtime_config: RuntimeConfig, scanner: object) -> object
     if runtime_config.autotrade_defaults.execution_exchange.lower() == "okx":
         return _okx_gateway(runtime_config)
     return getattr(scanner, "gateway", scanner)
+
+
+def _feishu_trade_notifier(runtime_config: RuntimeConfig) -> FeishuTradeNotifier | None:
+    webhook_url = runtime_config.feishu_webhook_url.strip()
+    if not webhook_url:
+        return None
+    return FeishuTradeNotifier(webhook_url)
+
+
+def _notify_trade_event(
+    notifier: FeishuTradeNotifier | None,
+    *,
+    event: TradingEvent,
+    position: TradingPosition | None = None,
+) -> None:
+    if notifier is None:
+        return
+    try:
+        notifier.notify_trade(event=event, position=position)
+    except FeishuNotificationError as exc:
+        print(f"Feishu trade notification failed for {event.action} {event.symbol}: {exc}")
 
 
 def _latest_prices_for_open_positions(
@@ -972,6 +998,7 @@ def _run_forced_paper_trading_once() -> dict[str, object]:
         mode="paper",
         order_test_only=True,
     )
+    notifier = _feishu_trade_notifier(runtime_config)
     query = {
         "quote_asset": [runtime_config.scan_defaults.quote_asset],
         "interval": [runtime_config.scan_defaults.interval],
@@ -1048,6 +1075,7 @@ def _run_forced_paper_trading_once() -> dict[str, object]:
         )
         positions.append(position)
         events.append(event)
+        _notify_trade_event(notifier, event=event, position=position)
         open_symbols.add(symbol)
         exposure += config.quote_order_qty
 
@@ -1116,7 +1144,12 @@ def _run_trading_once(*, force_paper: bool = False) -> dict[str, object]:
             )
     risk_snapshot = IntelligenceHub(scanner=scanner, runtime_config=runtime_config, settings=SETTINGS).snapshot()
     blocked_symbols = risk_snapshot.execution_risk.blocked_symbols
-    trader = AutoTrader(scanner=scanner, state_store=_trading_store(), blocked_symbols=blocked_symbols)
+    trader = AutoTrader(
+        scanner=scanner,
+        state_store=_trading_store(),
+        blocked_symbols=blocked_symbols,
+        trade_notifier=_feishu_trade_notifier(runtime_config),
+    )
     trader.set_execution_gateway(_execution_gateway(runtime_config, scanner))
     report = trader.run_once(autotrade_config)
     latest_prices = _latest_prices_for_open_positions(report.open_positions, scanner)
@@ -3487,6 +3520,7 @@ def _build_runtime_config(form: dict[str, list[str]]) -> RuntimeConfig:
     keep_onchain_api_key = current_config.onchain_api_key
     keep_tradingview_password = current_config.tradingview_password
     keep_llm_api_key = current_config.llm_api_key or current_config.openai_api_key
+    keep_feishu_webhook_url = current_config.feishu_webhook_url
     if _parse_bool_flag(form, "clear_binance_auth"):
         keep_binance_key = ""
         keep_binance_secret = ""
@@ -3535,6 +3569,12 @@ def _build_runtime_config(form: dict[str, list[str]]) -> RuntimeConfig:
         candidate = _get_first(form, "llm_api_key", "").strip() or _get_first(form, "openai_api_key", "").strip()
         if candidate:
             keep_llm_api_key = candidate
+    if _parse_bool_flag(form, "clear_feishu_webhook"):
+        keep_feishu_webhook_url = ""
+    else:
+        candidate = _get_first(form, "feishu_webhook_url", "").strip()
+        if candidate:
+            keep_feishu_webhook_url = candidate
 
     llm_provider = _get_first(form, "llm_provider", current_config.llm_provider).strip() or "openai"
     llm_model = _get_first(
@@ -3589,6 +3629,7 @@ def _build_runtime_config(form: dict[str, list[str]]) -> RuntimeConfig:
         x_tracked_accounts=_parse_multiline_list(_get_first(form, "x_tracked_accounts", "\n".join(current_config.x_tracked_accounts))),
         openai_api_key=keep_llm_api_key if llm_provider == "openai" else current_config.openai_api_key,
         openai_model=llm_model if llm_provider == "openai" else current_config.openai_model,
+        feishu_webhook_url=keep_feishu_webhook_url,
         scan_defaults=ScanDefaults(
             quote_asset=_get_first(form, "scan_quote_asset", current_config.scan_defaults.quote_asset).strip().upper() or current_config.scan_defaults.quote_asset,
             interval=_get_first(form, "scan_interval", current_config.scan_defaults.interval).strip() or current_config.scan_defaults.interval,
