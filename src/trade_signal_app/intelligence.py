@@ -13,6 +13,7 @@ from .models import TradeSignal
 from .onchain import OpenMultiChainOnchainProvider
 from .runtime_config import IntelligenceDefaults, RuntimeConfig
 from .service import SignalScanner
+from .time_utils import now_app_time
 
 
 @dataclass(frozen=True)
@@ -295,7 +296,7 @@ class IntelligenceHub:
             strategy_hits=strategy_hits,
         )
         return IntelligenceSnapshot(
-            generated_at=datetime.now(timezone.utc),
+            generated_at=now_app_time(),
             scanned_symbols=summary.scanned_symbols,
             returned_signals=summary.returned_signals,
             intel_items=intel_items,

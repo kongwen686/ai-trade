@@ -7,6 +7,7 @@ import unittest
 
 from trade_signal_app.models import Candlestick
 from trade_signal_app.tradingview_data import (
+    fetch_tradingview_history,
     load_tradingview_csv,
     normalize_tradingview_interval,
     tradingview_cache_path,
@@ -50,6 +51,45 @@ class TradingViewDataTests(unittest.TestCase):
         self.assertEqual(loaded[0].open_time, start)
         self.assertEqual(loaded[0].close_price, 104.0)
         self.assertEqual(loaded[0].taker_buy_quote_volume, 520.0)
+
+    def test_fetch_uses_binance_fallback_when_tvdatafeed_missing(self) -> None:
+        start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        candles = [
+            Candlestick(
+                open_time=start,
+                close_time=start + timedelta(hours=4) - timedelta(milliseconds=1),
+                open_price=100.0,
+                high_price=105.0,
+                low_price=98.0,
+                close_price=104.0,
+                volume=10.0,
+                quote_volume=1040.0,
+                trade_count=20,
+                taker_buy_base_volume=5.0,
+                taker_buy_quote_volume=520.0,
+            )
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_root = Path(temp_dir)
+            with (
+                unittest.mock.patch("trade_signal_app.tradingview_data._load_tvdatafeed", side_effect=ValueError("missing tvdatafeed")),
+                unittest.mock.patch("trade_signal_app.tradingview_data._fetch_binance_public_history", return_value=candles) as fetch_binance,
+            ):
+                result = fetch_tradingview_history(
+                    cache_root=cache_root,
+                    exchange="binance",
+                    symbol="btcusdt",
+                    interval="240",
+                    bars=5000,
+                )
+
+            cached = load_tradingview_csv(result.cache_path, interval=result.interval)
+
+        fetch_binance.assert_called_once_with(symbol="btcusdt", interval="4h", bars=5000)
+        self.assertEqual(result.source, "binance_public_fallback")
+        self.assertEqual(result.candle_count, 1)
+        self.assertEqual(cached[0].close_price, 104.0)
 
 
 if __name__ == "__main__":

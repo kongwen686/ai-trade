@@ -53,6 +53,7 @@ class FeishuTests(unittest.TestCase):
         fields = card["elements"][1]["fields"]
         rendered = "\n".join(str(item["text"]["content"]) for item in fields)
         self.assertIn("**标的**\nBTCUSDT", rendered)
+        self.assertIn("**成交时间**\n2026-07-06 14:00:00 UTC+8", rendered)
         self.assertIn("**止损价格**\n96.00000000", rendered)
         self.assertIn("**止盈价格**\n109.00000000", rendered)
 

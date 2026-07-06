@@ -29,6 +29,7 @@ from . import main_backtest as backtest_handlers
 from . import main_scan as scan_handlers
 from .main_request_body import _read_body, _strategy_description_from_body
 from .strategy_builder import compile_strategy
+from .time_utils import APP_TIMEZONE, now_app_time
 from .trading import AutoTrader, LIVE_CONFIRM_VALUE, TradingEvent, TradingPosition, TradingRunReport, TradingStateStore
 from .views import normalize_language, render_backtest_page, render_index_page, render_settings_page, render_terminal_module_page, render_terminal_page, render_trading_page
 
@@ -45,11 +46,11 @@ LLM_WORKBENCH_TIMEOUT_SECONDS = 8
 OKX_GATEWAY_TIMEOUT_SECONDS = 5
 TERMINAL_MODULES = {"market", "community", "onchain", "basis", "strategies", "trading", "risk"}
 _TERMINAL_CACHE_LOCK = RLock()
-_TERMINAL_CACHE: dict[str, object] = {"key": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc), "payload": None}
+_TERMINAL_CACHE: dict[str, object] = {"key": None, "expires_at": datetime.min.replace(tzinfo=APP_TIMEZONE), "payload": None}
 _TERMINAL_INFLIGHT: dict[tuple[object, ...], Future] = {}
 _TERMINAL_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="terminal-refresh")
 _ONCHAIN_MODULE_CACHE_LOCK = RLock()
-_ONCHAIN_MODULE_CACHE: dict[str, object] = {"key": None, "expires_at": datetime.min.replace(tzinfo=timezone.utc), "payload": None}
+_ONCHAIN_MODULE_CACHE: dict[str, object] = {"key": None, "expires_at": datetime.min.replace(tzinfo=APP_TIMEZONE), "payload": None}
 _ONCHAIN_INFLIGHT: dict[tuple[object, ...], Future] = {}
 _ONCHAIN_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="onchain-refresh")
 PAPER_AUTO_DEFAULT_INTERVAL_SECONDS = 300
@@ -191,7 +192,7 @@ def _health_payload() -> dict[str, object]:
     return {
         "ok": bool(trading_state_status["readable"]),
         "version": __version__,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": now_app_time().isoformat(),
         "runtime_config": runtime_config_status,
         "trading_state": trading_state_status,
         "features": {
@@ -721,7 +722,7 @@ def _alert_count_payload(readiness: dict[str, object] | None = None) -> int:
     readiness = readiness or _trading_readiness_payload()
     blockers = readiness.get("blockers") if isinstance(readiness.get("blockers"), list) else []
     count = len(blockers)
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    cutoff = now_app_time() - timedelta(hours=24)
     for event in _sort_trading_events_desc(_trading_store().load_events())[:30]:
         if event.status in {"blocked", "risk_blocked", "rejected", "auth_failed"} and _event_created_at_utc(event) >= cutoff:
             count += 1
@@ -751,11 +752,11 @@ def _run_forced_paper_trading_once() -> dict[str, object]:
         "min_quote_volume": [str(runtime_config.scan_defaults.min_quote_volume)],
         "min_trade_count": [str(runtime_config.scan_defaults.min_trade_count)],
     }
-    scan_payload, _ = _scan_payload(query)
+    scan_payload, _ = _scan_payload(query, force_refresh=True)
     signals = [item for item in scan_payload.get("signals", []) if isinstance(item, dict)]
     positions = _trading_store().load()
     events: list[TradingEvent] = []
-    now = datetime.now(timezone.utc)
+    now = now_app_time()
     open_symbols = {position.symbol for position in positions}
     exposure = sum(position.quote_notional for position in positions)
     blocked_symbols = {}
@@ -912,29 +913,35 @@ def _paper_auto_status_payload() -> dict[str, object]:
         return _to_jsonable(payload)
 
 
-def _paper_auto_worker(stop_event: Event, interval_seconds: int) -> None:
+def _run_paper_auto_once(interval_seconds: int) -> None:
+    try:
+        result = _run_trading_once(force_paper=True)
+        with _PAPER_AUTO_LOCK:
+            _PAPER_AUTO_STATE.update(
+                {
+                    "running": True,
+                    "interval_seconds": interval_seconds,
+                    "last_run_at": now_app_time().isoformat(),
+                    "last_error": "",
+                    "run_count": int(_PAPER_AUTO_STATE.get("run_count") or 0) + 1,
+                    "last_result": result,
+                }
+            )
+    except Exception as exc:  # noqa: BLE001
+        with _PAPER_AUTO_LOCK:
+            _PAPER_AUTO_STATE.update(
+                {
+                    "last_run_at": now_app_time().isoformat(),
+                    "last_error": str(exc),
+                }
+            )
+
+
+def _paper_auto_worker(stop_event: Event, interval_seconds: int, initial_delay: bool = True) -> None:
+    if initial_delay and stop_event.wait(interval_seconds):
+        return
     while not stop_event.is_set():
-        try:
-            result = _run_trading_once(force_paper=True)
-            with _PAPER_AUTO_LOCK:
-                _PAPER_AUTO_STATE.update(
-                    {
-                        "running": True,
-                        "interval_seconds": interval_seconds,
-                        "last_run_at": datetime.now(timezone.utc).isoformat(),
-                        "last_error": "",
-                        "run_count": int(_PAPER_AUTO_STATE.get("run_count") or 0) + 1,
-                        "last_result": result,
-                    }
-                )
-        except Exception as exc:  # noqa: BLE001
-            with _PAPER_AUTO_LOCK:
-                _PAPER_AUTO_STATE.update(
-                    {
-                        "last_run_at": datetime.now(timezone.utc).isoformat(),
-                        "last_error": str(exc),
-                    }
-                )
+        _run_paper_auto_once(interval_seconds)
         if stop_event.wait(interval_seconds):
             break
     with _PAPER_AUTO_LOCK:
@@ -942,7 +949,7 @@ def _paper_auto_worker(stop_event: Event, interval_seconds: int) -> None:
             _PAPER_AUTO_STATE.update(
                 {
                     "running": False,
-                    "stopped_at": datetime.now(timezone.utc).isoformat(),
+                    "stopped_at": now_app_time().isoformat(),
                 }
             )
 
@@ -960,14 +967,16 @@ def _start_paper_auto_trading(interval_seconds: int = PAPER_AUTO_DEFAULT_INTERVA
             {
                 "running": True,
                 "interval_seconds": interval_seconds,
-                "started_at": datetime.now(timezone.utc).isoformat(),
+                "started_at": now_app_time().isoformat(),
                 "stopped_at": None,
                 "last_error": "",
             }
         )
+    _run_paper_auto_once(interval_seconds)
+    with _PAPER_AUTO_LOCK:
         _PAPER_AUTO_THREAD = Thread(
             target=_paper_auto_worker,
-            args=(stop_event, interval_seconds),
+            args=(stop_event, interval_seconds, True),
             name="paper-auto-trading",
             daemon=True,
         )
@@ -988,7 +997,7 @@ def _stop_paper_auto_trading() -> dict[str, object]:
             _PAPER_AUTO_STATE.update(
                 {
                     "running": False,
-                    "stopped_at": datetime.now(timezone.utc).isoformat(),
+                    "stopped_at": now_app_time().isoformat(),
                 }
             )
         return _paper_auto_status_payload()
@@ -1035,7 +1044,7 @@ def _terminal_cache_key(runtime_config: RuntimeConfig) -> tuple[object, ...]:
 def _cached_terminal_payload() -> dict[str, object] | None:
     runtime_config, _ = APP_STATE.snapshot()
     cache_key = _terminal_cache_key(runtime_config)
-    now = datetime.now(timezone.utc)
+    now = now_app_time()
     with _TERMINAL_CACHE_LOCK:
         cached_payload = _TERMINAL_CACHE.get("payload")
         cached_expires_at = _TERMINAL_CACHE.get("expires_at")
@@ -1054,7 +1063,7 @@ def _store_terminal_payload(cache_key: tuple[object, ...], payload: dict[str, ob
         _TERMINAL_CACHE.update(
             {
                 "key": cache_key,
-                "expires_at": datetime.now(timezone.utc) + timedelta(seconds=TERMINAL_SNAPSHOT_TTL_SECONDS),
+                "expires_at": now_app_time() + timedelta(seconds=TERMINAL_SNAPSHOT_TTL_SECONDS),
                 "payload": payload,
             }
         )
@@ -1890,7 +1899,7 @@ def _fast_llm_insight_payload(
 
 
 def _cached_onchain_module_payload() -> dict[str, object] | None:
-    now = datetime.now(timezone.utc)
+    now = now_app_time()
     with _ONCHAIN_MODULE_CACHE_LOCK:
         cached_payload = _ONCHAIN_MODULE_CACHE.get("payload")
         cached_expires_at = _ONCHAIN_MODULE_CACHE.get("expires_at")
@@ -1912,7 +1921,7 @@ def _store_onchain_module_payload(cache_key: tuple[object, ...], payload: dict[s
         _ONCHAIN_MODULE_CACHE.update(
             {
                 "key": cache_key,
-                "expires_at": datetime.now(timezone.utc) + timedelta(seconds=TERMINAL_SNAPSHOT_TTL_SECONDS),
+                "expires_at": now_app_time() + timedelta(seconds=TERMINAL_SNAPSHOT_TTL_SECONDS),
                 "payload": payload,
             }
         )
@@ -2004,7 +2013,7 @@ def _annotate_onchain_event_sources(events: list[object]) -> list[dict[str, obje
 def _onchain_module_payload_with_timeout(timeout_seconds: float) -> dict[str, object]:
     runtime_config, _ = APP_STATE.snapshot()
     cache_key = _onchain_module_cache_key(runtime_config)
-    now = datetime.now(timezone.utc)
+    now = now_app_time()
     with _ONCHAIN_MODULE_CACHE_LOCK:
         cached_payload = _ONCHAIN_MODULE_CACHE.get("payload")
         cached_expires_at = _ONCHAIN_MODULE_CACHE.get("expires_at")
@@ -2058,7 +2067,7 @@ def _fast_terminal_payload(
     funding_rates = [item for item in basis.get("funding_rates", []) if isinstance(item, dict)]
     strategy_hits = [item for item in strategies.get("strategy_hits", []) if isinstance(item, dict)]
     return {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": now_app_time().isoformat(),
         "scanned_symbols": 0,
         "returned_signals": 0,
         "intel_items": intel_items,
@@ -2309,9 +2318,14 @@ def _fallback_scan_payload(params: dict[str, object], warning: str) -> dict[str,
     return scan_handlers._fallback_scan_payload(params, warning, scanner=scanner)
 
 
-def _scan_payload(query: dict[str, list[str]]) -> tuple[dict[str, object], dict[str, object]]:
+def _scan_payload(query: dict[str, list[str]], *, force_refresh: bool = False) -> tuple[dict[str, object], dict[str, object]]:
     runtime_config, scanner = APP_STATE.snapshot()
-    return scan_handlers._scan_payload(query, runtime_config=runtime_config, scanner=scanner)
+    return scan_handlers._scan_payload(
+        query,
+        runtime_config=runtime_config,
+        scanner=scanner,
+        force_refresh=force_refresh,
+    )
 
 
 def _get_first(query: dict[str, list[str]], key: str, default: str) -> str:
@@ -2388,7 +2402,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
 
             if parsed.path == "/":
-                payload, params = _scan_payload(query)
+                payload, params = _scan_payload(query, force_refresh=True)
                 html = render_index_page(
                     summary=payload["summary"],
                     signals=payload["signals"],
@@ -2482,7 +2496,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
 
             if parsed.path == "/api/scan":
-                payload, _ = _scan_payload(query)
+                payload, _ = _scan_payload(query, force_refresh=_parse_bool_flag(query, "refresh"))
                 self._send_text(
                     json.dumps(payload, ensure_ascii=False),
                     content_type="application/json; charset=utf-8",

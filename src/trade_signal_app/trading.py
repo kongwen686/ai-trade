@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import json
 import math
 import os
@@ -10,6 +10,7 @@ from pathlib import Path
 from .feishu import FeishuTradeNotifier
 from .runtime_config import AutoTradeDefaults
 from .service import SignalScanner
+from .time_utils import now_app_time, to_app_time
 
 LIVE_CONFIRM_VALUE = "I_UNDERSTAND_REAL_ORDERS"
 
@@ -45,7 +46,7 @@ class TradingEvent:
     realized_pnl: float | None = None
     realized_pnl_pct: float | None = None
     exit_reason: str = ""
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=now_app_time)
     response: dict[str, object] | None = None
     exchange: str = "BINANCE"
 
@@ -58,7 +59,7 @@ class TradingRunReport:
     returned_signals: int
     open_positions: list[TradingPosition]
     events: list[TradingEvent]
-    generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    generated_at: datetime = field(default_factory=now_app_time)
 
 
 class TradingStateStore:
@@ -99,7 +100,7 @@ class TradingStateStore:
             return {}
         if not text[end:].strip():
             return payload
-        backup_path = self.path.with_suffix(f"{self.path.suffix}.corrupt-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}")
+        backup_path = self.path.with_suffix(f"{self.path.suffix}.corrupt-{now_app_time().strftime('%Y%m%d%H%M%S')}")
         try:
             backup_path.write_text(text, encoding="utf-8")
             if isinstance(payload, dict):
@@ -140,7 +141,7 @@ class TradingStateStore:
             quote_notional=float(payload["quote_notional"]),
             score=float(payload["score"]),
             grade=str(payload["grade"]),
-            opened_at=datetime.fromisoformat(str(payload["opened_at"])),
+            opened_at=to_app_time(datetime.fromisoformat(str(payload["opened_at"]))),
             stop_price=float(payload["stop_price"]),
             take_profit_price=float(payload["take_profit_price"]),
             mode=str(payload.get("mode", "paper")),
@@ -152,7 +153,7 @@ class TradingStateStore:
     @staticmethod
     def _position_to_dict(position: TradingPosition) -> dict[str, object]:
         payload = asdict(position)
-        payload["opened_at"] = position.opened_at.isoformat()
+        payload["opened_at"] = to_app_time(position.opened_at).isoformat()
         return payload
 
     @staticmethod
@@ -171,7 +172,7 @@ class TradingStateStore:
             realized_pnl=float(payload["realized_pnl"]) if payload.get("realized_pnl") is not None else None,
             realized_pnl_pct=float(payload["realized_pnl_pct"]) if payload.get("realized_pnl_pct") is not None else None,
             exit_reason=str(payload.get("exit_reason", "")),
-            created_at=datetime.fromisoformat(str(created_at)) if created_at else datetime.now(timezone.utc),
+            created_at=to_app_time(datetime.fromisoformat(str(created_at))) if created_at else now_app_time(),
             response=payload.get("response") if isinstance(payload.get("response"), dict) else None,
             exchange=str(payload.get("exchange", "BINANCE")).upper(),
         )
@@ -179,7 +180,7 @@ class TradingStateStore:
     @staticmethod
     def _event_to_dict(event: TradingEvent) -> dict[str, object]:
         payload = asdict(event)
-        payload["created_at"] = event.created_at.isoformat()
+        payload["created_at"] = to_app_time(event.created_at).isoformat()
         return payload
 
 
@@ -205,7 +206,7 @@ class AutoTrader:
         positions = self.state_store.load()
         events: list[TradingEvent] = []
         summary, signals = self.scanner.scan()
-        now = datetime.now(timezone.utc)
+        now = now_app_time()
 
         latest_prices = self._latest_prices_for_positions(
             positions,
@@ -385,7 +386,7 @@ class AutoTrader:
         return latest_prices
 
     def _open_position(self, signal, config: AutoTradeDefaults) -> tuple[TradingPosition, TradingEvent]:
-        now = datetime.now(timezone.utc)
+        now = now_app_time()
         price = signal.ticker.last_price
         quantity = config.quote_order_qty / price
         client_order_id = self._client_order_id("buy", signal.symbol, now)
@@ -530,7 +531,7 @@ class AutoTrader:
                 symbol=position.symbol,
                 quantity=self._floor_quantity_for_symbol(position.symbol, position.quantity),
                 test=config.order_test_only,
-                client_order_id=self._client_order_id("sell", position.symbol, datetime.now(timezone.utc)),
+                client_order_id=self._client_order_id("sell", position.symbol, now_app_time()),
             )
         except Exception as exc:  # noqa: BLE001
             return TradingEvent(

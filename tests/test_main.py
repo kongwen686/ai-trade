@@ -10,8 +10,10 @@ from types import SimpleNamespace
 import unittest
 from contextlib import redirect_stdout
 from unittest.mock import Mock, patch
+from urllib.parse import parse_qs, urlparse
 import zipfile
 
+import trade_signal_app.main_backtest as main_backtest
 import trade_signal_app.main as app_main
 from trade_signal_app import __version__
 from trade_signal_app.main import (
@@ -121,6 +123,67 @@ class MainTests(unittest.TestCase):
         self.assertEqual(server_factory.call_args.args[1].__name__, "RequestHandler")
         server.serve_forever.assert_called_once_with()
 
+    def test_tradingview_fetch_result_uses_injected_cache_dir(self) -> None:
+        cache_dir = Path("/tmp/custom-tradingview-cache")
+        cache_path = cache_dir / "BINANCE_ETHUSDT_1h.csv"
+        with patch(
+            "trade_signal_app.main_backtest.fetch_tradingview_history",
+            return_value=SimpleNamespace(
+                exchange="BINANCE",
+                symbol="ETHUSDT",
+                interval="1h",
+                candle_count=1200,
+                source="cache",
+                cache_path=cache_path,
+            ),
+        ) as fetch_history:
+            result = main_backtest._tradingview_fetch_result(
+                {
+                    "tradingview_symbol": ["ethusdt"],
+                    "tradingview_exchange": ["binance"],
+                    "tradingview_interval": ["1h"],
+                    "tradingview_bars": ["1200"],
+                },
+                runtime_config=RuntimeConfig(),
+                tradingview_cache_dir=cache_dir,
+            )
+
+        self.assertEqual(fetch_history.call_args.kwargs["cache_root"], cache_dir)
+        self.assertEqual(fetch_history.call_args.kwargs["symbol"], "ETHUSDT")
+        self.assertEqual(result["cache_path"], str(cache_path))
+
+    def test_tradingview_backtest_redirect_uses_injected_runtime_config(self) -> None:
+        runtime_config = RuntimeConfig()
+        runtime_config.backtest_defaults.lookback_bars = 180
+        cache_dir = Path("/tmp/custom-tradingview-cache")
+        cache_path = cache_dir / "BINANCE_ETHUSDT_1h.csv"
+
+        with patch(
+            "trade_signal_app.main_backtest._tradingview_fetch_result",
+            return_value={
+                "exchange": "BINANCE",
+                "symbol": "ETHUSDT",
+                "interval": "1h",
+                "bars": 1200,
+                "cache_path": str(cache_path),
+            },
+        ) as fetch_result:
+            redirect_url = main_backtest._tradingview_backtest_redirect(
+                {},
+                "en",
+                runtime_config=runtime_config,
+                tradingview_cache_dir=cache_dir,
+            )
+
+        fetch_result.assert_called_once_with({}, runtime_config=runtime_config, tradingview_cache_dir=cache_dir)
+        parsed = urlparse(redirect_url)
+        query = parse_qs(parsed.query)
+        self.assertEqual(parsed.path, "/backtest")
+        self.assertEqual(query["archives"], [str(cache_path)])
+        self.assertEqual(query["lookback_bars"], ["180"])
+        self.assertEqual(query["tradingview_symbol"], ["ETHUSDT"])
+        self.assertEqual(query["lang"], ["en"])
+
     def test_run_uses_explicit_host_and_port_over_defaults(self) -> None:
         server = Mock()
         with patch("trade_signal_app.main.ThreadingHTTPServer", return_value=server) as server_factory:
@@ -154,6 +217,7 @@ class MainTests(unittest.TestCase):
             payload = _health_payload()
 
         self.assertTrue(payload["ok"])
+        self.assertEqual(datetime.fromisoformat(str(payload["generated_at"])).utcoffset(), timedelta(hours=8))
         self.assertFalse(payload["external_checks"]["performed"])
         self.assertIn("Binance API key/secret 未配置", payload["autotrade"]["local_blockers"])
         self.assertIn("AI_TRADE_LIVE_CONFIRM", payload["autotrade"]["local_blockers"][1])
@@ -242,6 +306,61 @@ class MainTests(unittest.TestCase):
         self.assertEqual(params["community_provider"], "x,csv")
         self.assertEqual(params["x_provider"], "nitter_rss")
         self.assertTrue(params["x_provider_configured"])
+
+    def test_scan_payload_force_refresh_ignores_cached_payload(self) -> None:
+        scanner = Mock()
+        scanner.scan.side_effect = [
+            ({"scanned_symbols": 1, "returned_signals": 0, "quote_asset": "USDT", "interval": "4h", "min_quote_volume": 0}, []),
+            ({"scanned_symbols": 2, "returned_signals": 0, "quote_asset": "USDT", "interval": "4h", "min_quote_volume": 0}, []),
+        ]
+        config = RuntimeConfig()
+        with app_main._SCAN_CACHE_LOCK:
+            app_main._SCAN_PAYLOAD_CACHE.clear()
+            app_main._SCAN_INFLIGHT.clear()
+        try:
+            with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, scanner)):
+                first_payload, _ = _scan_payload({})
+                refreshed_payload, _ = _scan_payload({}, force_refresh=True)
+                cached_payload, _ = _scan_payload({})
+        finally:
+            with app_main._SCAN_CACHE_LOCK:
+                app_main._SCAN_PAYLOAD_CACHE.clear()
+                app_main._SCAN_INFLIGHT.clear()
+
+        self.assertEqual(first_payload["summary"]["scanned_symbols"], 1)
+        self.assertEqual(refreshed_payload["summary"]["scanned_symbols"], 2)
+        self.assertEqual(cached_payload["summary"]["scanned_symbols"], 2)
+        self.assertTrue(cached_payload["cached"])
+        self.assertEqual(scanner.scan.call_count, 2)
+
+    def test_fallback_scan_payload_honors_candidate_pool_above_default_tickers(self) -> None:
+        rows = [
+            {
+                "symbol": f"TEST{index:02d}USDT",
+                "lastPrice": str(100 + index),
+                "priceChangePercent": "1.2",
+                "quoteVolume": str(100_000_000 - index),
+                "volume": "10000",
+                "count": "5000",
+            }
+            for index in range(35)
+        ]
+        scanner = SimpleNamespace(gateway=SimpleNamespace(ticker24hr=lambda: rows))
+        params = {
+            "quote_asset": "USDT",
+            "interval": "4h",
+            "candidate_pool": 30,
+            "min_quote_volume": 1_000_000,
+            "min_trade_count": 100,
+        }
+
+        with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(RuntimeConfig(), scanner)):
+            payload = app_main._fallback_scan_payload(params, "完整扫描超时")
+
+        self.assertEqual(payload["summary"]["candidate_pool"], 30)
+        self.assertEqual(payload["summary"]["returned_signals"], 30)
+        self.assertEqual(len(payload["signals"]), 30)
+        self.assertEqual(payload["signals"][0]["symbol"], "TEST00USDT")
 
     def test_render_index_page_supports_table_view_mode(self) -> None:
         html = render_index_page(
@@ -1136,7 +1255,7 @@ class MainTests(unittest.TestCase):
         self.assertIn('href="/terminal/market"', html)
         self.assertIn('href="/terminal/community"', html)
         self.assertIn('href="/terminal/trading"', html)
-        self.assertIn("2026-04-28 00:00:00", html)
+        self.assertIn("2026-04-28 08:00:00", html)
         self.assertNotIn("2026-04-28T00:00:00+00:00", html)
 
     def test_fast_market_module_payload_uses_live_exchange_interfaces(self) -> None:
@@ -1473,6 +1592,8 @@ class MainTests(unittest.TestCase):
             try:
                 status = _start_paper_auto_trading(30)
                 self.assertTrue(status["running"])
+                self.assertGreaterEqual(int(status["run_count"] or 0), before + 1)
+                self.assertEqual(status["last_result"]["mode"], "paper")
                 status = _paper_auto_status_payload()
                 for _ in range(50):
                     status = _paper_auto_status_payload()
@@ -1687,7 +1808,7 @@ class MainTests(unittest.TestCase):
         self.assertIn("Run Auto Trade Once", html)
         self.assertIn("Paper Filled", html)
         self.assertIn("Paper buy recorded.", html)
-        self.assertIn("2026-04-28 00:00:00", html)
+        self.assertIn("2026-04-28 08:00:00", html)
         self.assertNotIn("2026-04-28T00:00:00+00:00", html)
 
     def test_render_trading_page_shows_latest_events_first(self) -> None:

@@ -7,6 +7,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .ssl_compat import create_default_ssl_context
+from .time_utils import format_app_datetime
 
 if TYPE_CHECKING:
     from .trading import TradingEvent, TradingPosition
@@ -123,7 +124,7 @@ def _mode_label(value: str) -> str:
 
 
 def _format_time(value: datetime) -> str:
-    return value.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    return format_app_datetime(value, include_timezone=True)
 
 
 def _card_field(label: str, value: str, *, short: bool = True) -> dict[str, object]:

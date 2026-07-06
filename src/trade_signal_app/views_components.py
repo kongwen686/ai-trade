@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from html import escape
 
+from .time_utils import format_app_datetime
 from .views_common import _display_value, _hidden_lang_input, _text, _url
 
 
@@ -34,7 +35,7 @@ def _format_datetime_value(value: object) -> str:
     if value is None:
         return ""
     if isinstance(value, datetime):
-        return value.strftime("%Y-%m-%d %H:%M:%S")
+        return format_app_datetime(value)
     text = str(value).strip()
     if not text:
         return ""
@@ -43,7 +44,7 @@ def _format_datetime_value(value: object) -> str:
         parsed = datetime.fromisoformat(normalized)
     except ValueError:
         return text
-    return parsed.strftime("%Y-%m-%d %H:%M:%S")
+    return format_app_datetime(parsed)
 
 
 def _format_cell(value: object, lang: str = "zh", *, key: str | None = None) -> str:

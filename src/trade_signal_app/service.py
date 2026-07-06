@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from .binance_client import BinancePublicAPIError, BinanceSpotGateway, parse_ticker
 from .community import CommunityScoreProvider
@@ -8,6 +8,7 @@ from .config import AppSettings
 from .indicators import build_indicator_snapshot
 from .models import ScanSummary, TradeSignal
 from .scoring import build_reasons, build_subscores, composite_score, compute_liquidity_score, grade_from_score
+from .time_utils import now_app_time
 
 STABLELIKE_BASES = {"USDT", "USDC", "FDUSD", "BUSD", "TUSD", "USDP", "DAI"}
 LEVERAGED_SUFFIXES = ("UP", "DOWN", "BULL", "BEAR")
@@ -74,7 +75,7 @@ class SignalScanner:
         min_quote_volume = min_quote_volume or self.settings.min_quote_volume
         min_trade_count = min_trade_count or self.settings.min_trade_count
 
-        now = datetime.now(timezone.utc)
+        now = now_app_time()
         if self._exchange_info_retry_after and self._exchange_info_retry_after > now:
             eligible_symbols = self._fallback_symbols(quote_asset)
         else:
@@ -124,7 +125,7 @@ class SignalScanner:
                 returned_signals=0,
                 min_quote_volume=min_quote_volume,
                 min_trade_count=min_trade_count,
-                fetched_at=datetime.now(timezone.utc),
+                fetched_at=now_app_time(),
                 eligible_symbols=len(filtered),
                 candidate_symbols=len(selected),
                 candidate_pool=candidate_pool,
@@ -134,7 +135,7 @@ class SignalScanner:
         quote_volumes = [ticker.quote_volume for ticker, _, _ in ready]
         trade_counts = [ticker.trade_count for ticker, _, _ in ready]
         signals: list[TradeSignal] = []
-        now = datetime.now(timezone.utc)
+        now = now_app_time()
 
         for ticker, indicators, community_signal in ready:
             liquidity_score = compute_liquidity_score(ticker, quote_volumes, trade_counts)

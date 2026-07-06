@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from .data_services import get_llm_provider, get_public_data_preset
 from .runtime_config import RuntimeConfig
+from .time_utils import now_app_time
 from .trading import TradingEvent, TradingPosition
 
 
@@ -111,7 +112,7 @@ def build_platform_snapshot(
     events: list[TradingEvent],
 ) -> PlatformSnapshot:
     return PlatformSnapshot(
-        generated_at=datetime.now(timezone.utc),
+        generated_at=now_app_time(),
         components=build_components(config),
         strategies=build_strategy_catalog(config),
         risk_rules=build_risk_rules(config),

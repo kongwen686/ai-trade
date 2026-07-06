@@ -6,6 +6,7 @@ from pathlib import Path
 import csv
 import re
 
+from .binance_client import BinanceSpotGateway
 from .models import Candlestick, utc_datetime_from_epoch
 
 
@@ -160,7 +161,7 @@ def fetch_tradingview_history(
     cache_path = tradingview_cache_path(cache_root, exchange, symbol, normalized_interval)
     try:
         tv_datafeed, tv_interval = _load_tvdatafeed(normalized_interval)
-    except ValueError:
+    except ValueError as exc:
         if cache_enabled and cache_path.exists():
             candles = load_tradingview_csv(cache_path, interval=normalized_interval)
             return TradingViewFetchResult(
@@ -170,6 +171,25 @@ def fetch_tradingview_history(
                 cache_path=cache_path,
                 candle_count=len(candles),
                 source="cache",
+            )
+        if exchange.upper() == "BINANCE":
+            try:
+                candles = _fetch_binance_public_history(symbol=symbol, interval=normalized_interval, bars=bars)
+            except Exception as fallback_exc:  # noqa: BLE001
+                raise ValueError(
+                    f"{exc} Binance 公共行情兜底也失败：{fallback_exc}"
+                ) from fallback_exc
+            if not candles:
+                raise ValueError(f"{exc} Binance 公共行情兜底未返回 {symbol.upper()} {normalized_interval} 的历史 K 线。") from exc
+            if cache_enabled:
+                write_tradingview_csv(cache_path, candles)
+            return TradingViewFetchResult(
+                exchange=exchange.upper(),
+                symbol=symbol.upper(),
+                interval=normalized_interval,
+                cache_path=cache_path,
+                candle_count=len(candles),
+                source="binance_public_fallback",
             )
         raise
 
@@ -216,6 +236,52 @@ def _load_tvdatafeed(interval: str):
     if tv_interval is None:
         raise ValueError(f"当前 tvDatafeed 版本不支持 TradingView interval：{interval}。")
     return TvDatafeed, tv_interval
+
+
+def _fetch_binance_public_history(*, symbol: str, interval: str, bars: int) -> list[Candlestick]:
+    gateway = BinanceSpotGateway()
+    remaining = bars
+    end_time_ms: int | None = None
+    candles_by_open_time: dict[datetime, Candlestick] = {}
+    while remaining > 0:
+        batch_limit = min(remaining, 1000)
+        params: dict[str, object] = {
+            "symbol": symbol.upper(),
+            "interval": interval,
+            "limit": batch_limit,
+        }
+        if end_time_ms is not None:
+            params["endTime"] = end_time_ms
+        data = gateway._get_json("/api/v3/klines", params)
+        if not isinstance(data, list) or not data:
+            break
+        batch = [_binance_row_to_candlestick(row) for row in data if isinstance(row, list)]
+        if not batch:
+            break
+        for candle in batch:
+            candles_by_open_time[candle.open_time] = candle
+        remaining -= len(batch)
+        earliest = min(batch, key=lambda candle: candle.open_time)
+        end_time_ms = int(earliest.open_time.timestamp() * 1000) - 1
+        if len(batch) < batch_limit:
+            break
+    return sorted(candles_by_open_time.values(), key=lambda candle: candle.open_time)[-bars:]
+
+
+def _binance_row_to_candlestick(row: list[object]) -> Candlestick:
+    return Candlestick(
+        open_time=utc_datetime_from_epoch(int(row[0])),
+        open_price=float(row[1]),
+        high_price=float(row[2]),
+        low_price=float(row[3]),
+        close_price=float(row[4]),
+        volume=float(row[5]),
+        close_time=utc_datetime_from_epoch(int(row[6])),
+        quote_volume=float(row[7]),
+        trade_count=int(row[8]),
+        taker_buy_base_volume=float(row[9]),
+        taker_buy_quote_volume=float(row[10]),
+    )
 
 
 def _dataframe_to_candles(frame: object, interval: str) -> list[Candlestick]:

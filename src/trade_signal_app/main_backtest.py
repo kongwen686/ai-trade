@@ -87,7 +87,7 @@ def _tradingview_fetch_result(form: dict[str, list[str]], *, runtime_config: Run
     _validate_range(bars, "TradingView Bars", minimum=100, maximum=50000)
 
     result = fetch_tradingview_history(
-        cache_root=TRADINGVIEW_CACHE_DIR,
+        cache_root=tradingview_cache_dir,
         exchange=exchange,
         symbol=symbol,
         interval=interval,
@@ -108,7 +108,6 @@ def _tradingview_fetch_result(form: dict[str, list[str]], *, runtime_config: Run
 
 def _tradingview_backtest_redirect(form: dict[str, list[str]], lang: str, *, runtime_config: RuntimeConfig, tradingview_cache_dir: object) -> str:
     result = _tradingview_fetch_result(form, runtime_config=runtime_config, tradingview_cache_dir=tradingview_cache_dir)
-    runtime_config, _ = APP_STATE.snapshot()
     params = _backtest_params_from_config(runtime_config)
     params["archives"] = result["cache_path"]
     params["tradingview_exchange"] = result["exchange"]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime
 import argparse
 import glob
 import json
@@ -30,6 +30,7 @@ from .models import (
 )
 from .scoring import build_reasons, build_subscores, composite_score, compute_liquidity_score, grade_from_score
 from .strategy import EntryRuleConfig, ExecutionConfig, ExitRuleConfig, evaluate_long_entry, normalize_return_pct
+from .time_utils import now_app_time
 from .tradingview_data import load_tradingview_csv
 
 
@@ -283,7 +284,7 @@ def run_backtest_for_series(
         fee_bps=execution_config.fee_bps,
         slippage_bps=execution_config.slippage_bps,
         capital_fraction_pct=execution_config.capital_fraction_pct,
-        generated_at=datetime.now(timezone.utc),
+        generated_at=now_app_time(),
         fee_model=execution_config.fee_model,
         fee_source=execution_config.fee_source,
         maker_fee_bps=execution_config.maker_fee_bps,
@@ -395,7 +396,7 @@ def run_overnight_seasonality_backtest(
         fee_bps=execution_config.fee_bps,
         slippage_bps=execution_config.slippage_bps,
         capital_fraction_pct=execution_config.capital_fraction_pct,
-        generated_at=datetime.now(timezone.utc),
+        generated_at=now_app_time(),
         fee_model=execution_config.fee_model,
         fee_source=execution_config.fee_source,
         maker_fee_bps=execution_config.maker_fee_bps,
@@ -954,7 +955,7 @@ def run_portfolio_backtest(
             fee_bps=fee_bps,
             slippage_bps=slippage_bps,
             capital_fraction_pct=capital_fraction_pct,
-            generated_at=datetime.now(timezone.utc),
+            generated_at=now_app_time(),
             fee_model=fee_model,
             fee_source=fee_source,
             maker_fee_bps=maker_fee_bps,
@@ -1031,7 +1032,7 @@ def run_portfolio_backtest(
         fee_bps=fee_bps,
         slippage_bps=slippage_bps,
         capital_fraction_pct=capital_fraction_pct,
-        generated_at=datetime.now(timezone.utc),
+        generated_at=now_app_time(),
         fee_model=fee_model,
         fee_source=fee_source,
         maker_fee_bps=maker_fee_bps,
@@ -1297,7 +1298,7 @@ def run_rebalance_premium_backtest(
         rebalance_interval_bars=rebalance_interval_bars,
         fee_bps=fee_bps,
         slippage_bps=slippage_bps,
-        generated_at=datetime.now(timezone.utc),
+        generated_at=now_app_time(),
         rebalanced_final_equity=round(final_rebalanced, 6),
         buy_hold_final_equity=round(final_buy_hold, 6),
         premium_pct=round(premium_pct, 4),

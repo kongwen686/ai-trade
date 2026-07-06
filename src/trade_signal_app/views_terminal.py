@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from html import escape
 
+from .time_utils import now_app_time
 from .views_common import _display_value, _hidden_lang_input, _layout, _text, _url, normalize_language
 from .views_components import _float_from_any, _strategy_builder_panel, _terminal_rows, _trading_event_rows, _trading_position_rows
 
@@ -254,7 +254,7 @@ def _terminal_dashboard_table(rows: list[dict[str, object]], lang: str) -> str:
 
 
 def _terminal_today_realized_pnl(events: list[dict[str, object]], symbol: str) -> float:
-    today = datetime.now(timezone.utc).date().isoformat()
+    today = now_app_time().date().isoformat()
     symbol = symbol.upper()
     total = 0.0
     for event in events:
