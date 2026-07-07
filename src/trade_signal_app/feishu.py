@@ -13,6 +13,9 @@ if TYPE_CHECKING:
     from .trading import TradingEvent, TradingPosition
 
 
+NOTIFIABLE_TRADE_STATUSES = {"paper_filled", "filled", "emergency_drawdown"}
+
+
 class FeishuNotificationError(RuntimeError):
     pass
 
@@ -29,9 +32,9 @@ class FeishuTradeNotifier:
     def notify_trade(self, *, event: TradingEvent, position: TradingPosition | None = None) -> bool:
         if not self.configured():
             return False
-        if event.action not in {"BUY", "SELL"}:
+        if event.status not in NOTIFIABLE_TRADE_STATUSES:
             return False
-        if event.status not in {"paper_filled", "filled"}:
+        if event.status != "emergency_drawdown" and event.action not in {"BUY", "SELL"}:
             return False
 
         payload = build_feishu_trade_payload(event=event, position=position)
@@ -67,13 +70,14 @@ class FeishuTradeNotifier:
 
 def build_feishu_trade_payload(*, event: TradingEvent, position: TradingPosition | None = None) -> dict[str, object]:
     action_label = _action_label(event)
-    header_template = "green" if event.action == "BUY" else "red"
+    header_template = _header_template(event)
     fields = [
         _card_field("标的", event.symbol),
-        _card_field("成交时间", _format_time(event.created_at)),
-        _card_field("成交价格", _format_decimal(event.price, 8)),
-        _card_field("成交数量", _format_decimal(event.quantity, 8)),
+        _card_field("触发时间" if event.status == "emergency_drawdown" else "成交时间", _format_time(event.created_at)),
+        _card_field("当前价格" if event.status == "emergency_drawdown" else "成交价格", _format_decimal(event.price, 8)),
+        _card_field("持仓数量" if event.status == "emergency_drawdown" else "成交数量", _format_decimal(event.quantity, 8)),
         _card_field("名义金额", _format_decimal(event.quote_notional, 2)),
+        _card_field("消息", _message_label(event), short=False),
     ]
     if event.action == "BUY":
         fields.extend(
@@ -81,6 +85,15 @@ def build_feishu_trade_payload(*, event: TradingEvent, position: TradingPosition
                 _card_field("信号评分", _format_decimal(event.score, 1)),
                 _card_field("信号等级", position.grade if position is not None else "-"),
                 _card_field("保证金/杠杆", _margin_leverage_label(position)),
+                _card_field("杠杆止损价", _leveraged_exit_price_label(position, "stop")),
+                _card_field("杠杆止盈价", _leveraged_exit_price_label(position, "take_profit")),
+            ]
+        )
+    elif event.status == "emergency_drawdown":
+        fields.extend(
+            [
+                _card_field("保证金/杠杆", _margin_leverage_label(position)),
+                _card_field("开仓价格", _format_decimal(position.entry_price if position is not None else None, 8)),
                 _card_field("杠杆止损价", _leveraged_exit_price_label(position, "stop")),
                 _card_field("杠杆止盈价", _leveraged_exit_price_label(position, "take_profit")),
             ]
@@ -114,9 +127,33 @@ def build_feishu_trade_payload(*, event: TradingEvent, position: TradingPosition
 
 
 def _action_label(event: TradingEvent) -> str:
+    if event.status == "emergency_drawdown":
+        return _status_label(event.status)
     if event.action == "BUY":
         return "模拟买入通知" if event.mode == "paper" else "买入通知"
     return "模拟卖出通知" if event.mode == "paper" else "卖出通知"
+
+
+def _header_template(event: TradingEvent) -> str:
+    if event.status == "emergency_drawdown":
+        return "orange"
+    return "green" if event.action == "BUY" else "red"
+
+
+def _status_label(status: str) -> str:
+    labels = {
+        "paper_filled": "模拟成交",
+        "filled": "成交",
+        "emergency_drawdown": "紧急回撤预警",
+    }
+    return labels.get(status, status)
+
+
+def _message_label(event: TradingEvent) -> str:
+    message = event.message or "-"
+    if event.status == "emergency_drawdown":
+        return f"{_status_label(event.status)}：{message}"
+    return message
 
 
 def _mode_label(value: str) -> str:

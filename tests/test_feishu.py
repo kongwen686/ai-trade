@@ -57,6 +57,7 @@ class FeishuTests(unittest.TestCase):
         payload_text = json.dumps(payload, ensure_ascii=False)
         self.assertIn("**标的**\nBTCUSDT", rendered)
         self.assertIn("**成交时间**\n2026-07-06 14:00:00 UTC+8", rendered)
+        self.assertIn("**消息**\n模拟买入已记录。", rendered)
         self.assertIn("**保证金/杠杆**\n25.00 / 5.0x", rendered)
         self.assertIn("**杠杆止损价**\n96.00000000 (5.0x ≈ -20.00% ROI)", rendered)
         self.assertIn("**杠杆止盈价**\n109.00000000 (5.0x ≈ +45.00% ROI)", rendered)
@@ -109,9 +110,58 @@ class FeishuTests(unittest.TestCase):
         rendered = json.dumps(body, ensure_ascii=False)
         self.assertIn("杠杆止损价", rendered)
         self.assertIn("杠杆止盈价", rendered)
+        self.assertIn("**消息**", rendered)
+        self.assertIn("模拟卖出已记录：take_profit。", rendered)
         self.assertNotIn("**摘要**", rendered)
         self.assertNotIn("**交易所**", rendered)
         self.assertNotIn("**模式**", rendered)
+        self.assertNotIn("**状态**", rendered)
+
+    def test_notifier_posts_emergency_drawdown_alert_with_chinese_status(self) -> None:
+        notifier = FeishuTradeNotifier("https://open.feishu.cn/test-webhook")
+        event = TradingEvent(
+            action="ALERT",
+            symbol="BTCUSDT",
+            mode="paper",
+            status="emergency_drawdown",
+            message="价格较持仓最高价快速回撤 3.64%，请检查突发风险和盘口流动性。",
+            price=106.0,
+            quantity=1.0,
+            quote_notional=100.0,
+            created_at=datetime(2026, 7, 6, 6, 10, tzinfo=timezone.utc),
+            exchange="BINANCE",
+        )
+        position = TradingPosition(
+            symbol="BTCUSDT",
+            quantity=1.0,
+            entry_price=100.0,
+            quote_notional=100.0,
+            score=82.0,
+            grade="A",
+            opened_at=datetime(2026, 7, 6, 6, 0, tzinfo=timezone.utc),
+            stop_price=96.0,
+            take_profit_price=109.0,
+            leverage=5.0,
+            margin_notional=20.0,
+            highest_price=110.0,
+        )
+        with patch(
+            "trade_signal_app.feishu.urlopen",
+            return_value=FakeResponse(json.dumps({"code": 0, "msg": "success"}).encode("utf-8")),
+        ) as mock_urlopen:
+            sent = notifier.notify_trade(event=event, position=position)
+
+        self.assertTrue(sent)
+        request = mock_urlopen.call_args.args[0]
+        body = json.loads(request.data.decode("utf-8"))
+        rendered = json.dumps(body, ensure_ascii=False)
+        self.assertIn("AI Trade 紧急回撤预警", body["card"]["header"]["title"]["content"])
+        self.assertIn("**消息**", rendered)
+        self.assertIn("紧急回撤预警：价格较持仓最高价快速回撤 3.64%", rendered)
+        self.assertIn("**当前价格**", rendered)
+        self.assertIn("**持仓数量**", rendered)
+        self.assertIn("**杠杆止损价**", rendered)
+        self.assertNotIn("emergency_drawdown", rendered)
         self.assertNotIn("**状态**", rendered)
 
 

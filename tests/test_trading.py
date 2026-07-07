@@ -209,7 +209,8 @@ class TradingTests(unittest.TestCase):
                 ]
             )
             scanner = FakeScanner([_signal(score=10.0, price=106.0)])
-            trader = AutoTrader(scanner=scanner, state_store=store)
+            notifier = FakeTradeNotifier()
+            trader = AutoTrader(scanner=scanner, state_store=store, trade_notifier=notifier)
 
             report = trader.run_once(
                 AutoTradeDefaults(
@@ -224,6 +225,7 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(len(report.open_positions), 1)
         self.assertEqual(report.events[0].action, "ALERT")
         self.assertEqual(report.events[0].status, "emergency_drawdown")
+        self.assertEqual(notifier.calls, [("ALERT", "BTCUSDT", "BTCUSDT")])
 
     def test_risk_blocked_symbol_does_not_open_position(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

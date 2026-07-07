@@ -346,6 +346,7 @@ class AutoTrader:
             emergency_event = self._emergency_drawdown_event(position, price, config)
             if emergency_event is not None:
                 events.append(emergency_event)
+                self._notify_trade_event(event=emergency_event, position=position)
             exit_reason = ""
             if price <= position.stop_price:
                 exit_reason = "profit_protect_stop" if position.stop_price >= position.entry_price else "stop_loss"
