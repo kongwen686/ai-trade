@@ -6,7 +6,7 @@ from .config import SETTINGS
 from .data_services import LLM_PROVIDER_PRESETS, PUBLIC_DATA_PRESETS, get_llm_provider, llm_provider_ids, public_data_preset_ids
 from .platform import okx_credential_state
 from .presets import apply_backtest_preset, list_backtest_presets
-from .runtime_config import AutoTradeDefaults, BacktestDefaults, IntelligenceDefaults, RuntimeConfig, ScanDefaults
+from .runtime_config import AUTOTRADE_EXIT_PROFILES, AutoTradeDefaults, BacktestDefaults, IntelligenceDefaults, RuntimeConfig, ScanDefaults
 from .tradingview_data import TRADINGVIEW_INTERVALS
 
 SCAN_INTERVALS = {"15m", "1h", "4h", "1d"}
@@ -73,6 +73,7 @@ def _validate_runtime_config(config: RuntimeConfig) -> None:
     _validate_choice(config.scan_defaults.interval, "Scan Interval", SCAN_INTERVALS)
     _validate_choice(config.autotrade_defaults.mode, "Auto Trade Mode", AUTOTRADE_MODES)
     _validate_choice(config.autotrade_defaults.execution_exchange, "Auto Trade Exchange", AUTOTRADE_EXCHANGES)
+    _validate_choice(config.autotrade_defaults.exit_profile, "Auto Trade Exit Profile", AUTOTRADE_EXIT_PROFILES)
     _validate_choice(config.x_account_mode, "X Account Mode", X_ACCOUNT_MODES)
     _validate_choice(config.x_provider, "X Provider", X_PROVIDERS)
     _validate_choice(config.market_data_preset, "Market Data Preset", MARKET_DATA_PRESETS)
@@ -113,6 +114,8 @@ def _validate_runtime_config(config: RuntimeConfig) -> None:
 
     autotrade = config.autotrade_defaults
     _validate_range(autotrade.quote_order_qty, "Auto Trade Quote Order Qty", minimum=0.01)
+    _validate_range(autotrade.leverage, "Auto Trade Leverage", minimum=1, maximum=20)
+    _validate_range(autotrade.risk_per_trade_pct, "Auto Trade Risk Per Trade", minimum=0.1, maximum=100)
     _validate_range(autotrade.max_open_positions, "Auto Trade Max Open Positions", minimum=1)
     _validate_range(autotrade.max_total_quote_exposure, "Auto Trade Max Exposure", minimum=0.01)
     _validate_range(autotrade.score_threshold, "Auto Trade Score Threshold", minimum=0, maximum=100)
@@ -123,6 +126,10 @@ def _validate_runtime_config(config: RuntimeConfig) -> None:
     _validate_range(autotrade.profit_protection_trigger_pct, "Auto Trade Profit Protection Trigger", minimum=0)
     _validate_range(autotrade.profit_protection_lock_pct, "Auto Trade Profit Protection Lock", minimum=0)
     _validate_range(autotrade.trailing_stop_pct, "Auto Trade Trailing Stop", minimum=0)
+    _validate_range(autotrade.trend_hold_min_score, "Auto Trade Trend Hold Score", minimum=0, maximum=100)
+    _validate_range(autotrade.trend_hold_min_volume_ratio, "Auto Trade Trend Hold Volume", minimum=0)
+    _validate_range(autotrade.trend_hold_min_buy_pressure, "Auto Trade Trend Hold Buy Pressure", minimum=0, maximum=1)
+    _validate_range(autotrade.emergency_drawdown_pct, "Auto Trade Emergency Drawdown", minimum=0, maximum=50)
     if autotrade.profit_protection_enabled and autotrade.profit_protection_lock_pct > autotrade.profit_protection_trigger_pct:
         raise ValueError("Auto Trade Profit Protection Lock 不能大于 Trigger。")
     _validate_range(autotrade.cooldown_minutes, "Auto Trade Cooldown", minimum=0)
@@ -257,6 +264,9 @@ def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "autotrade_mode": autotrade.mode,
         "autotrade_execution_exchange": autotrade.execution_exchange,
         "autotrade_quote_order_qty": autotrade.quote_order_qty,
+        "autotrade_leverage": autotrade.leverage,
+        "autotrade_risk_per_trade_pct": autotrade.risk_per_trade_pct,
+        "autotrade_exit_profile": autotrade.exit_profile,
         "autotrade_max_open_positions": autotrade.max_open_positions,
         "autotrade_max_total_quote_exposure": autotrade.max_total_quote_exposure,
         "autotrade_score_threshold": autotrade.score_threshold,
@@ -268,6 +278,11 @@ def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "autotrade_profit_protection_trigger_pct": autotrade.profit_protection_trigger_pct,
         "autotrade_profit_protection_lock_pct": autotrade.profit_protection_lock_pct,
         "autotrade_trailing_stop_pct": autotrade.trailing_stop_pct,
+        "autotrade_trend_hold_enabled": autotrade.trend_hold_enabled,
+        "autotrade_trend_hold_min_score": autotrade.trend_hold_min_score,
+        "autotrade_trend_hold_min_volume_ratio": autotrade.trend_hold_min_volume_ratio,
+        "autotrade_trend_hold_min_buy_pressure": autotrade.trend_hold_min_buy_pressure,
+        "autotrade_emergency_drawdown_pct": autotrade.emergency_drawdown_pct,
         "autotrade_cooldown_minutes": autotrade.cooldown_minutes,
         "autotrade_order_test_only": autotrade.order_test_only,
         "intelligence_enabled": intelligence.enabled,
@@ -473,6 +488,9 @@ def _build_runtime_config(form: dict[str, list[str]], *, current_config: Runtime
             ).strip().lower()
             or "binance",
             quote_order_qty=_parse_float_value(_get_first(form, "autotrade_quote_order_qty", str(current_config.autotrade_defaults.quote_order_qty)), "Auto Trade Quote Order Qty"),
+            leverage=_parse_float_value(_get_first(form, "autotrade_leverage", str(current_config.autotrade_defaults.leverage)), "Auto Trade Leverage"),
+            risk_per_trade_pct=_parse_float_value(_get_first(form, "autotrade_risk_per_trade_pct", str(current_config.autotrade_defaults.risk_per_trade_pct)), "Auto Trade Risk Per Trade"),
+            exit_profile=_get_first(form, "autotrade_exit_profile", current_config.autotrade_defaults.exit_profile).strip() or "balanced",
             max_open_positions=_parse_int_value(_get_first(form, "autotrade_max_open_positions", str(current_config.autotrade_defaults.max_open_positions)), "Auto Trade Max Open Positions"),
             max_total_quote_exposure=_parse_float_value(_get_first(form, "autotrade_max_total_quote_exposure", str(current_config.autotrade_defaults.max_total_quote_exposure)), "Auto Trade Max Exposure"),
             score_threshold=_parse_float_value(_get_first(form, "autotrade_score_threshold", str(current_config.autotrade_defaults.score_threshold)), "Auto Trade Score Threshold"),
@@ -484,6 +502,11 @@ def _build_runtime_config(form: dict[str, list[str]], *, current_config: Runtime
             profit_protection_trigger_pct=_parse_float_value(_get_first(form, "autotrade_profit_protection_trigger_pct", str(current_config.autotrade_defaults.profit_protection_trigger_pct)), "Auto Trade Profit Protection Trigger"),
             profit_protection_lock_pct=_parse_float_value(_get_first(form, "autotrade_profit_protection_lock_pct", str(current_config.autotrade_defaults.profit_protection_lock_pct)), "Auto Trade Profit Protection Lock"),
             trailing_stop_pct=_parse_float_value(_get_first(form, "autotrade_trailing_stop_pct", str(current_config.autotrade_defaults.trailing_stop_pct)), "Auto Trade Trailing Stop"),
+            trend_hold_enabled=_runtime_bool(form, "autotrade_trend_hold_enabled", current_config.autotrade_defaults.trend_hold_enabled),
+            trend_hold_min_score=_parse_float_value(_get_first(form, "autotrade_trend_hold_min_score", str(current_config.autotrade_defaults.trend_hold_min_score)), "Auto Trade Trend Hold Score"),
+            trend_hold_min_volume_ratio=_parse_float_value(_get_first(form, "autotrade_trend_hold_min_volume_ratio", str(current_config.autotrade_defaults.trend_hold_min_volume_ratio)), "Auto Trade Trend Hold Volume"),
+            trend_hold_min_buy_pressure=_parse_float_value(_get_first(form, "autotrade_trend_hold_min_buy_pressure", str(current_config.autotrade_defaults.trend_hold_min_buy_pressure)), "Auto Trade Trend Hold Buy Pressure"),
+            emergency_drawdown_pct=_parse_float_value(_get_first(form, "autotrade_emergency_drawdown_pct", str(current_config.autotrade_defaults.emergency_drawdown_pct)), "Auto Trade Emergency Drawdown"),
             cooldown_minutes=_parse_int_value(_get_first(form, "autotrade_cooldown_minutes", str(current_config.autotrade_defaults.cooldown_minutes)), "Auto Trade Cooldown"),
             order_test_only=_runtime_bool(form, "autotrade_order_test_only", current_config.autotrade_defaults.order_test_only),
         ),

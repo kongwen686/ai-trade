@@ -112,6 +112,119 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(scanner.gateway.buy_calls, [])
         self.assertEqual(notifier.calls, [("BUY", "BTCUSDT", "BTCUSDT")])
 
+    def test_paper_leverage_scales_notional_and_margin_roi(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            trader = AutoTrader(scanner=FakeScanner([_signal(price=100.0)]), state_store=store)
+
+            first_report = trader.run_once(
+                AutoTradeDefaults(
+                    enabled=True,
+                    mode="paper",
+                    quote_order_qty=25.0,
+                    leverage=5.0,
+                    score_threshold=75.0,
+                    take_profit_pct=2.0,
+                )
+            )
+
+            trader = AutoTrader(scanner=FakeScanner([_signal(price=102.0, score=10.0)]), state_store=store)
+            second_report = trader.run_once(
+                AutoTradeDefaults(
+                    enabled=True,
+                    mode="paper",
+                    quote_order_qty=25.0,
+                    leverage=5.0,
+                    score_threshold=99.0,
+                    take_profit_pct=2.0,
+                )
+            )
+
+        self.assertAlmostEqual(first_report.open_positions[0].quantity, 1.25)
+        self.assertAlmostEqual(first_report.open_positions[0].quote_notional, 125.0)
+        self.assertAlmostEqual(first_report.open_positions[0].margin_notional or 0.0, 25.0)
+        self.assertEqual(first_report.open_positions[0].leverage, 5.0)
+        self.assertEqual(second_report.open_positions, [])
+        self.assertEqual(second_report.events[0].exit_reason, "take_profit")
+        self.assertAlmostEqual(second_report.events[0].realized_pnl, 2.5)
+        self.assertAlmostEqual(second_report.events[0].realized_pnl_pct, 10.0)
+
+    def test_trend_following_profile_holds_winner_with_strong_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            store.save(
+                [
+                    TradingPosition(
+                        symbol="BTCUSDT",
+                        quantity=1.0,
+                        entry_price=100.0,
+                        quote_notional=100.0,
+                        score=82.0,
+                        grade="A",
+                        opened_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                        stop_price=96.0,
+                        take_profit_price=104.0,
+                        mode="paper",
+                    )
+                ]
+            )
+            scanner = FakeScanner([_signal(score=90.0, price=105.0)])
+            trader = AutoTrader(scanner=scanner, state_store=store)
+
+            report = trader.run_once(
+                AutoTradeDefaults(
+                    enabled=True,
+                    mode="paper",
+                    score_threshold=99.0,
+                    exit_profile="trend_following",
+                    trend_hold_min_score=85.0,
+                    trend_hold_min_volume_ratio=1.2,
+                    trend_hold_min_buy_pressure=0.55,
+                )
+            )
+
+        self.assertEqual(len(report.open_positions), 1)
+        self.assertEqual(report.events[0].action, "HOLD")
+        self.assertEqual(report.events[0].status, "trend_hold")
+        self.assertGreater(report.open_positions[0].stop_price, 100.0)
+
+    def test_emergency_drawdown_records_alert_before_stop_loss(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            store.save(
+                [
+                    TradingPosition(
+                        symbol="BTCUSDT",
+                        quantity=1.0,
+                        entry_price=100.0,
+                        quote_notional=100.0,
+                        score=82.0,
+                        grade="A",
+                        opened_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                        stop_price=96.0,
+                        take_profit_price=120.0,
+                        mode="paper",
+                        highest_price=110.0,
+                    )
+                ]
+            )
+            scanner = FakeScanner([_signal(score=10.0, price=106.0)])
+            trader = AutoTrader(scanner=scanner, state_store=store)
+
+            report = trader.run_once(
+                AutoTradeDefaults(
+                    enabled=True,
+                    mode="paper",
+                    score_threshold=99.0,
+                    profit_protection_enabled=False,
+                    emergency_drawdown_pct=2.5,
+                )
+            )
+
+        self.assertEqual(len(report.open_positions), 1)
+        self.assertEqual(report.events[0].action, "ALERT")
+        self.assertEqual(report.events[0].status, "emergency_drawdown")
+
     def test_risk_blocked_symbol_does_not_open_position(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = TradingStateStore(Path(temp_dir) / "state.json")

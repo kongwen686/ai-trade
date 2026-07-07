@@ -7402,6 +7402,24 @@ body {
 
 .signal-table {
   table-layout: fixed;
+  min-width: 1360px;
+}
+
+.signal-table .col-symbol { width: 112px; }
+.signal-table .col-grade { width: 72px; }
+.signal-table .col-score { width: 70px; }
+.signal-table .col-price { width: 96px; }
+.signal-table .col-change { width: 72px; }
+.signal-table .col-volume { width: 92px; }
+.signal-table .col-rsi { width: 68px; }
+.signal-table .col-volume-ratio { width: 82px; }
+.signal-table .col-ema { width: 82px; }
+.signal-table .col-macd { width: 88px; }
+.signal-table .col-community { width: 170px; }
+.signal-table .col-reasons { width: 356px; }
+
+.signal-table td:last-child {
+  min-width: 356px;
 }
 
 .signal-table th,
@@ -7414,6 +7432,29 @@ body {
 
 .signal-table .numeric {
   white-space: nowrap;
+}
+
+.signal-table .table-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.signal-table .table-tag {
+  max-width: 100%;
+  white-space: normal;
+  line-height: 1.35;
+  text-align: left;
+}
+
+.signal-table .table-tag.scan-warning {
+  display: flex;
+  width: 100%;
+  justify-content: flex-start;
+  border-radius: 10px;
+  padding: 6px 9px;
 }
 
 @media (max-width: 640px) {

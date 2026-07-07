@@ -13,6 +13,7 @@ from .config import AppSettings, DEFAULT_X_TRACKED_ACCOUNTS
 RUNTIME_CONFIG_TEMPLATE_VERSION = 1
 RUNTIME_CONFIG_ENCRYPTED_KIND = "runtime_config_encrypted"
 RUNTIME_CONFIG_ENCRYPTED_VERSION = 1
+AUTOTRADE_EXIT_PROFILES = {"balanced", "leveraged_conservative", "trend_following"}
 SECRET_FIELDS = (
     "binance_api_key",
     "binance_api_secret",
@@ -141,6 +142,9 @@ class AutoTradeDefaults:
     mode: str = "paper"
     execution_exchange: str = "binance"
     quote_order_qty: float = 25.0
+    leverage: float = 1.0
+    risk_per_trade_pct: float = 4.0
+    exit_profile: str = "balanced"
     max_open_positions: int = 3
     max_total_quote_exposure: float = 100.0
     score_threshold: float = 75.0
@@ -152,6 +156,11 @@ class AutoTradeDefaults:
     profit_protection_trigger_pct: float = 3.0
     profit_protection_lock_pct: float = 0.5
     trailing_stop_pct: float = 2.0
+    trend_hold_enabled: bool = True
+    trend_hold_min_score: float = 82.0
+    trend_hold_min_volume_ratio: float = 1.25
+    trend_hold_min_buy_pressure: float = 0.56
+    emergency_drawdown_pct: float = 2.5
     cooldown_minutes: int = 240
     order_test_only: bool = True
 

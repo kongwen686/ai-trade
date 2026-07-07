@@ -67,6 +67,9 @@ def _settings_description_map(lang: str) -> dict[str, str]:
         "Execution Mode": ("paper 只写本地模拟持仓；live 才可能触发真实订单。", "paper writes local simulated positions; live may submit real orders."),
         "Execution Exchange": ("选择自动交易执行账户。扫描行情仍使用当前公开行情源，订单会提交到所选交易所。", "Select the account used for execution. Scanning still uses the configured public market source; orders use the selected exchange."),
         "Quote Order Qty": ("每次开仓投入的计价资产金额。", "Quote-asset amount allocated to each entry."),
+        "Leverage": ("paper 模拟中用于放大名义仓位；live 现货执行仍按 1 倍处理。", "Leverage used for paper notional sizing; live spot execution remains 1x."),
+        "Risk Per Trade %": ("单笔可承受保证金风险目标，用于杠杆口径提示和后续自动调参。", "Target margin risk per trade for leveraged risk hints and future auto-tuning."),
+        "Exit Profile": ("balanced 保持固定止盈；trend_following 到达止盈且趋势强时继续持有并移动止损。", "balanced keeps fixed take profit; trend_following can hold winners with trailing protection."),
         "Max Open Positions": ("自动交易最多同时持有的仓位数量。", "Maximum number of simultaneous automated positions."),
         "Max Total Exposure": ("自动交易允许占用的最大计价资产敞口。", "Maximum quote exposure allowed for automated trading."),
         "Score Threshold": ("信号分数达到该阈值才允许进入候选或回测交易。", "Signal score must reach this threshold before trading or backtesting entries."),
@@ -78,6 +81,11 @@ def _settings_description_map(lang: str) -> dict[str, str]:
         "Profit Guard Trigger %": ("浮盈达到该比例后启动保护止损。", "Unrealized gain required before protected stop starts."),
         "Profit Lock %": ("保护启动后，止损至少抬到入场价上方的锁盈比例。", "Minimum locked profit once protection starts."),
         "Trailing Stop %": ("按持仓最高价回撤该比例移动保护止损；值越小越容易提前落袋。", "Trailing pullback from the highest price; smaller values exit sooner."),
+        "Enable trend hold": ("启用后，趋势跟随档位可在达到止盈但趋势仍强时继续持有。", "Allows trend_following profile to keep holding after take-profit when signal remains strong."),
+        "Trend Hold Score": ("趋势持有要求的最低信号分，只有 exit profile 为 trend_following 时生效。", "Minimum score for trend hold; only active when exit profile is trend_following."),
+        "Trend Hold Volume": ("趋势持有要求的最低量能放大倍数。", "Minimum volume expansion for trend hold."),
+        "Trend Hold Buy Pressure": ("趋势持有要求的最低主动买入占比。", "Minimum buy pressure for trend hold."),
+        "Emergency Drawdown %": ("价格从持仓最高价快速回撤超过该比例但尚未触发止损时记录预警。", "Warn when price pulls back from position high by this percentage before stop is hit."),
         "Cooldown Minutes": ("自动交易开仓或平仓后的冷却时间，避免连续追单。", "Cooldown after automated trades to avoid repeated entries."),
         "Use exchange order precheck/test": ("勾选时 live 模式只做交易所订单预检或测试，不会真实成交。", "When checked, live mode uses exchange order precheck/test without filling real orders."),
         "Feishu Webhook URL": ("飞书机器人 Webhook 地址。留空会保留原值；在买入成交和卖出执行时推送结构化消息。", "Feishu bot webhook URL. Leave blank to keep the saved value; filled buy and sell trades send structured notifications."),
@@ -141,6 +149,9 @@ def render_trading_page(
     live_ready = bool(readiness.get("live_ready"))
     auth_status = str(exchange_status.get("status", "unknown"))
     readiness_notice = ""
+    leverage = max(1.0, float(config.get("leverage", 1.0) or 1.0))
+    stop_loss_roi = float(config["stop_loss_pct"]) * leverage
+    take_profit_roi = float(config["take_profit_pct"]) * leverage
     if str(config["mode"]) == "live":
         if live_ready:
             readiness_notice = f'<div class="notice notice-success">{t("实盘自动交易准备就绪。", "Live auto trading is ready.")}</div>'
@@ -204,8 +215,9 @@ def render_trading_page(
         <div class="mini-stat-grid compact-grid trading-risk-grid">
           <div class="mini-stat"><span>{t("评分阈值", "Score Threshold")}</span><strong>{float(config["score_threshold"]):.1f}</strong></div>
           <div class="mini-stat"><span>{t("单笔金额", "Order Qty")}</span><strong>{float(config["quote_order_qty"]):.2f}</strong></div>
-          <div class="mini-stat"><span>{t("止损", "Stop Loss")}</span><strong>{float(config["stop_loss_pct"]):.1f}%</strong></div>
-          <div class="mini-stat"><span>{t("止盈", "Take Profit")}</span><strong>{float(config["take_profit_pct"]):.1f}%</strong></div>
+          <div class="mini-stat"><span>{t("杠杆", "Leverage")}</span><strong>{leverage:.1f}x</strong><small>{escape(str(config.get("exit_profile", "balanced")))}</small></div>
+          <div class="mini-stat"><span>{t("止损", "Stop Loss")}</span><strong>{float(config["stop_loss_pct"]):.1f}%</strong><small>{t("约", "approx")} {stop_loss_roi:.1f}% ROI</small></div>
+          <div class="mini-stat"><span>{t("止盈", "Take Profit")}</span><strong>{float(config["take_profit_pct"]):.1f}%</strong><small>{t("约", "approx")} {take_profit_roi:.1f}% ROI</small></div>
           <div class="mini-stat"><span>{t("浮盈保护", "Profit Guard")}</span><strong>{float(config.get("profit_protection_trigger_pct", 0)):.1f}%</strong><small>{t("锁盈", "lock")} {float(config.get("profit_protection_lock_pct", 0)):.1f}%</small></div>
           <div class="mini-stat"><span>{t("移动止损", "Trailing Stop")}</span><strong>{float(config.get("trailing_stop_pct", 0)):.1f}%</strong></div>
         </div>
@@ -518,6 +530,9 @@ def render_settings_page(
           <label><span>Execution Mode</span><select name="autotrade_mode">{''.join(_option(item, str(params['autotrade_mode'])) for item in ['paper', 'live'])}</select></label>
           <label><span>Execution Exchange</span><select name="autotrade_execution_exchange">{''.join(_option(item, str(params.get('autotrade_execution_exchange', 'binance'))) for item in ['binance', 'okx'])}</select></label>
           <label><span>Quote Order Qty</span><input type="number" step="0.01" min="0.01" name="autotrade_quote_order_qty" value="{float(params['autotrade_quote_order_qty']):.2f}" /></label>
+          <label><span>Leverage</span><input type="number" step="0.1" min="1" max="20" name="autotrade_leverage" value="{float(params.get('autotrade_leverage', 1.0)):.1f}" /></label>
+          <label><span>Risk Per Trade %</span><input type="number" step="0.1" min="0.1" max="100" name="autotrade_risk_per_trade_pct" value="{float(params.get('autotrade_risk_per_trade_pct', 4.0)):.1f}" /></label>
+          <label><span>Exit Profile</span><select name="autotrade_exit_profile">{_option_with_label("balanced", "balanced", str(params.get("autotrade_exit_profile", "balanced")))}{_option_with_label("leveraged_conservative", "leveraged conservative", str(params.get("autotrade_exit_profile", "balanced")))}{_option_with_label("trend_following", "trend following", str(params.get("autotrade_exit_profile", "balanced")))}</select></label>
           <label><span>Max Open Positions</span><input type="number" min="1" name="autotrade_max_open_positions" value="{int(params['autotrade_max_open_positions'])}" /></label>
           <label><span>Max Total Exposure</span><input type="number" step="0.01" min="0.01" name="autotrade_max_total_quote_exposure" value="{float(params['autotrade_max_total_quote_exposure']):.2f}" /></label>
           </div>
@@ -534,6 +549,11 @@ def render_settings_page(
           <label><span>Profit Guard Trigger %</span><input type="number" step="0.1" min="0" name="autotrade_profit_protection_trigger_pct" value="{float(params.get('autotrade_profit_protection_trigger_pct', 3.0)):.1f}" /></label>
           <label><span>Profit Lock %</span><input type="number" step="0.1" min="0" name="autotrade_profit_protection_lock_pct" value="{float(params.get('autotrade_profit_protection_lock_pct', 0.5)):.1f}" /></label>
           <label><span>Trailing Stop %</span><input type="number" step="0.1" min="0" name="autotrade_trailing_stop_pct" value="{float(params.get('autotrade_trailing_stop_pct', 2.0)):.1f}" /></label>
+          <label class="inline-check"><input type="hidden" name="autotrade_trend_hold_enabled" value="0" /><input type="checkbox" name="autotrade_trend_hold_enabled" value="1" {"checked" if params.get("autotrade_trend_hold_enabled") else ""} /><span>Enable trend hold</span></label>
+          <label><span>Trend Hold Score</span><input type="number" step="0.1" min="0" max="100" name="autotrade_trend_hold_min_score" value="{float(params.get('autotrade_trend_hold_min_score', 82.0)):.1f}" /></label>
+          <label><span>Trend Hold Volume</span><input type="number" step="0.01" min="0" name="autotrade_trend_hold_min_volume_ratio" value="{float(params.get('autotrade_trend_hold_min_volume_ratio', 1.25)):.2f}" /></label>
+          <label><span>Trend Hold Buy Pressure</span><input type="number" step="0.01" min="0" max="1" name="autotrade_trend_hold_min_buy_pressure" value="{float(params.get('autotrade_trend_hold_min_buy_pressure', 0.56)):.2f}" /></label>
+          <label><span>Emergency Drawdown %</span><input type="number" step="0.1" min="0" max="50" name="autotrade_emergency_drawdown_pct" value="{float(params.get('autotrade_emergency_drawdown_pct', 2.5)):.1f}" /></label>
           <label><span>Cooldown Minutes</span><input type="number" min="0" name="autotrade_cooldown_minutes" value="{int(params['autotrade_cooldown_minutes'])}" /></label>
           <label class="inline-check"><input type="hidden" name="autotrade_order_test_only" value="0" /><input type="checkbox" name="autotrade_order_test_only" value="1" {"checked" if params["autotrade_order_test_only"] else ""} /><span>Use exchange order precheck/test</span></label>
           </div>

@@ -70,9 +70,6 @@ def build_feishu_trade_payload(*, event: TradingEvent, position: TradingPosition
     header_template = "green" if event.action == "BUY" else "red"
     fields = [
         _card_field("标的", event.symbol),
-        _card_field("交易所", event.exchange.upper()),
-        _card_field("模式", _mode_label(event.mode)),
-        _card_field("状态", event.status),
         _card_field("成交时间", _format_time(event.created_at)),
         _card_field("成交价格", _format_decimal(event.price, 8)),
         _card_field("成交数量", _format_decimal(event.quantity, 8)),
@@ -83,8 +80,9 @@ def build_feishu_trade_payload(*, event: TradingEvent, position: TradingPosition
             [
                 _card_field("信号评分", _format_decimal(event.score, 1)),
                 _card_field("信号等级", position.grade if position is not None else "-"),
-                _card_field("止损价格", _format_decimal(position.stop_price if position is not None else None, 8)),
-                _card_field("止盈价格", _format_decimal(position.take_profit_price if position is not None else None, 8)),
+                _card_field("保证金/杠杆", _margin_leverage_label(position)),
+                _card_field("杠杆止损价", _leveraged_exit_price_label(position, "stop")),
+                _card_field("杠杆止盈价", _leveraged_exit_price_label(position, "take_profit")),
             ]
         )
     else:
@@ -92,8 +90,11 @@ def build_feishu_trade_payload(*, event: TradingEvent, position: TradingPosition
             [
                 _card_field("退出原因", event.exit_reason or "-"),
                 _card_field("已实现盈亏", _format_signed_decimal(event.realized_pnl, 2)),
-                _card_field("收益率", _format_signed_decimal(event.realized_pnl_pct, 2, suffix="%")),
+                _card_field("保证金收益率", _format_signed_decimal(event.realized_pnl_pct, 2, suffix="%")),
+                _card_field("保证金/杠杆", _margin_leverage_label(position)),
                 _card_field("开仓价格", _format_decimal(position.entry_price if position is not None else None, 8)),
+                _card_field("杠杆止损价", _leveraged_exit_price_label(position, "stop")),
+                _card_field("杠杆止盈价", _leveraged_exit_price_label(position, "take_profit")),
             ]
         )
 
@@ -106,7 +107,6 @@ def build_feishu_trade_payload(*, event: TradingEvent, position: TradingPosition
                 "title": {"tag": "plain_text", "content": f"AI Trade {action_label}"},
             },
             "elements": [
-                {"tag": "div", "text": {"tag": "lark_md", "content": f"**摘要**\n{event.message}"}},
                 {"tag": "div", "fields": fields},
             ],
         },
@@ -132,6 +132,22 @@ def _card_field(label: str, value: str, *, short: bool = True) -> dict[str, obje
         "is_short": short,
         "text": {"tag": "lark_md", "content": f"**{label}**\n{value or '-'}"},
     }
+
+
+def _margin_leverage_label(position: TradingPosition | None) -> str:
+    if position is None:
+        return "-"
+    margin_notional = position.margin_notional if position.margin_notional is not None else position.quote_notional
+    return f"{margin_notional:.2f} / {position.leverage:.1f}x"
+
+
+def _leveraged_exit_price_label(position: TradingPosition | None, kind: str) -> str:
+    if position is None or position.entry_price <= 0:
+        return "-"
+    target_price = position.stop_price if kind == "stop" else position.take_profit_price
+    price_return_pct = ((target_price - position.entry_price) / position.entry_price) * 100
+    margin_roi_pct = price_return_pct * position.leverage
+    return f"{target_price:.8f} ({position.leverage:.1f}x ≈ {margin_roi_pct:+.2f}% ROI)"
 
 
 def _format_decimal(value: float | None, precision: int, *, suffix: str = "") -> str:

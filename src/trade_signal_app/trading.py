@@ -30,6 +30,8 @@ class TradingPosition:
     client_order_id: str = ""
     exchange: str = "BINANCE"
     highest_price: float | None = None
+    leverage: float = 1.0
+    margin_notional: float | None = None
 
 
 @dataclass
@@ -148,6 +150,8 @@ class TradingStateStore:
             client_order_id=str(payload.get("client_order_id", "")),
             exchange=str(payload.get("exchange", "BINANCE")).upper(),
             highest_price=float(highest_price) if highest_price is not None else entry_price,
+            leverage=max(1.0, float(payload.get("leverage") or 1.0)),
+            margin_notional=float(payload["margin_notional"]) if payload.get("margin_notional") is not None else None,
         )
 
     @staticmethod
@@ -212,7 +216,13 @@ class AutoTrader:
             positions,
             {signal.symbol: signal.ticker.last_price for signal in signals},
         )
-        positions = self._evaluate_exits(positions, config, events, latest_prices)
+        positions = self._evaluate_exits(
+            positions,
+            config,
+            events,
+            latest_prices,
+            signal_by_symbol={signal.symbol: signal for signal in signals},
+        )
         if not config.enabled:
             self.state_store.save(positions)
             events.append(
@@ -260,7 +270,7 @@ class AutoTrader:
             )
 
         open_symbols = {position.symbol for position in positions}
-        exposure = sum(position.quote_notional for position in positions)
+        exposure = sum(self._position_margin_notional(position) for position in positions)
         cooldown_after = now - timedelta(minutes=config.cooldown_minutes)
         recent_symbols = {
             position.symbol
@@ -302,7 +312,7 @@ class AutoTrader:
                 positions.append(position)
                 self._notify_trade_event(event=event, position=position)
                 open_symbols.add(position.symbol)
-                exposure += position.quote_notional
+                exposure += self._position_margin_notional(position)
 
         self.state_store.save(positions)
         self.state_store.append_events(events)
@@ -321,9 +331,11 @@ class AutoTrader:
         config: AutoTradeDefaults,
         events: list[TradingEvent],
         latest_prices: dict[str, float],
+        signal_by_symbol: dict[str, object] | None = None,
     ) -> list[TradingPosition]:
         if not positions:
             return []
+        signal_by_symbol = signal_by_symbol or {}
         remaining: list[TradingPosition] = []
         for position in positions:
             price = latest_prices.get(position.symbol)
@@ -331,10 +343,18 @@ class AutoTrader:
                 remaining.append(position)
                 continue
             position = self._apply_profit_protection(position, price, config)
+            emergency_event = self._emergency_drawdown_event(position, price, config)
+            if emergency_event is not None:
+                events.append(emergency_event)
             exit_reason = ""
             if price <= position.stop_price:
                 exit_reason = "profit_protect_stop" if position.stop_price >= position.entry_price else "stop_loss"
             elif price >= position.take_profit_price:
+                signal = signal_by_symbol.get(position.symbol)
+                if self._should_trend_hold(position=position, price=price, config=config, signal=signal):
+                    events.append(self._trend_hold_event(position=position, price=price, signal=signal))
+                    remaining.append(position)
+                    continue
                 exit_reason = "take_profit"
             if not exit_reason:
                 remaining.append(position)
@@ -359,6 +379,101 @@ class AutoTrader:
             self.trade_notifier.notify_trade(event=event, position=position)
         except Exception as exc:  # noqa: BLE001
             print(f"Feishu trade notification failed for {event.action} {event.symbol}: {exc}")
+
+    def _trend_hold_event(
+        self,
+        *,
+        position: TradingPosition,
+        price: float,
+        signal: object | None,
+    ) -> TradingEvent:
+        score = self._signal_float(signal, "score")
+        return TradingEvent(
+            action="HOLD",
+            symbol=position.symbol,
+            mode=position.mode,
+            status="trend_hold",
+            message="已达到固定止盈，但趋势信号仍强，继续持有并用移动止损保护浮盈。",
+            score=score,
+            price=price,
+            quantity=position.quantity,
+            quote_notional=position.quote_notional,
+            exchange=position.exchange,
+        )
+
+    def _should_trend_hold(
+        self,
+        *,
+        position: TradingPosition,
+        price: float,
+        config: AutoTradeDefaults,
+        signal: object | None,
+    ) -> bool:
+        if config.exit_profile != "trend_following" or not config.trend_hold_enabled:
+            return False
+        if signal is None or price < position.take_profit_price:
+            return False
+        score = self._signal_float(signal, "score")
+        volume_ratio = self._signal_indicator_float(signal, "volume_ratio", 1.0)
+        buy_pressure_ratio = self._signal_indicator_float(signal, "buy_pressure_ratio", 0.0)
+        return (
+            score >= config.trend_hold_min_score
+            and volume_ratio >= config.trend_hold_min_volume_ratio
+            and buy_pressure_ratio >= config.trend_hold_min_buy_pressure
+        )
+
+    def _emergency_drawdown_event(
+        self,
+        position: TradingPosition,
+        price: float,
+        config: AutoTradeDefaults,
+    ) -> TradingEvent | None:
+        if config.emergency_drawdown_pct <= 0 or price <= position.stop_price:
+            return None
+        high_price = position.highest_price or position.entry_price
+        if high_price <= 0 or price >= high_price:
+            return None
+        drawdown_pct = ((high_price - price) / high_price) * 100
+        if drawdown_pct < config.emergency_drawdown_pct:
+            return None
+        return TradingEvent(
+            action="ALERT",
+            symbol=position.symbol,
+            mode=position.mode,
+            status="emergency_drawdown",
+            message=f"价格较持仓最高价快速回撤 {drawdown_pct:.2f}%，请检查突发风险和盘口流动性。",
+            price=price,
+            quantity=position.quantity,
+            quote_notional=position.quote_notional,
+            exchange=position.exchange,
+        )
+
+    @staticmethod
+    def _signal_float(signal: object | None, key: str, default: float = 0.0) -> float:
+        if signal is None:
+            return default
+        if isinstance(signal, dict):
+            raw_value = signal.get(key, default)
+        else:
+            raw_value = getattr(signal, key, default)
+        try:
+            return float(raw_value or default)
+        except (TypeError, ValueError):
+            return default
+
+    @classmethod
+    def _signal_indicator_float(cls, signal: object | None, key: str, default: float = 0.0) -> float:
+        if signal is None:
+            return default
+        if isinstance(signal, dict):
+            raw_value = signal.get(key, default)
+        else:
+            indicators = getattr(signal, "indicators", None)
+            raw_value = getattr(indicators, key, default)
+        try:
+            return float(raw_value or default)
+        except (TypeError, ValueError):
+            return default
 
     def _latest_prices_for_positions(
         self,
@@ -388,14 +503,17 @@ class AutoTrader:
     def _open_position(self, signal, config: AutoTradeDefaults) -> tuple[TradingPosition, TradingEvent]:
         now = now_app_time()
         price = signal.ticker.last_price
-        quantity = config.quote_order_qty / price
+        leverage = config.leverage if config.mode == "paper" else 1.0
+        margin_notional = config.quote_order_qty
+        position_notional = margin_notional * leverage
+        quantity = position_notional / price
         client_order_id = self._client_order_id("buy", signal.symbol, now)
         position = TradingPosition(
             exchange=config.execution_exchange.upper(),
             symbol=signal.symbol,
             quantity=quantity,
             entry_price=price,
-            quote_notional=config.quote_order_qty,
+            quote_notional=position_notional,
             score=signal.score,
             grade=signal.grade,
             opened_at=now,
@@ -404,6 +522,8 @@ class AutoTrader:
             mode=config.mode,
             client_order_id=client_order_id,
             highest_price=price,
+            leverage=leverage,
+            margin_notional=margin_notional,
         )
         if config.mode == "paper":
             return position, TradingEvent(
@@ -416,7 +536,7 @@ class AutoTrader:
                 score=signal.score,
                 price=price,
                 quantity=quantity,
-                quote_notional=config.quote_order_qty,
+                quote_notional=position_notional,
             )
 
         try:
@@ -459,6 +579,10 @@ class AutoTrader:
             response=response_payload,
             exchange=config.execution_exchange.upper(),
         )
+
+    @staticmethod
+    def _position_margin_notional(position: TradingPosition) -> float:
+        return position.margin_notional if position.margin_notional is not None else position.quote_notional
 
     def _close_position(
         self,
@@ -583,6 +707,12 @@ class AutoTrader:
             raise ValueError("最大持仓数必须至少为 1。")
         if config.max_total_quote_exposure < config.quote_order_qty:
             raise ValueError("最大总敞口不能小于单笔投入。")
+        if config.leverage < 1:
+            raise ValueError("杠杆倍数不能小于 1。")
+        if config.risk_per_trade_pct <= 0:
+            raise ValueError("单笔风险比例必须大于 0。")
+        if config.exit_profile not in {"balanced", "leveraged_conservative", "trend_following"}:
+            raise ValueError("退出档位不受支持。")
         if config.stop_loss_pct <= 0 or config.take_profit_pct <= 0:
             raise ValueError("止损和止盈比例必须大于 0。")
         if config.profit_protection_trigger_pct < 0:
@@ -591,6 +721,8 @@ class AutoTrader:
             raise ValueError("浮盈保护锁盈比例不能小于 0。")
         if config.trailing_stop_pct < 0:
             raise ValueError("移动止损回撤比例不能小于 0。")
+        if config.emergency_drawdown_pct < 0:
+            raise ValueError("急跌预警回撤比例不能小于 0。")
         if config.profit_protection_enabled and config.profit_protection_lock_pct > config.profit_protection_trigger_pct:
             raise ValueError("浮盈保护锁盈比例不能大于触发比例。")
 
@@ -639,8 +771,11 @@ class AutoTrader:
         entry_notional = position.quote_notional
         if position.quantity > 0 and quantity != position.quantity:
             entry_notional = position.quote_notional * (quantity / position.quantity)
+        margin_notional = position.margin_notional or entry_notional
+        if position.quantity > 0 and quantity != position.quantity:
+            margin_notional = margin_notional * (quantity / position.quantity)
         realized_pnl = exit_notional - entry_notional
-        realized_pnl_pct = (realized_pnl / entry_notional) * 100 if entry_notional else 0.0
+        realized_pnl_pct = (realized_pnl / margin_notional) * 100 if margin_notional else 0.0
         return exit_notional, realized_pnl, realized_pnl_pct
 
     @staticmethod
@@ -667,6 +802,8 @@ class AutoTrader:
             client_order_id=position.client_order_id,
             exchange=position.exchange,
             highest_price=entry_price,
+            leverage=1.0,
+            margin_notional=quote_notional,
         )
 
     @staticmethod

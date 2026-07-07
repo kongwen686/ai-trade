@@ -310,23 +310,44 @@ def _latest_prices_for_open_positions(
     return latest_prices
 
 
+def _evaluate_forced_paper_exits(
+    *,
+    positions: list[TradingPosition],
+    config: AutoTradeDefaults,
+    events: list[TradingEvent],
+    latest_prices: dict[str, float],
+    signal_by_symbol: dict[str, object],
+    scanner: object,
+    store: TradingStateStore,
+    notifier: FeishuTradeNotifier | None,
+) -> list[TradingPosition]:
+    trader = AutoTrader(scanner=scanner, state_store=store, trade_notifier=notifier)
+    return trader._evaluate_exits(positions, config, events, latest_prices, signal_by_symbol=signal_by_symbol)
+
+
 def _serialize_trading_position(position: TradingPosition, latest_price: float | None = None) -> dict[str, object]:
     current_notional = None
     unrealized_pnl = None
     unrealized_pnl_pct = None
+    unrealized_price_return_pct = None
+    margin_notional = position.margin_notional if position.margin_notional is not None else position.quote_notional
     if latest_price is not None and latest_price > 0:
         current_notional = position.quantity * latest_price
         unrealized_pnl = current_notional - position.quote_notional
-        unrealized_pnl_pct = (unrealized_pnl / position.quote_notional) * 100 if position.quote_notional else 0.0
+        unrealized_pnl_pct = (unrealized_pnl / margin_notional) * 100 if margin_notional else 0.0
+        unrealized_price_return_pct = (unrealized_pnl / position.quote_notional) * 100 if position.quote_notional else 0.0
     return {
         "symbol": position.symbol,
         "quantity": position.quantity,
         "entry_price": position.entry_price,
         "last_price": latest_price,
         "quote_notional": position.quote_notional,
+        "margin_notional": margin_notional,
+        "leverage": position.leverage,
         "current_notional": current_notional,
         "unrealized_pnl": unrealized_pnl,
         "unrealized_pnl_pct": unrealized_pnl_pct,
+        "unrealized_price_return_pct": unrealized_price_return_pct,
         "score": position.score,
         "grade": position.grade,
         "opened_at": position.opened_at.isoformat(),
@@ -754,11 +775,28 @@ def _run_forced_paper_trading_once() -> dict[str, object]:
     }
     scan_payload, _ = _scan_payload(query, force_refresh=True)
     signals = [item for item in scan_payload.get("signals", []) if isinstance(item, dict)]
-    positions = _trading_store().load()
+    store = _trading_store()
+    positions = store.load()
     events: list[TradingEvent] = []
+    signal_prices = {
+        str(signal.get("symbol", "")).upper(): float(signal.get("last_price") or 0.0)
+        for signal in signals
+        if str(signal.get("symbol", "")).strip()
+    }
+    latest_prices = _latest_prices_for_open_positions(positions, scanner, signal_prices)
+    positions = _evaluate_forced_paper_exits(
+        positions=positions,
+        config=config,
+        events=events,
+        latest_prices=latest_prices,
+        signal_by_symbol={str(signal.get("symbol", "")).upper(): signal for signal in signals},
+        scanner=scanner,
+        store=store,
+        notifier=notifier,
+    )
     now = now_app_time()
     open_symbols = {position.symbol for position in positions}
-    exposure = sum(position.quote_notional for position in positions)
+    exposure = sum(position.margin_notional if position.margin_notional is not None else position.quote_notional for position in positions)
     blocked_symbols = {}
     risk_payload = _fast_risk_module_payload().get("execution_risk", {})
     if isinstance(risk_payload, dict) and isinstance(risk_payload.get("blocked_symbols"), dict):
@@ -792,12 +830,15 @@ def _run_forced_paper_trading_once() -> dict[str, object]:
             continue
         if score < config.score_threshold:
             continue
-        quantity = config.quote_order_qty / price
+        leverage = max(1.0, config.leverage)
+        margin_notional = config.quote_order_qty
+        position_notional = margin_notional * leverage
+        quantity = position_notional / price
         position = TradingPosition(
             symbol=symbol,
             quantity=quantity,
             entry_price=price,
-            quote_notional=config.quote_order_qty,
+            quote_notional=position_notional,
             score=score,
             grade=str(signal.get("grade") or "B"),
             opened_at=now,
@@ -806,6 +847,9 @@ def _run_forced_paper_trading_once() -> dict[str, object]:
             mode="paper",
             client_order_id=f"aitrade-paper-{symbol.lower()}-{int(now.timestamp())}",
             exchange=config.execution_exchange.upper(),
+            highest_price=price,
+            leverage=leverage,
+            margin_notional=margin_notional,
         )
         event = TradingEvent(
             action="BUY",
@@ -816,14 +860,14 @@ def _run_forced_paper_trading_once() -> dict[str, object]:
             score=score,
             price=price,
             quantity=quantity,
-            quote_notional=config.quote_order_qty,
+            quote_notional=position_notional,
             exchange=config.execution_exchange.upper(),
         )
         positions.append(position)
         events.append(event)
         _notify_trade_event(notifier, event=event, position=position)
         open_symbols.add(symbol)
-        exposure += config.quote_order_qty
+        exposure += margin_notional
 
     if not events:
         events.append(
@@ -836,14 +880,8 @@ def _run_forced_paper_trading_once() -> dict[str, object]:
                 exchange=config.execution_exchange.upper(),
             )
         )
-    store = _trading_store()
     store.save(positions)
     store.append_events(events)
-    signal_prices = {
-        str(signal.get("symbol", "")).upper(): float(signal.get("last_price") or 0.0)
-        for signal in signals
-        if str(signal.get("symbol", "")).strip()
-    }
     latest_prices = _latest_prices_for_open_positions(positions, scanner, signal_prices)
     return _serialize_trading_report(
         TradingRunReport(

@@ -26,6 +26,28 @@ def _chips(items: list[str], chip_class: str) -> str:
     return "".join(f'<span class="ant-tag chip {chip_class}">{escape(item)}</span>' for item in items)
 
 
+def _table_warning_items(warnings: list[object], limit: int = 2) -> list[object]:
+    selected = list(warnings[:limit])
+    for warning in warnings[limit:]:
+        if _is_scan_warning(warning) and warning not in selected:
+            selected.append(warning)
+    return selected
+
+
+def _is_scan_warning(value: object) -> bool:
+    return "完整扫描" in str(value)
+
+
+def _table_warning_tag(value: object, lang: str) -> str:
+    raw = str(value)
+    class_name = "ant-tag table-tag warning"
+    label = raw
+    if _is_scan_warning(raw):
+        class_name += " scan-warning"
+        label = _text(lang, "完整扫描超时，已返回实时 ticker，后台刷新中", "Full scan timed out; live ticker fallback is refreshing")
+    return f'<span class="{class_name}" title="{escape(raw)}">{escape(label)}</span>'
+
+
 def _community_detail(signal: dict[str, object]) -> str:
     summary = str(signal.get("community_summary") or "").strip()
     drivers = [str(item) for item in signal.get("community_drivers") or [] if str(item).strip()]
@@ -235,6 +257,22 @@ def _signal_table(signals: list[dict[str, object]], lang: str) -> str:
         _text(lang, "原因", "Reasons"),
     ]
     header = "".join(f"<th>{escape(item)}</th>" for item in headers)
+    column_group = """
+          <colgroup>
+            <col class="col-symbol" />
+            <col class="col-grade" />
+            <col class="col-score" />
+            <col class="col-price" />
+            <col class="col-change" />
+            <col class="col-volume" />
+            <col class="col-rsi" />
+            <col class="col-volume-ratio" />
+            <col class="col-ema" />
+            <col class="col-macd" />
+            <col class="col-community" />
+            <col class="col-reasons" />
+          </colgroup>
+        """
     rows = []
     for signal in signals:
         grade = str(signal["grade"])
@@ -247,9 +285,9 @@ def _signal_table(signals: list[dict[str, object]], lang: str) -> str:
             else _text(lang, "未接入", "Not configured")
         )
         reasons = list(signal.get("reasons") or [])[:3]
-        warnings = list(signal.get("warnings") or [])[:2]
+        warnings = _table_warning_items(list(signal.get("warnings") or []))
         reason_tags = "".join(f'<span class="ant-tag table-tag positive">{escape(str(item))}</span>' for item in reasons)
-        warning_tags = "".join(f'<span class="ant-tag table-tag warning">{escape(str(item))}</span>' for item in warnings)
+        warning_tags = "".join(_table_warning_tag(item, lang) for item in warnings)
         rows.append(
             f"""
             <tr>
@@ -271,6 +309,7 @@ def _signal_table(signals: list[dict[str, object]], lang: str) -> str:
     return f"""
       <section class="ant-table-wrapper signal-table-shell table-shell" aria-label="{escape(_text(lang, "信号表格", "Signal table"))}">
         <table class="ant-table data-table signal-table">
+          {column_group}
           <thead><tr>{header}</tr></thead>
           <tbody>{"".join(rows)}</tbody>
         </table>

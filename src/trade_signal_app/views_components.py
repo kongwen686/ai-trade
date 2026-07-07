@@ -167,9 +167,11 @@ def _trading_position_rows(positions: list[dict[str, object]], lang: str = "zh")
         last_price = position.get("last_price")
         unrealized_pnl = position.get("unrealized_pnl")
         unrealized_pnl_pct = position.get("unrealized_pnl_pct")
+        unrealized_price_return_pct = position.get("unrealized_price_return_pct")
         last_price_text = t("待刷新", "Pending") if last_price is None else f'{float(last_price):.8f}'
         pnl_text = t("待刷新", "Pending") if unrealized_pnl is None else f'{float(unrealized_pnl):+.2f}'
         return_text = t("待刷新", "Pending") if unrealized_pnl_pct is None else f'{float(unrealized_pnl_pct):+.2f}%'
+        price_return_text = "" if unrealized_price_return_pct is None else f'{float(unrealized_price_return_pct):+.2f}%'
         return_class = ""
         if unrealized_pnl_pct is not None:
             return_class = " positive" if float(unrealized_pnl_pct) >= 0 else " negative"
@@ -181,8 +183,10 @@ def _trading_position_rows(positions: list[dict[str, object]], lang: str = "zh")
               <td>{float(position["entry_price"]):.8f}</td>
               <td>{escape(last_price_text)}</td>
               <td>{float(position["quote_notional"]):.2f}</td>
+              <td>{float(position.get("margin_notional") or position["quote_notional"]):.2f} / {float(position.get("leverage") or 1.0):.1f}x</td>
               <td class="pnl-cell{return_class}">{escape(pnl_text)}</td>
               <td class="pnl-cell{return_class}">{escape(return_text)}</td>
+              <td>{escape(price_return_text)}</td>
               <td>{float(position["score"]):.1f} / {escape(str(position["grade"]))}</td>
               <td>{float(position.get("highest_price") or position["entry_price"]):.8f}</td>
               <td>{float(position["stop_price"]):.8f}</td>
@@ -199,8 +203,10 @@ def _trading_position_rows(positions: list[dict[str, object]], lang: str = "zh")
           <th>{t("开仓价", "Entry")}</th>
           <th>{t("现价", "Last")}</th>
           <th>{t("名义金额", "Notional")}</th>
+          <th>{t("保证金/杠杆", "Margin/Lev")}</th>
           <th>{t("浮动盈亏", "Unrealized PnL")}</th>
-          <th>{t("收益率", "Return")}</th>
+          <th>{t("保证金收益率", "Margin ROI")}</th>
+          <th>{t("价格涨幅", "Price Return")}</th>
           <th>{t("信号", "Signal")}</th>
           <th>{t("最高价", "High")}</th>
           <th>{t("保护止损", "Protected Stop")}</th>
