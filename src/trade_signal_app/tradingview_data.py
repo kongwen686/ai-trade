@@ -164,14 +164,15 @@ def fetch_tradingview_history(
     except ValueError as exc:
         if cache_enabled and cache_path.exists():
             candles = load_tradingview_csv(cache_path, interval=normalized_interval)
-            return TradingViewFetchResult(
-                exchange=exchange.upper(),
-                symbol=symbol.upper(),
-                interval=normalized_interval,
-                cache_path=cache_path,
-                candle_count=len(candles),
-                source="cache",
-            )
+            if len(candles) >= bars:
+                return TradingViewFetchResult(
+                    exchange=exchange.upper(),
+                    symbol=symbol.upper(),
+                    interval=normalized_interval,
+                    cache_path=cache_path,
+                    candle_count=len(candles),
+                    source="cache",
+                )
         if exchange.upper() == "BINANCE":
             try:
                 candles = _fetch_binance_public_history(symbol=symbol, interval=normalized_interval, bars=bars)

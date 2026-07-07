@@ -881,6 +881,52 @@ class MainTests(unittest.TestCase):
         self.assertGreater(payload["series_reports"][0]["buy_hold_final_equity"], 1.0)
         self.assertEqual(payload["portfolio_reports"][0]["top_n"], 1)
 
+    def test_backtest_payload_uses_local_cache_pattern_for_submitted_empty_archives(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive = Path(temp_dir) / "BTCUSDT-4h-2025-01.zip"
+            _build_archive(archive)
+            archive_path = archive.resolve()
+
+            def fake_resolve(inputs: list[str]) -> list[Path]:
+                if inputs == [main_backtest.LOCAL_TRADINGVIEW_ARCHIVE_PATTERN]:
+                    return [archive_path]
+                return [archive_path] if str(archive_path) in inputs else []
+
+            with (
+                patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(RuntimeConfig(), None)),
+                patch("trade_signal_app.main_backtest.resolve_archive_paths", side_effect=fake_resolve),
+            ):
+                payload, params, error = _backtest_payload(
+                    {
+                        "lookback_bars": ["120"],
+                        "score_threshold": ["60"],
+                        "portfolio_top_n": ["0"],
+                    }
+                )
+
+        self.assertIsNone(error)
+        self.assertEqual(params["archives"], main_backtest.LOCAL_TRADINGVIEW_ARCHIVE_PATTERN)
+        self.assertEqual(len(payload["series_reports"]), 1)
+
+    def test_backtest_payload_diagnoses_history_shorter_than_lookback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive = Path(temp_dir) / "BTCUSDT-4h-2025-01.zip"
+            _build_archive(archive)
+            with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(RuntimeConfig(), None)):
+                payload, _, error = _backtest_payload(
+                    {
+                        "archives": [str(archive)],
+                        "lookback_bars": ["240"],
+                        "score_threshold": ["60"],
+                        "portfolio_top_n": ["0"],
+                    }
+                )
+
+        diagnostics = " ".join(payload["strategy_explanation"]["diagnostics"])
+        self.assertIsNone(error)
+        self.assertIn("只有 180 根 K 线", diagnostics)
+        self.assertIn("低于当前 lookback 240", diagnostics)
+
     def test_render_backtest_page_includes_extended_controls(self) -> None:
         params = {
             "archives": "data/spot/monthly/klines/*/4h/*.zip",

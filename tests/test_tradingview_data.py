@@ -91,6 +91,64 @@ class TradingViewDataTests(unittest.TestCase):
         self.assertEqual(result.candle_count, 1)
         self.assertEqual(cached[0].close_price, 104.0)
 
+    def test_fetch_refreshes_underfilled_cache(self) -> None:
+        start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        stale_candles = [
+            Candlestick(
+                open_time=start,
+                close_time=start + timedelta(hours=4) - timedelta(milliseconds=1),
+                open_price=100.0,
+                high_price=105.0,
+                low_price=98.0,
+                close_price=104.0,
+                volume=10.0,
+                quote_volume=1040.0,
+                trade_count=20,
+                taker_buy_base_volume=5.0,
+                taker_buy_quote_volume=520.0,
+            )
+        ]
+        refreshed_candles = [
+            *stale_candles,
+            Candlestick(
+                open_time=start + timedelta(hours=4),
+                close_time=start + timedelta(hours=8) - timedelta(milliseconds=1),
+                open_price=104.0,
+                high_price=109.0,
+                low_price=103.0,
+                close_price=108.0,
+                volume=12.0,
+                quote_volume=1296.0,
+                trade_count=24,
+                taker_buy_base_volume=7.0,
+                taker_buy_quote_volume=756.0,
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_root = Path(temp_dir)
+            cache_path = tradingview_cache_path(cache_root, "BINANCE", "BTCUSDT", "4h")
+            write_tradingview_csv(cache_path, stale_candles)
+            with (
+                unittest.mock.patch("trade_signal_app.tradingview_data._load_tvdatafeed", side_effect=ValueError("missing tvdatafeed")),
+                unittest.mock.patch("trade_signal_app.tradingview_data._fetch_binance_public_history", return_value=refreshed_candles) as fetch_binance,
+            ):
+                result = fetch_tradingview_history(
+                    cache_root=cache_root,
+                    exchange="BINANCE",
+                    symbol="BTCUSDT",
+                    interval="4h",
+                    bars=2,
+                )
+
+            cached = load_tradingview_csv(result.cache_path, interval=result.interval)
+
+        fetch_binance.assert_called_once_with(symbol="BTCUSDT", interval="4h", bars=2)
+        self.assertEqual(result.source, "binance_public_fallback")
+        self.assertEqual(result.candle_count, 2)
+        self.assertEqual(len(cached), 2)
+        self.assertEqual(cached[-1].close_price, 108.0)
+
 
 if __name__ == "__main__":
     unittest.main()

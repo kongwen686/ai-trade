@@ -37,6 +37,9 @@ from .ui import format_backtest_report, format_portfolio_report, format_rebalanc
 from .views_common import normalize_language
 
 
+LOCAL_TRADINGVIEW_ARCHIVE_PATTERN = "data/tradingview_klines/*/*/*.csv"
+
+
 def _to_jsonable(value: object) -> object:
     if is_dataclass(value):
         return {key: _to_jsonable(item) for key, item in asdict(value).items()}
@@ -73,6 +76,15 @@ def _split_archives(value: str) -> list[str]:
         if item:
             items.append(item)
     return items
+
+
+def _cached_archive_pattern_if_available() -> str:
+    return LOCAL_TRADINGVIEW_ARCHIVE_PATTERN if resolve_archive_paths([LOCAL_TRADINGVIEW_ARCHIVE_PATTERN]) else ""
+
+
+def _minimum_required_backtest_bars(holding_periods: list[int], exit_config: ExitRuleConfig) -> int:
+    max_horizon = max(max(holding_periods) + 1, exit_config.max_holding_bars + 1)
+    return 60 + max_horizon
 
 
 def _tradingview_fetch_result(form: dict[str, list[str]], *, runtime_config: RuntimeConfig, tradingview_cache_dir: object) -> dict[str, object]:
@@ -177,6 +189,8 @@ def _backtest_payload(
         "tradingview_bars": _parse_query_int(query, "tradingview_bars", runtime_config.tradingview_bars, "TradingView Bars"),
         "tv_fetched": _parse_bool_flag(query, "tv_fetched"),
     }
+    if not str(params["archives"]).strip() and query:
+        params["archives"] = _cached_archive_pattern_if_available()
     if "no_binance_discount" not in query:
         params["no_binance_discount"] = bool(base_params["no_binance_discount"])
     if "no_kdj_confirmation" not in query:
@@ -184,7 +198,8 @@ def _backtest_payload(
 
     archive_patterns = _split_archives(str(params["archives"]))
     if not archive_patterns:
-        return _empty_backtest_payload(params), params, None
+        error = "没有填写 ZIP/CSV 历史数据；可先使用右侧 TradingView 拉取，或填入本地缓存路径。" if query else None
+        return _empty_backtest_payload(params), params, error
 
     paths = resolve_archive_paths(archive_patterns)
     if not paths:
@@ -205,6 +220,7 @@ def _backtest_payload(
         take_profit_pct=float(params["take_profit_pct"]),
         cooldown_bars_after_exit=int(params["cooldown_bars"]),
     )
+    minimum_required_bars = _minimum_required_backtest_bars(holding_periods, exit_config)
     execution_config = ExecutionConfig(
         fee_bps=float(params["fee_bps"]),
         fee_model=str(params["fee_model"]),
@@ -242,9 +258,19 @@ def _backtest_payload(
         return _empty_backtest_payload(params), params, str(exc)
     candles_by_interval: dict[str, dict[str, list]] = {}
     series_contexts = []
+    data_warnings: list[str] = []
     for (symbol, interval), archive_paths in sorted(grouped.items()):
         candles = merge_candles(archive_paths)
         candles_by_interval.setdefault(interval, {})[symbol] = candles
+        if len(candles) < int(params["lookback_bars"]):
+            data_warnings.append(
+                f"{symbol} {interval} 只有 {len(candles)} 根 K 线，低于当前 lookback {int(params['lookback_bars'])}；建议重新拉取更多历史数据。"
+            )
+        if len(candles) < minimum_required_bars:
+            data_warnings.append(
+                f"{symbol} {interval} 已跳过：至少需要 {minimum_required_bars} 根 K 线才能覆盖指标预热和退出窗口，当前只有 {len(candles)} 根。"
+            )
+            continue
         try:
             report_execution_config = (
                 resolve_execution_config(
@@ -258,25 +284,33 @@ def _backtest_payload(
         except Exception as exc:  # noqa: BLE001
             return _empty_backtest_payload(params), params, str(exc)
         if str(params["preset"]) == "btc_overnight_seasonality":
-            report = run_overnight_seasonality_backtest(
-                symbol=symbol,
-                interval=interval,
-                candles=candles,
-                execution_config=report_execution_config,
-            )
+            try:
+                report = run_overnight_seasonality_backtest(
+                    symbol=symbol,
+                    interval=interval,
+                    candles=candles,
+                    execution_config=report_execution_config,
+                )
+            except ValueError as exc:
+                data_warnings.append(f"{symbol} {interval} 已跳过：{exc}")
+                continue
         else:
-            report = run_backtest_for_series(
-                symbol=symbol,
-                interval=interval,
-                candles=candles,
-                lookback_bars=int(params["lookback_bars"]),
-                score_threshold=float(params["score_threshold"]),
-                holding_periods=holding_periods,
-                entry_config=entry_config,
-                exit_config=exit_config,
-                execution_config=report_execution_config,
-                cooldown_bars=int(params["cooldown_bars"]) or None,
-            )
+            try:
+                report = run_backtest_for_series(
+                    symbol=symbol,
+                    interval=interval,
+                    candles=candles,
+                    lookback_bars=int(params["lookback_bars"]),
+                    score_threshold=float(params["score_threshold"]),
+                    holding_periods=holding_periods,
+                    entry_config=entry_config,
+                    exit_config=exit_config,
+                    execution_config=report_execution_config,
+                    cooldown_bars=int(params["cooldown_bars"]) or None,
+                )
+            except ValueError as exc:
+                data_warnings.append(f"{symbol} {interval} 已跳过：{exc}")
+                continue
         reports_by_interval.setdefault(interval, []).append(report)
         series_reports.append(format_backtest_report(report))
         series_contexts.append((symbol, interval, candles, report_execution_config))
@@ -330,11 +364,12 @@ def _backtest_payload(
             portfolio_reports=portfolio_reports,
             rebalance_reports=rebalance_reports,
             stability_checks=stability_checks,
+            data_warnings=data_warnings,
         ),
     }, params, None
 
 
-def _empty_backtest_payload(params: dict[str, object]) -> dict[str, object]:
+def _empty_backtest_payload(params: dict[str, object], *, data_warnings: list[str] | None = None) -> dict[str, object]:
     return {
         "series_reports": [],
         "portfolio_reports": [],
@@ -345,6 +380,7 @@ def _empty_backtest_payload(params: dict[str, object]) -> dict[str, object]:
             portfolio_reports=[],
             rebalance_reports=[],
             stability_checks=[],
+            data_warnings=data_warnings or [],
         ),
     }
 
@@ -506,6 +542,7 @@ def _build_backtest_strategy_explanation(
     portfolio_reports: list[dict[str, object]],
     rebalance_reports: list[dict[str, object]],
     stability_checks: list[dict[str, object]],
+    data_warnings: list[str] | None = None,
 ) -> dict[str, object]:
     preset = str(params.get("preset", "custom"))
     strategy_type, strategy_summary = _backtest_strategy_type(preset)
@@ -537,6 +574,8 @@ def _build_backtest_strategy_explanation(
         stability_enabled=bool(params.get("stability_checks")),
         stability_checks=stability_checks,
     )
+    if data_warnings:
+        diagnostics = [*data_warnings, *diagnostics]
     cost_notes = _backtest_cost_notes(params)
     notes = [
         strategy_summary,

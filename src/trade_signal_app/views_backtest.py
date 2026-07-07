@@ -35,7 +35,7 @@ def _stats_table(rows: list[dict[str, object]], *, portfolio: bool = False) -> s
             </tr>
             """
         )
-    return f'<table class="ant-table data-table">{header}<tbody>{"".join(body)}</tbody></table>'
+    return f'<table class="ant-table data-table series-stats-table">{header}<tbody>{"".join(body)}</tbody></table>'
 
 
 def _trade_pills(trade_stat: dict[str, object] | None, final_equity: float, max_drawdown_pct: float) -> str:
@@ -76,6 +76,11 @@ def _event_rows(events: list[dict[str, object]]) -> str:
     rows = []
     for event in events:
         reasons = ", ".join(str(reason) for reason in event["reasons"])
+        reason_cell = (
+            f'<td class="reason-cell"><span class="reason-text" title="{escape(reasons)}">{escape(reasons)}</span></td>'
+            if reasons
+            else '<td class="reason-cell muted">-</td>'
+        )
         rows.append(
             f"""
             <tr>
@@ -87,14 +92,14 @@ def _event_rows(events: list[dict[str, object]]) -> str:
               <td>{float(event["gross_return_pct"] or 0.0):+.2f}%</td>
               <td>{float(event["realized_return_pct"] or 0.0):+.2f}%</td>
               <td>{float(event["effective_slippage_bps"] or 0.0):.2f}bps</td>
-              <td>{escape(reasons)}</td>
+              {reason_cell}
             </tr>
             """
         )
     if not rows:
         return '<p class="helper-text">当前参数下没有触发任何交易。</p>'
     return f"""
-      <table class="ant-table data-table">
+      <table class="ant-table data-table series-trades-table">
         <tr>
           <th>Entry Time</th>
           <th>Score</th>
@@ -805,6 +810,7 @@ def _stability_check_rows(items: list[object]) -> str:
 def _backtest_card(report: dict[str, object]) -> str:
     trade_pills = _trade_pills(report["trade_stat"], float(report["final_equity"]), float(report["max_drawdown_pct"]))
     equity_points = str(report["equity_sparkline"]).strip()
+    event_count = len(report.get("events", []) if isinstance(report.get("events"), list) else [])
     equity_svg = (
         f"""
         <svg class="equityline" viewBox="0 0 220 56" preserveAspectRatio="none" aria-hidden="true">
@@ -815,8 +821,8 @@ def _backtest_card(report: dict[str, object]) -> str:
         else ""
     )
     return f"""
-      <article class="ant-card backtest-card">
-        <div class="signal-topline">
+      <article class="ant-card backtest-card series-card">
+        <div class="signal-topline series-card-head">
           <div>
             <p class="symbol">{escape(str(report["symbol"]))}</p>
             <p class="subline">{escape(str(report["interval"]))} · {int(report["signal_count"])} trades · {int(report["candle_count"])} candles</p>
@@ -826,14 +832,33 @@ def _backtest_card(report: dict[str, object]) -> str:
             <strong>{float(report["final_equity"]):.3f}</strong>
           </div>
         </div>
-        {equity_svg}
-        <p class="helper-text">{escape(_fee_meta(report))}</p>
-        <div class="mini-stat-grid">{trade_pills}</div>
-        {_stats_table(report["stats"])}
-        <div class="ant-table-wrapper table-shell">
-          <h3>Recent Trades</h3>
-          {_event_rows(report["events"])}
+        <div class="series-card-main">
+          <section class="series-chart-panel">
+            <div class="series-panel-heading">
+              <span>Equity Curve</span>
+              <small>策略资金曲线</small>
+            </div>
+            {equity_svg}
+            <p class="helper-text">{escape(_fee_meta(report))}</p>
+          </section>
+          <section class="series-metrics-panel">
+            <div class="series-panel-heading">
+              <span>Return Stats</span>
+              <small>交易收益与持有周期表现</small>
+            </div>
+            <div class="mini-stat-grid">{trade_pills}</div>
+            <div class="series-stats-shell">{_stats_table(report["stats"])}</div>
+          </section>
         </div>
+        <details class="series-trades-panel" open>
+          <summary>
+            <span>Recent Trades</span>
+            <small>最近 {event_count} 笔，点击可收起</small>
+          </summary>
+          <div class="ant-table-wrapper table-shell">
+            {_event_rows(report["events"])}
+          </div>
+        </details>
       </article>
     """
 
