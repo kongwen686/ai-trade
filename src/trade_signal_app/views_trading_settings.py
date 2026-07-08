@@ -97,6 +97,11 @@ def _settings_description_map(lang: str) -> dict[str, str]:
         "Trend Hold Volume": ("趋势持有要求的最低量能放大倍数。", "Minimum volume expansion for trend hold."),
         "Trend Hold Buy Pressure": ("趋势持有要求的最低主动买入占比。", "Minimum buy pressure for trend hold."),
         "Emergency Drawdown %": ("价格从持仓最高价快速回撤超过该比例但尚未触发止损时记录预警。", "Warn when price pulls back from position high by this percentage before stop is hit."),
+        "Emergency Global Cooldown": ("所有标的共享的紧急回撤推送间隔，用于避免一小时内被多币种刷屏。", "Shared emergency drawdown notification interval across all symbols."),
+        "Emergency Symbol Cooldown": ("同一标的紧急回撤推送间隔；默认 12 小时。", "Per-symbol emergency drawdown notification interval; defaults to 12 hours."),
+        "Low Liquidity Volume": ("低流动性/小市值代理阈值，基于 24h 成交额；低于该值会进一步降噪。", "Low-liquidity / small-cap proxy based on 24h quote volume; lower symbols are throttled harder."),
+        "Low Liquidity DD Multiplier": ("低流动性标的触发紧急推送所需的回撤倍数。", "Drawdown multiplier required before low-liquidity symbols can send emergency alerts."),
+        "Low Liquidity Min Score": ("低流动性标的只有最新或入场信号分达到该值才推送紧急回撤。", "Low-liquidity emergency alerts require latest or entry signal score to reach this value."),
         "Cooldown Minutes": ("自动交易开仓或平仓后的冷却时间，避免连续追单。", "Cooldown after automated trades to avoid repeated entries."),
         "Use exchange order precheck/test": ("勾选时 live 模式只做交易所订单预检或测试，不会真实成交。", "When checked, live mode uses exchange order precheck/test without filling real orders."),
         "Feishu Webhook URL": ("飞书机器人 Webhook 地址。留空会保留原值；在买入成交和卖出执行时推送结构化消息。", "Feishu bot webhook URL. Leave blank to keep the saved value; filled buy and sell trades send structured notifications."),
@@ -147,6 +152,7 @@ def render_trading_page(
     positions: list[dict[str, object]],
     events: list[dict[str, object]],
     account_metrics: dict[str, object] | None = None,
+    event_summary: dict[str, object] | None = None,
     readiness: dict[str, object] | None = None,
     lang: str = "zh",
     layout_context: dict[str, object] | None = None,
@@ -163,6 +169,8 @@ def render_trading_page(
     fallback_avg_win = fallback_gross_profit / len(fallback_wins) if fallback_wins else 0.0
     fallback_avg_loss = fallback_gross_loss / len(fallback_losses) if fallback_losses else 0.0
     account_metrics = account_metrics or {
+        "event_count": len(events),
+        "diagnostic_event_count": sum(1 for event in events if not (event.get("action") in {"BUY", "SELL"} and event.get("status") in {"filled", "paper_filled"})),
         "total_trades": sum(1 for event in events if event.get("action") in {"BUY", "SELL"} and event.get("status") in {"filled", "paper_filled"}),
         "buy_trades": sum(1 for event in events if event.get("action") == "BUY" and event.get("status") in {"filled", "paper_filled"}),
         "sell_trades": sum(1 for event in events if event.get("action") == "SELL" and event.get("status") in {"filled", "paper_filled"}),
@@ -177,6 +185,16 @@ def render_trading_page(
         "unrealized_pnl": sum(float(position.get("unrealized_pnl") or 0.0) for position in positions),
         "total_pnl": realized_pnl + sum(float(position.get("unrealized_pnl") or 0.0) for position in positions),
     }
+    event_summary = event_summary or {
+        "total_events": len(events),
+        "returned_events": len(events),
+        "filled_events": sum(1 for event in events if event.get("action") in {"BUY", "SELL"} and event.get("status") in {"filled", "paper_filled"}),
+        "diagnostic_events": sum(1 for event in events if not (event.get("action") in {"BUY", "SELL"} and event.get("status") in {"filled", "paper_filled"})),
+    }
+    event_summary_text = t(
+        f"当前展示 {int(float(event_summary.get('returned_events') or 0))} / 本地保留 {int(float(event_summary.get('total_events') or 0))} 条；成交 {int(float(event_summary.get('filled_events') or 0))} 条，诊断/预警 {int(float(event_summary.get('diagnostic_events') or 0))} 条。",
+        f"Showing {int(float(event_summary.get('returned_events') or 0))} / {int(float(event_summary.get('total_events') or 0))} local events; {int(float(event_summary.get('filled_events') or 0))} fills and {int(float(event_summary.get('diagnostic_events') or 0))} diagnostic/warning events.",
+    )
     readiness = readiness or {}
     blockers = readiness.get("blockers") if isinstance(readiness.get("blockers"), list) else []
     exchange_status = readiness.get("exchange_status") if isinstance(readiness.get("exchange_status"), dict) else {}
@@ -214,9 +232,14 @@ def render_trading_page(
         <small>{t("上限", "limit")} {float(config["max_total_quote_exposure"]):.0f}</small>
       </div>
       <div class="ant-statistic-card stat-card">
-        <span>{t("累计交易", "Total Trades")}</span>
+        <span>{t("累计成交", "Filled Trades")}</span>
         <strong>{int(float(account_metrics.get("total_trades") or 0))}</strong>
         <small>{t("平仓", "closed")} {int(float(account_metrics.get("closed_trades") or 0))}</small>
+      </div>
+      <div class="ant-statistic-card stat-card">
+        <span>{t("执行事件", "Execution Events")}</span>
+        <strong>{int(float(account_metrics.get("event_count") or 0))}</strong>
+        <small>{t("诊断/预警", "diagnostic/warning")} {int(float(account_metrics.get("diagnostic_event_count") or 0))}</small>
       </div>
       <div class="ant-statistic-card stat-card">
         <span>{t("胜率", "Win Rate")}</span>
@@ -274,7 +297,8 @@ def render_trading_page(
       <section id="trading-events" class="ant-section section-block">
         <div class="section-heading">
           <h2>{t("执行事件", "Execution Events")}</h2>
-          <p>{t("本次运行的下单、风控和跳过原因。", "Orders, risk checks, and skip reasons from this run.")}</p>
+          <p>{t("本地保留的下单、风控、预警和跳过原因；成交事件会优先长期保留。", "Local orders, risk checks, warnings, and skip reasons; filled trade events are retained first.")}</p>
+          <p class="helper-text">{escape(event_summary_text)}</p>
         </div>
         <article class="ant-card backtest-card table-shell">{_trading_event_rows(events, active_lang)}</article>
       </section>
@@ -605,6 +629,11 @@ def render_settings_page(
           <label><span>Trend Hold Volume</span><input type="number" step="0.01" min="0" name="autotrade_trend_hold_min_volume_ratio" value="{float(params.get('autotrade_trend_hold_min_volume_ratio', 1.25)):.2f}" /></label>
           <label><span>Trend Hold Buy Pressure</span><input type="number" step="0.01" min="0" max="1" name="autotrade_trend_hold_min_buy_pressure" value="{float(params.get('autotrade_trend_hold_min_buy_pressure', 0.56)):.2f}" /></label>
           <label><span>Emergency Drawdown %</span><input type="number" step="0.1" min="0" max="50" name="autotrade_emergency_drawdown_pct" value="{float(params.get('autotrade_emergency_drawdown_pct', 2.5)):.1f}" /></label>
+          <label><span>Emergency Global Cooldown</span><input type="number" min="0" step="5" name="autotrade_emergency_alert_global_cooldown_minutes" value="{int(params.get('autotrade_emergency_alert_global_cooldown_minutes', 60))}" /></label>
+          <label><span>Emergency Symbol Cooldown</span><input type="number" min="0" step="30" name="autotrade_emergency_alert_symbol_cooldown_minutes" value="{int(params.get('autotrade_emergency_alert_symbol_cooldown_minutes', 720))}" /></label>
+          <label><span>Low Liquidity Volume</span><input type="number" min="0" step="1000000" name="autotrade_emergency_low_liquidity_quote_volume" value="{int(float(params.get('autotrade_emergency_low_liquidity_quote_volume', 10000000)))}" /></label>
+          <label><span>Low Liquidity DD Multiplier</span><input type="number" min="1" step="0.1" name="autotrade_emergency_low_liquidity_drawdown_multiplier" value="{float(params.get('autotrade_emergency_low_liquidity_drawdown_multiplier', 2.0)):.1f}" /></label>
+          <label><span>Low Liquidity Min Score</span><input type="number" min="0" max="100" step="0.1" name="autotrade_emergency_low_liquidity_min_score" value="{float(params.get('autotrade_emergency_low_liquidity_min_score', 85.0)):.1f}" /></label>
           <label><span>Cooldown Minutes</span><input type="number" min="0" name="autotrade_cooldown_minutes" value="{int(params['autotrade_cooldown_minutes'])}" /></label>
           <label class="inline-check"><input type="hidden" name="autotrade_order_test_only" value="0" /><input type="checkbox" name="autotrade_order_test_only" value="1" {"checked" if params["autotrade_order_test_only"] else ""} /><span>Use exchange order precheck/test</span></label>
           </div>

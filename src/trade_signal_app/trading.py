@@ -11,11 +11,15 @@ from .entry_filters import anti_chase_reason_from_config, structure_adjusted_exi
 from .feishu import FeishuTradeNotifier
 from .runtime_config import AutoTradeDefaults
 from .service import SignalScanner
+from .storage import LocalDataStore
 from .time_utils import now_app_time, to_app_time
 
 LIVE_CONFIRM_VALUE = "I_UNDERSTAND_REAL_ORDERS"
 MIN_EMERGENCY_ALERT_COOLDOWN_MINUTES = 30
 EMERGENCY_DRAWDOWN_STATUS = "emergency_drawdown"
+FILLED_TRADE_STATUSES = {"filled", "paper_filled"}
+TRADE_EVENT_ACTIONS = {"BUY", "SELL"}
+TRADING_EVENT_RETENTION_LIMIT = 5000
 
 
 @dataclass
@@ -68,22 +72,50 @@ class TradingRunReport:
 
 
 class TradingStateStore:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, database_path: Path | None = None) -> None:
         self.path = path
+        self.data_store = LocalDataStore(database_path or path.with_name("ai_trade.sqlite3"))
 
     def load(self) -> list[TradingPosition]:
         payload = self._load_payload()
-        positions = payload.get("positions", [])
-        if not isinstance(positions, list):
-            return []
-        return [self._position_from_dict(item) for item in positions if isinstance(item, dict)]
+        raw_positions = payload.get("positions", [])
+        positions = (
+            [self._position_from_dict(item) for item in raw_positions if isinstance(item, dict)]
+            if isinstance(raw_positions, list)
+            else []
+        )
+        try:
+            if positions:
+                self.data_store.replace_trading_positions([self._position_to_dict(position) for position in positions])
+                return positions
+            stored_positions = [
+                self._position_from_dict(item)
+                for item in self.data_store.load_trading_position_payloads()
+                if isinstance(item, dict)
+            ]
+            return stored_positions
+        except Exception:  # noqa: BLE001
+            return positions
 
     def load_events(self) -> list[TradingEvent]:
         payload = self._load_payload()
-        events = payload.get("events", [])
-        if not isinstance(events, list):
-            return []
-        return [self._event_from_dict(item) for item in events if isinstance(item, dict)]
+        raw_events = payload.get("events", [])
+        events = (
+            [self._event_from_dict(item) for item in raw_events if isinstance(item, dict)]
+            if isinstance(raw_events, list)
+            else []
+        )
+        try:
+            if events:
+                self.data_store.upsert_trading_events([self._event_to_dict(event) for event in events])
+            stored_events = [
+                self._event_from_dict(item)
+                for item in self.data_store.load_trading_event_payloads()
+                if isinstance(item, dict)
+            ]
+            return stored_events or events
+        except Exception:  # noqa: BLE001
+            return events
 
     def _load_payload(self) -> dict[str, object]:
         if not self.path.exists():
@@ -116,17 +148,48 @@ class TradingStateStore:
 
     def save(self, positions: list[TradingPosition]) -> None:
         existing_events = self.load_events()
-        self._write_state(positions, existing_events)
+        self._write_state(
+            positions,
+            self._retained_events(existing_events, limit=TRADING_EVENT_RETENTION_LIMIT),
+            database_events=existing_events,
+        )
 
-    def append_events(self, events: list[TradingEvent], *, limit: int = 200) -> None:
+    def append_events(self, events: list[TradingEvent], *, limit: int = TRADING_EVENT_RETENTION_LIMIT) -> None:
         if not events:
             return
         positions = self.load()
         existing_events = self.load_events()
-        self._write_state(positions, [*existing_events, *events][-limit:])
+        database_events = [*existing_events, *events]
+        self._write_state(positions, self._retained_events(database_events, limit=limit), database_events=database_events)
 
-    def _write_state(self, positions: list[TradingPosition], events: list[TradingEvent]) -> None:
+    @staticmethod
+    def _is_filled_trade_event(event: TradingEvent) -> bool:
+        return event.action in TRADE_EVENT_ACTIONS and event.status in FILLED_TRADE_STATUSES
+
+    @classmethod
+    def _retained_events(cls, events: list[TradingEvent], *, limit: int) -> list[TradingEvent]:
+        if limit <= 0 or len(events) <= limit:
+            return events
+
+        indexed_events = list(enumerate(events))
+        filled_indexes = [index for index, event in indexed_events if cls._is_filled_trade_event(event)]
+        filled_index_set = set(filled_indexes)
+        retained_indexes = set(filled_indexes[-limit:])
+        remaining = max(0, limit - len(retained_indexes))
+        if remaining:
+            diagnostic_indexes = [index for index, _ in indexed_events if index not in filled_index_set]
+            retained_indexes.update(diagnostic_indexes[-remaining:])
+        return [event for index, event in indexed_events if index in retained_indexes]
+
+    def _write_state(
+        self,
+        positions: list[TradingPosition],
+        events: list[TradingEvent],
+        *,
+        database_events: list[TradingEvent] | None = None,
+    ) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._sync_database(positions, database_events or events)
         payload = {
             "kind": "trading_state",
             "version": 1,
@@ -134,6 +197,39 @@ class TradingStateStore:
             "events": [self._event_to_dict(event) for event in events],
         }
         self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _sync_database(self, positions: list[TradingPosition], events: list[TradingEvent]) -> None:
+        try:
+            self.data_store.replace_trading_positions([self._position_to_dict(position) for position in positions])
+            self.data_store.upsert_trading_events([self._event_to_dict(event) for event in events])
+        except Exception:  # noqa: BLE001
+            return
+
+    def database_status(self) -> dict[str, object]:
+        self._migrate_payload_to_database()
+        return self.data_store.status()
+
+    def record_metric_snapshot(self, scope: str, metrics: dict[str, object]) -> None:
+        try:
+            self.data_store.record_metric_snapshot(scope, metrics)
+        except Exception:  # noqa: BLE001
+            return
+
+    def _migrate_payload_to_database(self) -> None:
+        payload = self._load_payload()
+        raw_positions = payload.get("positions", [])
+        raw_events = payload.get("events", [])
+        try:
+            if isinstance(raw_positions, list):
+                positions = [self._position_from_dict(item) for item in raw_positions if isinstance(item, dict)]
+                if positions:
+                    self.data_store.replace_trading_positions([self._position_to_dict(position) for position in positions])
+            if isinstance(raw_events, list):
+                events = [self._event_from_dict(item) for item in raw_events if isinstance(item, dict)]
+                if events:
+                    self.data_store.upsert_trading_events([self._event_to_dict(event) for event in events])
+        except Exception:  # noqa: BLE001
+            return
 
     @staticmethod
     def _position_from_dict(payload: dict[str, object]) -> TradingPosition:
@@ -382,9 +478,11 @@ class AutoTrader:
             position = self._apply_profit_protection(position, price, config)
             emergency_event = self._emergency_drawdown_event(position, price, config)
             if emergency_event is not None and self._should_emit_emergency_drawdown_alert(
+                position=position,
                 event=emergency_event,
                 config=config,
                 recent_events=[*recent_events, *events],
+                signal=signal_by_symbol.get(position.symbol),
             ):
                 events.append(emergency_event)
                 self._notify_trade_event(event=emergency_event, position=position)
@@ -487,27 +585,63 @@ class AutoTrader:
             price=price,
             quantity=position.quantity,
             quote_notional=position.quote_notional,
+            response={"drawdown_pct": drawdown_pct, "highest_price": high_price},
             exchange=position.exchange,
         )
 
     def _should_emit_emergency_drawdown_alert(
         self,
         *,
+        position: TradingPosition,
         event: TradingEvent,
         config: AutoTradeDefaults,
         recent_events: list[TradingEvent],
+        signal: object | None = None,
     ) -> bool:
-        cooldown_minutes = max(
+        global_cooldown_minutes = max(
+            MIN_EMERGENCY_ALERT_COOLDOWN_MINUTES,
+            int(config.emergency_alert_global_cooldown_minutes or 0),
+        )
+        global_cutoff = event.created_at - timedelta(minutes=global_cooldown_minutes)
+        if any(item.status == EMERGENCY_DRAWDOWN_STATUS and item.created_at >= global_cutoff for item in recent_events):
+            return False
+
+        symbol_cooldown_minutes = max(
             MIN_EMERGENCY_ALERT_COOLDOWN_MINUTES,
             int(config.cooldown_minutes or 0),
+            int(config.emergency_alert_symbol_cooldown_minutes or 0),
         )
-        cutoff = event.created_at - timedelta(minutes=cooldown_minutes)
-        return not any(
+        symbol_cutoff = event.created_at - timedelta(minutes=symbol_cooldown_minutes)
+        if any(
             item.status == EMERGENCY_DRAWDOWN_STATUS
             and item.symbol == event.symbol
-            and item.created_at >= cutoff
+            and item.created_at >= symbol_cutoff
             for item in recent_events
-        )
+        ):
+            return False
+
+        return self._passes_low_liquidity_emergency_gate(position=position, event=event, config=config, signal=signal)
+
+    def _passes_low_liquidity_emergency_gate(
+        self,
+        *,
+        position: TradingPosition,
+        event: TradingEvent,
+        config: AutoTradeDefaults,
+        signal: object | None,
+    ) -> bool:
+        quote_volume = self._signal_quote_volume(signal)
+        if quote_volume <= 0 or quote_volume > config.emergency_low_liquidity_quote_volume:
+            return True
+        drawdown_pct = 0.0
+        if isinstance(event.response, dict):
+            try:
+                drawdown_pct = float(event.response.get("drawdown_pct") or 0.0)
+            except (TypeError, ValueError):
+                drawdown_pct = 0.0
+        score = max(position.score, self._signal_float(signal, "score"))
+        required_drawdown = config.emergency_drawdown_pct * config.emergency_low_liquidity_drawdown_multiplier
+        return score >= config.emergency_low_liquidity_min_score and drawdown_pct >= required_drawdown
 
     @staticmethod
     def _signal_float(signal: object | None, key: str, default: float = 0.0) -> float:
@@ -570,6 +704,22 @@ class AutoTrader:
             raw_value = getattr(ticker, "last_price", 0.0)
         try:
             return float(raw_value or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _signal_quote_volume(signal: object | None) -> float:
+        if signal is None:
+            return 0.0
+        if isinstance(signal, dict):
+            raw_value = signal.get("quote_volume", signal.get("quote_volume_m", 0.0))
+            multiplier = 1_000_000.0 if "quote_volume_m" in signal and "quote_volume" not in signal else 1.0
+        else:
+            ticker = getattr(signal, "ticker", None)
+            raw_value = getattr(ticker, "quote_volume", 0.0)
+            multiplier = 1.0
+        try:
+            return float(raw_value or 0.0) * multiplier
         except (TypeError, ValueError):
             return 0.0
 
@@ -866,6 +1016,14 @@ class AutoTrader:
             raise ValueError("移动止损回撤比例不能小于 0。")
         if config.emergency_drawdown_pct < 0:
             raise ValueError("急跌预警回撤比例不能小于 0。")
+        if config.emergency_alert_global_cooldown_minutes < 0 or config.emergency_alert_symbol_cooldown_minutes < 0:
+            raise ValueError("急跌预警冷却时间不能小于 0。")
+        if config.emergency_low_liquidity_quote_volume < 0:
+            raise ValueError("低流动性急跌预警成交额阈值不能小于 0。")
+        if config.emergency_low_liquidity_drawdown_multiplier < 1:
+            raise ValueError("低流动性急跌预警回撤倍数不能小于 1。")
+        if config.emergency_low_liquidity_min_score < 0 or config.emergency_low_liquidity_min_score > 100:
+            raise ValueError("低流动性急跌预警信号分必须在 0 到 100 之间。")
         if config.profit_protection_enabled and config.profit_protection_lock_pct > config.profit_protection_trigger_pct:
             raise ValueError("浮盈保护锁盈比例不能大于触发比例。")
 

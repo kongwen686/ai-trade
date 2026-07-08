@@ -29,13 +29,24 @@ from . import main_settings as settings_handlers
 from . import main_backtest as backtest_handlers
 from . import main_scan as scan_handlers
 from .main_request_body import _read_body, _strategy_description_from_body
+from .storage import LocalDataStore
 from .strategy_builder import compile_strategy
 from .time_utils import APP_TIMEZONE, now_app_time
-from .trading import AutoTrader, LIVE_CONFIRM_VALUE, TradingEvent, TradingPosition, TradingRunReport, TradingStateStore
+from .trading import (
+    AutoTrader,
+    FILLED_TRADE_STATUSES,
+    LIVE_CONFIRM_VALUE,
+    TRADE_EVENT_ACTIONS,
+    TradingEvent,
+    TradingPosition,
+    TradingRunReport,
+    TradingStateStore,
+)
 from .views import normalize_language, render_backtest_page, render_index_page, render_settings_page, render_terminal_module_page, render_terminal_page, render_trading_page
 
 RUNTIME_CONFIG_PATH = BASE_DIR / "data" / "runtime_config.json"
 TRADING_STATE_PATH = BASE_DIR / "data" / "trading_state.json"
+LOCAL_DATABASE_PATH = BASE_DIR / "data" / "ai_trade.sqlite3"
 TRADINGVIEW_CACHE_DIR = BASE_DIR / "data" / "tradingview_klines"
 APP_STATE = AppState(SETTINGS, RUNTIME_CONFIG_PATH)
 MARKET_TICKER_SYMBOLS = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT")
@@ -56,6 +67,8 @@ _ONCHAIN_INFLIGHT: dict[tuple[object, ...], Future] = {}
 _ONCHAIN_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="onchain-refresh")
 PAPER_AUTO_DEFAULT_INTERVAL_SECONDS = 300
 PAPER_AUTO_MIN_INTERVAL_SECONDS = 30
+TRADING_STATUS_FILLED_EVENT_LIMIT = 5000
+TRADING_STATUS_DIAGNOSTIC_EVENT_LIMIT = 500
 _PAPER_AUTO_LOCK = RLock()
 _PAPER_AUTO_STOP_EVENT: Event | None = None
 _PAPER_AUTO_THREAD: Thread | None = None
@@ -170,6 +183,14 @@ def _health_payload() -> dict[str, object]:
         trading_state_status["events"] = len(store.load_events())
     except Exception as exc:  # noqa: BLE001
         trading_state_status.update({"readable": False, "error": str(exc)})
+    try:
+        database_status = store.database_status()
+    except Exception as exc:  # noqa: BLE001
+        database_status = {
+            "path": str(LOCAL_DATABASE_PATH),
+            "exists": LOCAL_DATABASE_PATH.exists(),
+            "error": str(exc),
+        }
 
     runtime_config_status = {
         "path": str(RUNTIME_CONFIG_PATH),
@@ -196,6 +217,7 @@ def _health_payload() -> dict[str, object]:
         "generated_at": now_app_time().isoformat(),
         "runtime_config": runtime_config_status,
         "trading_state": trading_state_status,
+        "database": database_status,
         "features": {
             "binance_public_market_data": True,
             "tradingview_unofficial_market_data": True,
@@ -233,7 +255,18 @@ def _export_runtime_config_template(*, include_secrets: bool) -> dict[str, objec
 
 
 def _trading_store() -> TradingStateStore:
-    return TradingStateStore(TRADING_STATE_PATH)
+    return TradingStateStore(TRADING_STATE_PATH, database_path=LOCAL_DATABASE_PATH)
+
+
+def _local_data_store() -> LocalDataStore:
+    return LocalDataStore(LOCAL_DATABASE_PATH)
+
+
+def _record_backtest_run(params: dict[str, object], payload: dict[str, object], error: str | None) -> None:
+    try:
+        _local_data_store().record_backtest_run(params=params, payload=payload, error=error)
+    except Exception:  # noqa: BLE001
+        return
 
 
 def _okx_gateway(runtime_config: RuntimeConfig) -> OKXSpotGateway:
@@ -423,6 +456,8 @@ def _paper_account_metrics(
     unrealized_pnl = sum(unrealized_values)
     return {
         "mode": "paper",
+        "event_count": len(paper_events),
+        "diagnostic_event_count": len(paper_events) - len(filled_events),
         "open_positions": len(paper_positions),
         "quote_exposure": round(sum(position.quote_notional for position in paper_positions), 8),
         "margin_exposure": round(
@@ -455,6 +490,40 @@ def _sort_trading_events_desc(events: list[TradingEvent]) -> list[TradingEvent]:
     return sorted(events, key=_event_created_at_utc, reverse=True)
 
 
+def _is_filled_trade_event(event: TradingEvent) -> bool:
+    return event.action in TRADE_EVENT_ACTIONS and event.status in FILLED_TRADE_STATUSES
+
+
+def _select_trading_status_events(events: list[TradingEvent]) -> list[TradingEvent]:
+    filled_count = 0
+    diagnostic_count = 0
+    selected: list[TradingEvent] = []
+    for event in events:
+        if _is_filled_trade_event(event):
+            if filled_count >= TRADING_STATUS_FILLED_EVENT_LIMIT:
+                continue
+            filled_count += 1
+            selected.append(event)
+            continue
+        if diagnostic_count >= TRADING_STATUS_DIAGNOSTIC_EVENT_LIMIT:
+            continue
+        diagnostic_count += 1
+        selected.append(event)
+    return _sort_trading_events_desc(selected)
+
+
+def _trading_event_summary(events: list[TradingEvent], returned_events: list[TradingEvent]) -> dict[str, object]:
+    filled_events = [event for event in events if _is_filled_trade_event(event)]
+    return {
+        "total_events": len(events),
+        "returned_events": len(returned_events),
+        "filled_events": len(filled_events),
+        "diagnostic_events": len(events) - len(filled_events),
+        "filled_event_retention": TRADING_STATUS_FILLED_EVENT_LIMIT,
+        "diagnostic_event_retention": TRADING_STATUS_DIAGNOSTIC_EVENT_LIMIT,
+    }
+
+
 def _serialize_trading_report(report: TradingRunReport, latest_prices: dict[str, float] | None = None) -> dict[str, object]:
     latest_prices = latest_prices or {}
     return {
@@ -481,7 +550,14 @@ def _trading_status_payload() -> dict[str, object]:
     store = _trading_store()
     positions = store.load()
     events = _sort_trading_events_desc(store.load_events())
+    status_events = _select_trading_status_events(events)
     latest_prices = _latest_prices_for_open_positions(positions, scanner)
+    account_metrics = _paper_account_metrics(
+        positions=positions,
+        events=events,
+        latest_prices=latest_prices,
+    )
+    store.record_metric_snapshot("paper_account", account_metrics)
     return {
         "config": _to_jsonable(runtime_config.autotrade_defaults),
         "readiness": _trading_readiness_payload(),
@@ -489,12 +565,10 @@ def _trading_status_payload() -> dict[str, object]:
             _serialize_trading_position(position, latest_prices.get(position.symbol.upper()))
             for position in positions
         ],
-        "events": [_serialize_trading_event(event) for event in events[:30]],
-        "account_metrics": _paper_account_metrics(
-            positions=positions,
-            events=events,
-            latest_prices=latest_prices,
-        ),
+        "events": [_serialize_trading_event(event) for event in status_events],
+        "event_summary": _trading_event_summary(events, status_events),
+        "storage": store.database_status(),
+        "account_metrics": account_metrics,
     }
 
 
@@ -2721,6 +2795,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
             if parsed.path == "/backtest":
                 payload, params, error = _backtest_payload(query)
+                _record_backtest_run(params, payload, error)
                 html = render_backtest_page(
                     params=params,
                     series_reports=payload["series_reports"],
@@ -2742,6 +2817,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     readiness=payload["readiness"],
                     positions=payload["open_positions"],
                     events=payload["events"],
+                    event_summary=payload["event_summary"],
                     account_metrics=payload["account_metrics"],
                     lang=lang,
                     layout_context=_layout_context(payload["readiness"]),
@@ -2752,6 +2828,13 @@ class RequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/trading/status":
                 self._send_text(
                     json.dumps(_trading_status_payload(), ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            if parsed.path == "/api/storage/status":
+                self._send_text(
+                    json.dumps(_local_data_store().status(), ensure_ascii=False, indent=2),
                     content_type="application/json; charset=utf-8",
                 )
                 return
@@ -2787,6 +2870,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
             if parsed.path == "/api/backtest/export":
                 payload, params, error = _backtest_payload(query)
+                _record_backtest_run(params, payload, error)
                 export_format = _get_first(query, "format", "csv").lower()
                 if export_format == "json":
                     self._send_text(
@@ -2849,6 +2933,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
             if parsed.path == "/api/backtest":
                 payload, params, error = _backtest_payload(query)
+                _record_backtest_run(params, payload, error)
                 self._send_text(
                     json.dumps(
                         _to_jsonable(
@@ -3014,8 +3099,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "mode": payload["mode"],
                     },
                     readiness=readiness,
-                    positions=payload["open_positions"],
-                    events=payload["events"],
+                    positions=status_payload["open_positions"],
+                    events=status_payload["events"],
+                    event_summary=status_payload["event_summary"],
                     account_metrics=status_payload["account_metrics"],
                     lang=lang,
                     layout_context=_layout_context(readiness),

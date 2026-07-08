@@ -8,6 +8,8 @@ from .runtime_config import RuntimeConfig
 from .time_utils import now_app_time
 from .trading import TradingEvent, TradingPosition
 
+PLATFORM_RECENT_EVENT_LIMIT = 200
+
 
 @dataclass(frozen=True)
 class PlatformComponent:
@@ -46,6 +48,8 @@ class AccountSnapshot:
     open_positions: int
     quote_exposure: float
     max_quote_exposure: float
+    event_count: int = 0
+    diagnostic_event_count: int = 0
     realized_pnl: float = 0.0
     total_trades: int = 0
     buy_trades: int = 0
@@ -129,7 +133,7 @@ def build_platform_snapshot(
         strategies=build_strategy_catalog(config),
         risk_rules=build_risk_rules(config),
         accounts=build_account_snapshots_from_events(config, positions, events),
-        recent_events=sorted(events, key=_event_created_at_utc, reverse=True)[:30],
+        recent_events=sorted(events, key=_event_created_at_utc, reverse=True)[:PLATFORM_RECENT_EVENT_LIMIT],
     )
 
 
@@ -176,7 +180,8 @@ def build_components(config: RuntimeConfig) -> list[PlatformComponent]:
         PlatformComponent("执行层", "Order Manager", "ready", "市价买入、卖出、客户端订单号", "/api/trading/run", True),
         PlatformComponent("执行层", "Position Manager", "ready", "持仓、止损、止盈和冷却", "/api/trading/status", True),
         PlatformComponent("数据层", "Runtime Config", "ready", "本地配置、模板导入导出、可选加密", "/settings", True),
-        PlatformComponent("数据层", "Trading State", "ready", "持仓和事件历史持久化", "/api/trading/status", True),
+        PlatformComponent("数据层", "SQLite Analytics Store", "ready", "交易事件、持仓快照、回测运行和统计快照持久化", "/api/storage/status", True),
+        PlatformComponent("数据层", "Trading State", "ready", "JSON 快照兼容层，SQLite 作为长期事实库", "/api/trading/status", True),
         PlatformComponent("风控层", "Execution Risk Gate", "ready", "链上、价差、策略命中执行前阻断", "/api/terminal/snapshot", True),
     ]
 
@@ -308,6 +313,13 @@ def build_risk_rules(config: RuntimeConfig) -> list[RiskRule]:
         RiskRule("order_test", "Binance order/test", "active" if config.autotrade_defaults.order_test_only else "disabled", str(config.autotrade_defaults.order_test_only), "仅校验不成交"),
         RiskRule("intel_gate", "智能执行风控", "active", "onchain + spread + strategy", "阻断风险标的"),
         RiskRule("funding_rate_guard", "合约资金费率风控", "active", "funding >= +10bps/8h", "阻断拥挤追多"),
+        RiskRule(
+            "emergency_alert_throttle",
+            "急跌预警限频",
+            "active",
+            f"全局 {config.autotrade_defaults.emergency_alert_global_cooldown_minutes}m / 同币 {config.autotrade_defaults.emergency_alert_symbol_cooldown_minutes}m / 低流动性 <= {config.autotrade_defaults.emergency_low_liquidity_quote_volume / 1_000_000:.1f}M",
+            "低流动性标的需更深回撤和强信号才推送",
+        ),
     ]
 
 
@@ -343,8 +355,13 @@ def build_account_snapshots_from_events(
         exchange: [event for event in filled_events if event.exchange.upper() == exchange]
         for exchange in {"BINANCE", "OKX"}
     }
+    events_by_exchange = {
+        exchange: [event for event in events if event.exchange.upper() == exchange]
+        for exchange in {"BINANCE", "OKX"}
+    }
 
     def metrics(exchange: str) -> dict[str, float | int]:
+        exchange_events = events_by_exchange[exchange]
         exchange_closed = closed_by_exchange[exchange]
         pnl_values = [float(event.realized_pnl or 0.0) for event in exchange_closed]
         pnl_pct_values = [float(event.realized_pnl_pct or 0.0) for event in exchange_closed if event.realized_pnl_pct is not None]
@@ -358,6 +375,8 @@ def build_account_snapshots_from_events(
         buy_count = sum(1 for event in filled if event.action == "BUY")
         sell_count = sum(1 for event in filled if event.action == "SELL")
         return {
+            "event_count": len(exchange_events),
+            "diagnostic_event_count": len(exchange_events) - len(filled),
             "realized_pnl": round(sum(pnl_values), 8),
             "total_trades": len(filled),
             "buy_trades": buy_count,

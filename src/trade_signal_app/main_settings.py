@@ -139,6 +139,11 @@ def _validate_runtime_config(config: RuntimeConfig) -> None:
     _validate_range(autotrade.trend_hold_min_volume_ratio, "Auto Trade Trend Hold Volume", minimum=0)
     _validate_range(autotrade.trend_hold_min_buy_pressure, "Auto Trade Trend Hold Buy Pressure", minimum=0, maximum=1)
     _validate_range(autotrade.emergency_drawdown_pct, "Auto Trade Emergency Drawdown", minimum=0, maximum=50)
+    _validate_range(autotrade.emergency_alert_global_cooldown_minutes, "Auto Trade Emergency Global Cooldown", minimum=0)
+    _validate_range(autotrade.emergency_alert_symbol_cooldown_minutes, "Auto Trade Emergency Symbol Cooldown", minimum=0)
+    _validate_range(autotrade.emergency_low_liquidity_quote_volume, "Auto Trade Emergency Low Liquidity Volume", minimum=0)
+    _validate_range(autotrade.emergency_low_liquidity_drawdown_multiplier, "Auto Trade Emergency Low Liquidity Multiplier", minimum=1)
+    _validate_range(autotrade.emergency_low_liquidity_min_score, "Auto Trade Emergency Low Liquidity Score", minimum=0, maximum=100)
     if autotrade.profit_protection_enabled and autotrade.profit_protection_lock_pct > autotrade.profit_protection_trigger_pct:
         raise ValueError("Auto Trade Profit Protection Lock 不能大于 Trigger。")
     _validate_range(autotrade.cooldown_minutes, "Auto Trade Cooldown", minimum=0)
@@ -303,6 +308,11 @@ def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "autotrade_trend_hold_min_volume_ratio": autotrade.trend_hold_min_volume_ratio,
         "autotrade_trend_hold_min_buy_pressure": autotrade.trend_hold_min_buy_pressure,
         "autotrade_emergency_drawdown_pct": autotrade.emergency_drawdown_pct,
+        "autotrade_emergency_alert_global_cooldown_minutes": autotrade.emergency_alert_global_cooldown_minutes,
+        "autotrade_emergency_alert_symbol_cooldown_minutes": autotrade.emergency_alert_symbol_cooldown_minutes,
+        "autotrade_emergency_low_liquidity_quote_volume": autotrade.emergency_low_liquidity_quote_volume,
+        "autotrade_emergency_low_liquidity_drawdown_multiplier": autotrade.emergency_low_liquidity_drawdown_multiplier,
+        "autotrade_emergency_low_liquidity_min_score": autotrade.emergency_low_liquidity_min_score,
         "autotrade_cooldown_minutes": autotrade.cooldown_minutes,
         "autotrade_order_test_only": autotrade.order_test_only,
         "intelligence_enabled": intelligence.enabled,
@@ -562,6 +572,11 @@ def _build_runtime_config(form: dict[str, list[str]], *, current_config: Runtime
             trend_hold_min_volume_ratio=_parse_float_value(_get_first(form, "autotrade_trend_hold_min_volume_ratio", str(current_config.autotrade_defaults.trend_hold_min_volume_ratio)), "Auto Trade Trend Hold Volume"),
             trend_hold_min_buy_pressure=_parse_float_value(_get_first(form, "autotrade_trend_hold_min_buy_pressure", str(current_config.autotrade_defaults.trend_hold_min_buy_pressure)), "Auto Trade Trend Hold Buy Pressure"),
             emergency_drawdown_pct=_parse_float_value(_get_first(form, "autotrade_emergency_drawdown_pct", str(current_config.autotrade_defaults.emergency_drawdown_pct)), "Auto Trade Emergency Drawdown"),
+            emergency_alert_global_cooldown_minutes=_parse_int_value(_get_first(form, "autotrade_emergency_alert_global_cooldown_minutes", str(current_config.autotrade_defaults.emergency_alert_global_cooldown_minutes)), "Auto Trade Emergency Global Cooldown"),
+            emergency_alert_symbol_cooldown_minutes=_parse_int_value(_get_first(form, "autotrade_emergency_alert_symbol_cooldown_minutes", str(current_config.autotrade_defaults.emergency_alert_symbol_cooldown_minutes)), "Auto Trade Emergency Symbol Cooldown"),
+            emergency_low_liquidity_quote_volume=_parse_float_value(_get_first(form, "autotrade_emergency_low_liquidity_quote_volume", str(current_config.autotrade_defaults.emergency_low_liquidity_quote_volume)), "Auto Trade Emergency Low Liquidity Volume"),
+            emergency_low_liquidity_drawdown_multiplier=_parse_float_value(_get_first(form, "autotrade_emergency_low_liquidity_drawdown_multiplier", str(current_config.autotrade_defaults.emergency_low_liquidity_drawdown_multiplier)), "Auto Trade Emergency Low Liquidity Multiplier"),
+            emergency_low_liquidity_min_score=_parse_float_value(_get_first(form, "autotrade_emergency_low_liquidity_min_score", str(current_config.autotrade_defaults.emergency_low_liquidity_min_score)), "Auto Trade Emergency Low Liquidity Score"),
             cooldown_minutes=_parse_int_value(_get_first(form, "autotrade_cooldown_minutes", str(current_config.autotrade_defaults.cooldown_minutes)), "Auto Trade Cooldown"),
             order_test_only=_runtime_bool(form, "autotrade_order_test_only", current_config.autotrade_defaults.order_test_only),
         ),

@@ -212,12 +212,14 @@ class MainTests(unittest.TestCase):
             patch("trade_signal_app.main.APP_STATE.storage_mode_label", return_value="Plain JSON"),
             patch("trade_signal_app.main.TradingStateStore.load", return_value=[]),
             patch("trade_signal_app.main.TradingStateStore.load_events", return_value=[]),
+            patch("trade_signal_app.main.TradingStateStore.database_status", return_value={"path": "/tmp/ai_trade.sqlite3", "trading_events": 0}),
             patch.dict("os.environ", {}, clear=True),
         ):
             payload = _health_payload()
 
         self.assertTrue(payload["ok"])
         self.assertEqual(datetime.fromisoformat(str(payload["generated_at"])).utcoffset(), timedelta(hours=8))
+        self.assertEqual(payload["database"]["trading_events"], 0)
         self.assertFalse(payload["external_checks"]["performed"])
         self.assertIn("Binance API key/secret 未配置", payload["autotrade"]["local_blockers"])
         self.assertIn("AI_TRADE_LIVE_CONFIRM", payload["autotrade"]["local_blockers"][1])
@@ -1768,7 +1770,7 @@ class MainTests(unittest.TestCase):
         self.assertIn('action="/terminal/trading/auto/start"', html)
         self.assertIn('action="/terminal/trading/auto/stop"', html)
         self.assertIn("启动自动策略交易", html)
-        self.assertIn("累计交易次数", html)
+        self.assertIn("累计成交次数", html)
         self.assertIn("盈亏比", html)
         self.assertIn("75.0%", html)
         self.assertIn("收益率", html)
@@ -1925,6 +1927,8 @@ class MainTests(unittest.TestCase):
         )
 
         metrics = payload["account_metrics"]
+        self.assertEqual(metrics["event_count"], 3)
+        self.assertEqual(metrics["diagnostic_event_count"], 0)
         self.assertEqual(metrics["total_trades"], 3)
         self.assertEqual(metrics["closed_trades"], 2)
         self.assertEqual(metrics["winning_trades"], 1)
@@ -1933,6 +1937,54 @@ class MainTests(unittest.TestCase):
         self.assertEqual(metrics["profit_loss_ratio"], 2.5)
         self.assertEqual(metrics["profit_factor"], 2.5)
         self.assertEqual(metrics["realized_pnl"], 6.0)
+
+    def test_trading_status_payload_returns_retained_trade_history_beyond_thirty_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            started_at = datetime(2026, 7, 6, 0, tzinfo=timezone.utc)
+            events = [
+                TradingEvent(
+                    action="BUY" if index % 2 == 0 else "SELL",
+                    symbol=f"TEST{index:02d}USDT",
+                    mode="paper",
+                    status="paper_filled",
+                    message=f"filled {index}",
+                    realized_pnl=1.0 if index % 2 else None,
+                    created_at=started_at + timedelta(minutes=index),
+                )
+                for index in range(40)
+            ]
+            events.extend(
+                TradingEvent(
+                    action="SKIP",
+                    symbol="*",
+                    mode="paper",
+                    status="no_signal",
+                    message=f"skip {index}",
+                    created_at=started_at + timedelta(hours=1, minutes=index),
+                )
+                for index in range(520)
+            )
+            store.append_events(events, limit=1000)
+            config = RuntimeConfig()
+            scanner = SimpleNamespace(gateway=SimpleNamespace())
+
+            with (
+                patch("trade_signal_app.main._trading_store", return_value=store),
+                patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, scanner)),
+            ):
+                payload = app_main._trading_status_payload()
+
+        self.assertEqual(payload["event_summary"]["total_events"], 560)
+        self.assertEqual(payload["event_summary"]["filled_events"], 40)
+        self.assertEqual(payload["event_summary"]["diagnostic_events"], 520)
+        self.assertEqual(payload["event_summary"]["returned_events"], 540)
+        self.assertEqual(payload["storage"]["trading_events"], 560)
+        self.assertEqual(payload["storage"]["metric_snapshots"], 1)
+        self.assertEqual(payload["account_metrics"]["event_count"], 560)
+        self.assertEqual(payload["account_metrics"]["diagnostic_event_count"], 520)
+        self.assertEqual(sum(1 for event in payload["events"] if event["status"] == "paper_filled"), 40)
+        self.assertGreater(len(payload["events"]), 30)
 
     def test_onchain_module_loads_without_terminal_scan(self) -> None:
         config = RuntimeConfig()
@@ -2065,7 +2117,7 @@ class MainTests(unittest.TestCase):
 
         self.assertIn("AI Trade Auto Execution", html)
         self.assertIn("运行一次自动交易", html)
-        self.assertIn("累计交易次数", html)
+        self.assertIn("累计成交次数", html)
         self.assertIn("盈亏比", html)
         self.assertIn("60.0%", html)
         self.assertIn("持仓", html)
@@ -2456,6 +2508,11 @@ class MainTests(unittest.TestCase):
                     "autotrade_trend_hold_min_volume_ratio": ["1.4"],
                     "autotrade_trend_hold_min_buy_pressure": ["0.61"],
                     "autotrade_emergency_drawdown_pct": ["1.8"],
+                    "autotrade_emergency_alert_global_cooldown_minutes": ["90"],
+                    "autotrade_emergency_alert_symbol_cooldown_minutes": ["1440"],
+                    "autotrade_emergency_low_liquidity_quote_volume": ["10000000"],
+                    "autotrade_emergency_low_liquidity_drawdown_multiplier": ["2.5"],
+                    "autotrade_emergency_low_liquidity_min_score": ["88"],
                     "autotrade_cooldown_minutes": ["180"],
                     "autotrade_order_test_only": ["on"],
                     "feishu_webhook_url": ["https://open.feishu.cn/webhook/new"],
@@ -2558,6 +2615,11 @@ class MainTests(unittest.TestCase):
         self.assertEqual(config.autotrade_defaults.trend_hold_min_volume_ratio, 1.4)
         self.assertEqual(config.autotrade_defaults.trend_hold_min_buy_pressure, 0.61)
         self.assertEqual(config.autotrade_defaults.emergency_drawdown_pct, 1.8)
+        self.assertEqual(config.autotrade_defaults.emergency_alert_global_cooldown_minutes, 90)
+        self.assertEqual(config.autotrade_defaults.emergency_alert_symbol_cooldown_minutes, 1440)
+        self.assertEqual(config.autotrade_defaults.emergency_low_liquidity_quote_volume, 10_000_000)
+        self.assertEqual(config.autotrade_defaults.emergency_low_liquidity_drawdown_multiplier, 2.5)
+        self.assertEqual(config.autotrade_defaults.emergency_low_liquidity_min_score, 88.0)
         self.assertTrue(config.intelligence_defaults.enabled)
         self.assertTrue(config.intelligence_defaults.llm_enabled)
         self.assertEqual(config.intelligence_defaults.llm_provider, "deepseek")

@@ -183,6 +183,11 @@ class AutoTradeDefaults:
     trend_hold_min_volume_ratio: float = 1.25
     trend_hold_min_buy_pressure: float = 0.56
     emergency_drawdown_pct: float = 2.5
+    emergency_alert_global_cooldown_minutes: int = 60
+    emergency_alert_symbol_cooldown_minutes: int = 720
+    emergency_low_liquidity_quote_volume: float = 10_000_000
+    emergency_low_liquidity_drawdown_multiplier: float = 2.0
+    emergency_low_liquidity_min_score: float = 85.0
     cooldown_minutes: int = 240
     order_test_only: bool = True
 

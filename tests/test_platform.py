@@ -54,6 +54,7 @@ class PlatformTests(unittest.TestCase):
 
         self.assertIn("Binance API", component_names)
         self.assertIn("OKX API", component_names)
+        self.assertIn("SQLite Analytics Store", component_names)
         self.assertIn("Twitter/X", component_names)
         self.assertIn("OpenAI", component_names)
         self.assertIn("Execution Risk Gate", component_names)
@@ -72,6 +73,8 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(accounts["BINANCE"].status, "configured")
         self.assertEqual(accounts["BINANCE"].open_positions, 1)
         self.assertEqual(accounts["BINANCE"].quote_exposure, 600.0)
+        self.assertEqual(accounts["BINANCE"].event_count, 1)
+        self.assertEqual(accounts["BINANCE"].diagnostic_event_count, 0)
         self.assertEqual(accounts["BINANCE"].realized_pnl, 24.0)
         self.assertEqual(accounts["BINANCE"].total_trades, 1)
         self.assertEqual(accounts["BINANCE"].sell_trades, 1)
@@ -125,6 +128,23 @@ class PlatformTests(unittest.TestCase):
         snapshot = build_platform_snapshot(config=RuntimeConfig(), positions=[], events=[older, newer])
 
         self.assertEqual([event.message for event in snapshot.recent_events], ["newer", "older"])
+
+    def test_recent_events_are_not_capped_at_thirty(self) -> None:
+        events = [
+            TradingEvent(
+                action="SKIP",
+                symbol="*",
+                mode="paper",
+                status="no_signal",
+                message=f"event {index}",
+                created_at=datetime(2026, 4, 28, index % 24, index // 24, tzinfo=timezone.utc),
+            )
+            for index in range(35)
+        ]
+
+        snapshot = build_platform_snapshot(config=RuntimeConfig(), positions=[], events=events)
+
+        self.assertEqual(len(snapshot.recent_events), 35)
 
 
 if __name__ == "__main__":

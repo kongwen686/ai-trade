@@ -4,5 +4,6 @@ __pycache__/
 data/runtime_config.json
 data/trading_state.json
 data/*.corrupt-*
+data/*.sqlite3*
 data/spot/
 data/tradingview_klines/

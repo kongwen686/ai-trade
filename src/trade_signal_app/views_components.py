@@ -82,6 +82,8 @@ def _format_ratio(value: object) -> str:
 def _trading_account_metric_cards(metrics: dict[str, object] | None, lang: str = "zh") -> str:
     t = lambda zh, en: _text(lang, zh, en)
     metrics = metrics or {}
+    event_count = int(_float_from_any(metrics.get("event_count")))
+    diagnostic_event_count = int(_float_from_any(metrics.get("diagnostic_event_count")))
     total_trades = int(_float_from_any(metrics.get("total_trades")))
     buy_trades = int(_float_from_any(metrics.get("buy_trades")))
     sell_trades = int(_float_from_any(metrics.get("sell_trades")))
@@ -91,9 +93,17 @@ def _trading_account_metric_cards(metrics: dict[str, object] | None, lang: str =
     breakeven_trades = int(_float_from_any(metrics.get("breakeven_trades")))
     cards = [
         (
-            t("累计交易次数", "Total Trades"),
+            t("累计成交次数", "Filled Trades"),
             f"{total_trades}",
-            t(f"买入 {buy_trades} / 卖出 {sell_trades}", f"Buy {buy_trades} / Sell {sell_trades}"),
+            t(
+                f"买入 {buy_trades} / 卖出 {sell_trades}；执行事件 {event_count}",
+                f"Buy {buy_trades} / Sell {sell_trades}; events {event_count}",
+            ),
+        ),
+        (
+            t("执行事件", "Execution Events"),
+            f"{event_count}",
+            t(f"诊断/预警 {diagnostic_event_count}", f"Diagnostic/warning {diagnostic_event_count}"),
         ),
         (
             t("平仓交易", "Closed Trades"),
@@ -206,7 +216,7 @@ def _strategy_builder_result(result: dict[str, object], lang: str) -> str:
           </div>
           <div>
             <h3>{t("Paper 执行参数", "Paper Execution Parameters")}</h3>
-            {_strategy_param_table(autotrade_defaults, ["enabled", "mode", "quote_order_qty", "max_open_positions", "max_total_quote_exposure", "score_threshold", "min_volume_ratio", "min_buy_pressure", "anti_chase_enabled", "max_entry_rsi", "max_entry_price_vs_ema20_pct", "max_entry_recent_change_pct", "structure_filter_enabled", "max_entry_support_distance_pct", "min_entry_support_strength", "min_entry_risk_reward_ratio", "min_entry_resistance_distance_pct", "support_stop_buffer_pct", "resistance_take_profit_buffer_pct", "stop_loss_pct", "take_profit_pct", "profit_protection_enabled", "profit_protection_trigger_pct", "profit_protection_lock_pct", "trailing_stop_pct", "cooldown_minutes", "order_test_only"], lang)}
+            {_strategy_param_table(autotrade_defaults, ["enabled", "mode", "quote_order_qty", "max_open_positions", "max_total_quote_exposure", "score_threshold", "min_volume_ratio", "min_buy_pressure", "anti_chase_enabled", "max_entry_rsi", "max_entry_price_vs_ema20_pct", "max_entry_recent_change_pct", "structure_filter_enabled", "max_entry_support_distance_pct", "min_entry_support_strength", "min_entry_risk_reward_ratio", "min_entry_resistance_distance_pct", "support_stop_buffer_pct", "resistance_take_profit_buffer_pct", "stop_loss_pct", "take_profit_pct", "profit_protection_enabled", "profit_protection_trigger_pct", "profit_protection_lock_pct", "trailing_stop_pct", "emergency_drawdown_pct", "emergency_alert_global_cooldown_minutes", "emergency_alert_symbol_cooldown_minutes", "emergency_low_liquidity_quote_volume", "emergency_low_liquidity_drawdown_multiplier", "emergency_low_liquidity_min_score", "cooldown_minutes", "order_test_only"], lang)}
           </div>
         </div>
         {warnings_html}
