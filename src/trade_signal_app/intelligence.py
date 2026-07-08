@@ -9,6 +9,7 @@ from urllib.request import Request, urlopen
 
 from .config import AppSettings
 from .data_services import get_llm_provider
+from .entry_filters import anti_chase_reason_from_config, structure_entry_reason_from_config
 from .models import TradeSignal
 from .onchain import OpenMultiChainOnchainProvider
 from .runtime_config import IntelligenceDefaults, RuntimeConfig
@@ -547,6 +548,27 @@ class IntelligenceHub:
         funding_by_symbol = {item.symbol: item for item in (funding_rates or [])}
         for signal in signals:
             funding = funding_by_symbol.get(signal.symbol.upper())
+            anti_chase = anti_chase_reason_from_config(
+                rsi=float(getattr(signal.indicators, "rsi_14", 50.0)),
+                price_vs_ema20_pct=float(getattr(signal.indicators, "price_vs_ema20_pct", 0.0)),
+                recent_change_pct=float(getattr(signal.indicators, "recent_change_pct", 0.0)),
+                config=self.runtime_config.autotrade_defaults,
+            )
+            community_signal = getattr(signal, "community_signal", None)
+            community_score = None if community_signal is None else float(getattr(community_signal, "score", 0.0))
+            structure_issue = structure_entry_reason_from_config(
+                close_price=float(getattr(signal.indicators, "close_price", 0.0)),
+                support_level=float(getattr(signal.indicators, "support_level", 0.0)),
+                resistance_level=float(getattr(signal.indicators, "resistance_level", 0.0)),
+                support_distance_pct=float(getattr(signal.indicators, "support_distance_pct", 0.0)),
+                resistance_distance_pct=float(getattr(signal.indicators, "resistance_distance_pct", 0.0)),
+                support_strength=float(getattr(signal.indicators, "support_strength", 0.0)),
+                risk_reward_ratio=float(getattr(signal.indicators, "structure_risk_reward", 0.0)),
+                volume_ratio=float(getattr(signal.indicators, "volume_ratio", 1.0)),
+                buy_pressure_ratio=float(getattr(signal.indicators, "buy_pressure_ratio", 0.0)),
+                community_score=community_score,
+                config=self.runtime_config.autotrade_defaults,
+            )
             if signal.score >= threshold:
                 hits.append(
                     StrategyHit(
@@ -554,8 +576,18 @@ class IntelligenceHub:
                         strategy="auto_score_breakout",
                         score=signal.score,
                         grade=signal.grade,
-                        action="candidate_buy" if self.runtime_config.autotrade_defaults.enabled else "watch",
-                        reasons=signal.reasons[:4],
+                        action="wait_pullback"
+                        if anti_chase
+                        else "wait_support"
+                        if structure_issue
+                        else "candidate_buy"
+                        if self.runtime_config.autotrade_defaults.enabled
+                        else "watch",
+                        reasons=[anti_chase, *signal.reasons[:3]]
+                        if anti_chase
+                        else [structure_issue, *signal.reasons[:3]]
+                        if structure_issue
+                        else signal.reasons[:4],
                     )
                 )
             if signal.indicators.volume_ratio >= 1.5 and signal.indicators.buy_pressure_ratio >= 0.56:
@@ -686,6 +718,8 @@ class IntelligenceHub:
 
         hit_symbols = []
         for hit in strategy_hits:
+            if hit.action in {"wait_pullback", "wait_support"}:
+                continue
             if hit.symbol not in hit_symbols:
                 hit_symbols.append(hit.symbol)
         allowed = [symbol for symbol in hit_symbols if symbol not in blocked]

@@ -68,6 +68,69 @@ def _float_from_any(value: object, default: float = 0.0) -> float:
         return default
 
 
+def _format_signed_number(value: object, digits: int = 2) -> str:
+    return f"{_float_from_any(value):+,.{digits}f}"
+
+
+def _format_ratio(value: object) -> str:
+    ratio = _float_from_any(value)
+    if ratio >= 999:
+        return "∞"
+    return f"{ratio:.2f}"
+
+
+def _trading_account_metric_cards(metrics: dict[str, object] | None, lang: str = "zh") -> str:
+    t = lambda zh, en: _text(lang, zh, en)
+    metrics = metrics or {}
+    total_trades = int(_float_from_any(metrics.get("total_trades")))
+    buy_trades = int(_float_from_any(metrics.get("buy_trades")))
+    sell_trades = int(_float_from_any(metrics.get("sell_trades")))
+    closed_trades = int(_float_from_any(metrics.get("closed_trades")))
+    winning_trades = int(_float_from_any(metrics.get("winning_trades")))
+    losing_trades = int(_float_from_any(metrics.get("losing_trades")))
+    breakeven_trades = int(_float_from_any(metrics.get("breakeven_trades")))
+    cards = [
+        (
+            t("累计交易次数", "Total Trades"),
+            f"{total_trades}",
+            t(f"买入 {buy_trades} / 卖出 {sell_trades}", f"Buy {buy_trades} / Sell {sell_trades}"),
+        ),
+        (
+            t("平仓交易", "Closed Trades"),
+            f"{closed_trades}",
+            t(f"盈利 {winning_trades} / 亏损 {losing_trades} / 持平 {breakeven_trades}", f"Win {winning_trades} / Loss {losing_trades} / Flat {breakeven_trades}"),
+        ),
+        (
+            t("胜率", "Win Rate"),
+            f"{_float_from_any(metrics.get('win_rate_pct')):.1f}%",
+            t("按已平仓交易统计", "Closed trades only"),
+        ),
+        (
+            t("盈亏比", "Profit/Loss Ratio"),
+            _format_ratio(metrics.get("profit_loss_ratio")),
+            t("平均盈利 / 平均亏损", "Average win / average loss"),
+        ),
+        (
+            "Profit Factor",
+            _format_ratio(metrics.get("profit_factor")),
+            t("总盈利 / 总亏损", "Gross profit / gross loss"),
+        ),
+        (
+            t("累计盈亏", "Total PnL"),
+            _format_signed_number(metrics.get("total_pnl")),
+            t(
+                f"已实现 {_format_signed_number(metrics.get('realized_pnl'))} / 浮动 {_format_signed_number(metrics.get('unrealized_pnl'))}",
+                f"Realized {_format_signed_number(metrics.get('realized_pnl'))} / Unrealized {_format_signed_number(metrics.get('unrealized_pnl'))}",
+            ),
+        ),
+    ]
+    return f"""
+      <div class="mini-stat-grid compact-grid trading-account-metric-grid">
+        {"".join(f'<div class="mini-stat"><span>{escape(label)}</span><strong>{escape(value)}</strong><small>{escape(subtitle)}</small></div>' for label, value, subtitle in cards)}
+      </div>
+    """
+
+
 def _strategy_builder_panel(
     *,
     result: dict[str, object] | None,
@@ -143,7 +206,7 @@ def _strategy_builder_result(result: dict[str, object], lang: str) -> str:
           </div>
           <div>
             <h3>{t("Paper 执行参数", "Paper Execution Parameters")}</h3>
-            {_strategy_param_table(autotrade_defaults, ["enabled", "mode", "quote_order_qty", "max_open_positions", "max_total_quote_exposure", "score_threshold", "min_volume_ratio", "min_buy_pressure", "stop_loss_pct", "take_profit_pct", "profit_protection_enabled", "profit_protection_trigger_pct", "profit_protection_lock_pct", "trailing_stop_pct", "cooldown_minutes", "order_test_only"], lang)}
+            {_strategy_param_table(autotrade_defaults, ["enabled", "mode", "quote_order_qty", "max_open_positions", "max_total_quote_exposure", "score_threshold", "min_volume_ratio", "min_buy_pressure", "anti_chase_enabled", "max_entry_rsi", "max_entry_price_vs_ema20_pct", "max_entry_recent_change_pct", "structure_filter_enabled", "max_entry_support_distance_pct", "min_entry_support_strength", "min_entry_risk_reward_ratio", "min_entry_resistance_distance_pct", "support_stop_buffer_pct", "resistance_take_profit_buffer_pct", "stop_loss_pct", "take_profit_pct", "profit_protection_enabled", "profit_protection_trigger_pct", "profit_protection_lock_pct", "trailing_stop_pct", "cooldown_minutes", "order_test_only"], lang)}
           </div>
         </div>
         {warnings_html}
@@ -264,9 +327,11 @@ __all__ = [
     '_format_datetime_value',
     '_format_cell',
     '_float_from_any',
+    '_format_ratio',
     '_strategy_builder_panel',
     '_strategy_builder_result',
     '_strategy_param_table',
+    '_trading_account_metric_cards',
     '_trading_position_rows',
     '_trading_event_rows',
 ]

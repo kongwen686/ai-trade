@@ -9,6 +9,17 @@ import json
 import os
 
 from .config import AppSettings, DEFAULT_X_TRACKED_ACCOUNTS
+from .entry_filters import (
+    ANTI_CHASE_DEFAULT_MAX_PRICE_VS_EMA20_PCT,
+    ANTI_CHASE_DEFAULT_MAX_RECENT_CHANGE_PCT,
+    ANTI_CHASE_DEFAULT_MAX_RSI,
+    STRUCTURE_DEFAULT_MAX_SUPPORT_DISTANCE_PCT,
+    STRUCTURE_DEFAULT_MIN_RESISTANCE_DISTANCE_PCT,
+    STRUCTURE_DEFAULT_MIN_RISK_REWARD_RATIO,
+    STRUCTURE_DEFAULT_MIN_SUPPORT_STRENGTH,
+    STRUCTURE_DEFAULT_RESISTANCE_TAKE_PROFIT_BUFFER_PCT,
+    STRUCTURE_DEFAULT_SUPPORT_STOP_BUFFER_PCT,
+)
 
 RUNTIME_CONFIG_TEMPLATE_VERSION = 1
 RUNTIME_CONFIG_ENCRYPTED_KIND = "runtime_config_encrypted"
@@ -150,6 +161,17 @@ class AutoTradeDefaults:
     score_threshold: float = 75.0
     min_volume_ratio: float = 1.10
     min_buy_pressure: float = 0.52
+    anti_chase_enabled: bool = True
+    max_entry_rsi: float = ANTI_CHASE_DEFAULT_MAX_RSI
+    max_entry_price_vs_ema20_pct: float = ANTI_CHASE_DEFAULT_MAX_PRICE_VS_EMA20_PCT
+    max_entry_recent_change_pct: float = ANTI_CHASE_DEFAULT_MAX_RECENT_CHANGE_PCT
+    structure_filter_enabled: bool = True
+    max_entry_support_distance_pct: float = STRUCTURE_DEFAULT_MAX_SUPPORT_DISTANCE_PCT
+    min_entry_support_strength: float = STRUCTURE_DEFAULT_MIN_SUPPORT_STRENGTH
+    min_entry_risk_reward_ratio: float = STRUCTURE_DEFAULT_MIN_RISK_REWARD_RATIO
+    min_entry_resistance_distance_pct: float = STRUCTURE_DEFAULT_MIN_RESISTANCE_DISTANCE_PCT
+    support_stop_buffer_pct: float = STRUCTURE_DEFAULT_SUPPORT_STOP_BUFFER_PCT
+    resistance_take_profit_buffer_pct: float = STRUCTURE_DEFAULT_RESISTANCE_TAKE_PROFIT_BUFFER_PCT
     stop_loss_pct: float = 4.0
     take_profit_pct: float = 9.0
     profit_protection_enabled: bool = True

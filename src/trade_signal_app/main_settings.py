@@ -9,7 +9,7 @@ from .presets import apply_backtest_preset, list_backtest_presets
 from .runtime_config import AUTOTRADE_EXIT_PROFILES, AutoTradeDefaults, BacktestDefaults, IntelligenceDefaults, RuntimeConfig, ScanDefaults
 from .tradingview_data import TRADINGVIEW_INTERVALS
 
-SCAN_INTERVALS = {"15m", "1h", "4h", "1d"}
+SCAN_INTERVALS = {"15m", "1h", "2h", "4h", "1d"}
 AUTOTRADE_MODES = {"paper", "live"}
 AUTOTRADE_EXCHANGES = {"binance", "okx"}
 X_ACCOUNT_MODES = {"off", "blend", "only"}
@@ -121,6 +121,15 @@ def _validate_runtime_config(config: RuntimeConfig) -> None:
     _validate_range(autotrade.score_threshold, "Auto Trade Score Threshold", minimum=0, maximum=100)
     _validate_range(autotrade.min_volume_ratio, "Auto Trade Min Volume Ratio", minimum=0)
     _validate_range(autotrade.min_buy_pressure, "Auto Trade Min Buy Pressure", minimum=0, maximum=1)
+    _validate_range(autotrade.max_entry_rsi, "Auto Trade Max Entry RSI", minimum=0, maximum=100)
+    _validate_range(autotrade.max_entry_price_vs_ema20_pct, "Auto Trade Max Entry EMA20 Deviation", minimum=0)
+    _validate_range(autotrade.max_entry_recent_change_pct, "Auto Trade Max Entry Recent Change", minimum=0)
+    _validate_range(autotrade.max_entry_support_distance_pct, "Auto Trade Max Entry Support Distance", minimum=0)
+    _validate_range(autotrade.min_entry_support_strength, "Auto Trade Min Entry Support Strength", minimum=0)
+    _validate_range(autotrade.min_entry_risk_reward_ratio, "Auto Trade Min Entry Risk Reward", minimum=0)
+    _validate_range(autotrade.min_entry_resistance_distance_pct, "Auto Trade Min Entry Resistance Distance", minimum=0)
+    _validate_range(autotrade.support_stop_buffer_pct, "Auto Trade Support Stop Buffer", minimum=0)
+    _validate_range(autotrade.resistance_take_profit_buffer_pct, "Auto Trade Resistance Take Profit Buffer", minimum=0)
     _validate_range(autotrade.stop_loss_pct, "Auto Trade Stop Loss", minimum=0.1)
     _validate_range(autotrade.take_profit_pct, "Auto Trade Take Profit", minimum=0.1)
     _validate_range(autotrade.profit_protection_trigger_pct, "Auto Trade Profit Protection Trigger", minimum=0)
@@ -272,6 +281,17 @@ def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "autotrade_score_threshold": autotrade.score_threshold,
         "autotrade_min_volume_ratio": autotrade.min_volume_ratio,
         "autotrade_min_buy_pressure": autotrade.min_buy_pressure,
+        "autotrade_anti_chase_enabled": autotrade.anti_chase_enabled,
+        "autotrade_max_entry_rsi": autotrade.max_entry_rsi,
+        "autotrade_max_entry_price_vs_ema20_pct": autotrade.max_entry_price_vs_ema20_pct,
+        "autotrade_max_entry_recent_change_pct": autotrade.max_entry_recent_change_pct,
+        "autotrade_structure_filter_enabled": autotrade.structure_filter_enabled,
+        "autotrade_max_entry_support_distance_pct": autotrade.max_entry_support_distance_pct,
+        "autotrade_min_entry_support_strength": autotrade.min_entry_support_strength,
+        "autotrade_min_entry_risk_reward_ratio": autotrade.min_entry_risk_reward_ratio,
+        "autotrade_min_entry_resistance_distance_pct": autotrade.min_entry_resistance_distance_pct,
+        "autotrade_support_stop_buffer_pct": autotrade.support_stop_buffer_pct,
+        "autotrade_resistance_take_profit_buffer_pct": autotrade.resistance_take_profit_buffer_pct,
         "autotrade_stop_loss_pct": autotrade.stop_loss_pct,
         "autotrade_take_profit_pct": autotrade.take_profit_pct,
         "autotrade_profit_protection_enabled": autotrade.profit_protection_enabled,
@@ -496,6 +516,41 @@ def _build_runtime_config(form: dict[str, list[str]], *, current_config: Runtime
             score_threshold=_parse_float_value(_get_first(form, "autotrade_score_threshold", str(current_config.autotrade_defaults.score_threshold)), "Auto Trade Score Threshold"),
             min_volume_ratio=_parse_float_value(_get_first(form, "autotrade_min_volume_ratio", str(current_config.autotrade_defaults.min_volume_ratio)), "Auto Trade Min Volume Ratio"),
             min_buy_pressure=_parse_float_value(_get_first(form, "autotrade_min_buy_pressure", str(current_config.autotrade_defaults.min_buy_pressure)), "Auto Trade Min Buy Pressure"),
+            anti_chase_enabled=_runtime_bool(form, "autotrade_anti_chase_enabled", current_config.autotrade_defaults.anti_chase_enabled),
+            max_entry_rsi=_parse_float_value(_get_first(form, "autotrade_max_entry_rsi", str(current_config.autotrade_defaults.max_entry_rsi)), "Auto Trade Max Entry RSI"),
+            max_entry_price_vs_ema20_pct=_parse_float_value(
+                _get_first(form, "autotrade_max_entry_price_vs_ema20_pct", str(current_config.autotrade_defaults.max_entry_price_vs_ema20_pct)),
+                "Auto Trade Max Entry EMA20 Deviation",
+            ),
+            max_entry_recent_change_pct=_parse_float_value(
+                _get_first(form, "autotrade_max_entry_recent_change_pct", str(current_config.autotrade_defaults.max_entry_recent_change_pct)),
+                "Auto Trade Max Entry Recent Change",
+            ),
+            structure_filter_enabled=_runtime_bool(form, "autotrade_structure_filter_enabled", current_config.autotrade_defaults.structure_filter_enabled),
+            max_entry_support_distance_pct=_parse_float_value(
+                _get_first(form, "autotrade_max_entry_support_distance_pct", str(current_config.autotrade_defaults.max_entry_support_distance_pct)),
+                "Auto Trade Max Entry Support Distance",
+            ),
+            min_entry_support_strength=_parse_float_value(
+                _get_first(form, "autotrade_min_entry_support_strength", str(current_config.autotrade_defaults.min_entry_support_strength)),
+                "Auto Trade Min Entry Support Strength",
+            ),
+            min_entry_risk_reward_ratio=_parse_float_value(
+                _get_first(form, "autotrade_min_entry_risk_reward_ratio", str(current_config.autotrade_defaults.min_entry_risk_reward_ratio)),
+                "Auto Trade Min Entry Risk Reward",
+            ),
+            min_entry_resistance_distance_pct=_parse_float_value(
+                _get_first(form, "autotrade_min_entry_resistance_distance_pct", str(current_config.autotrade_defaults.min_entry_resistance_distance_pct)),
+                "Auto Trade Min Entry Resistance Distance",
+            ),
+            support_stop_buffer_pct=_parse_float_value(
+                _get_first(form, "autotrade_support_stop_buffer_pct", str(current_config.autotrade_defaults.support_stop_buffer_pct)),
+                "Auto Trade Support Stop Buffer",
+            ),
+            resistance_take_profit_buffer_pct=_parse_float_value(
+                _get_first(form, "autotrade_resistance_take_profit_buffer_pct", str(current_config.autotrade_defaults.resistance_take_profit_buffer_pct)),
+                "Auto Trade Resistance Take Profit Buffer",
+            ),
             stop_loss_pct=_parse_float_value(_get_first(form, "autotrade_stop_loss_pct", str(current_config.autotrade_defaults.stop_loss_pct)), "Auto Trade Stop Loss"),
             take_profit_pct=_parse_float_value(_get_first(form, "autotrade_take_profit_pct", str(current_config.autotrade_defaults.take_profit_pct)), "Auto Trade Take Profit"),
             profit_protection_enabled=_runtime_bool(form, "autotrade_profit_protection_enabled", current_config.autotrade_defaults.profit_protection_enabled),

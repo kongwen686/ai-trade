@@ -4,7 +4,7 @@ from html import escape
 
 from .time_utils import now_app_time
 from .views_common import _display_value, _hidden_lang_input, _layout, _text, _url, normalize_language
-from .views_components import _float_from_any, _strategy_builder_panel, _terminal_rows, _trading_event_rows, _trading_position_rows
+from .views_components import _float_from_any, _strategy_builder_panel, _terminal_rows, _trading_account_metric_cards, _trading_event_rows, _trading_position_rows
 
 
 def _terminal_card(title: str, value: str, subtitle: str, accent: str = "") -> str:
@@ -177,7 +177,7 @@ def _terminal_status_chip(label: str, status: object, lang: str) -> str:
     raw_status = str(status or "").lower()
     if raw_status in {"ready", "configured", "ready_public", "api_live", "live", "enabled", "ok"}:
         chip_class = "ready"
-    elif raw_status in {"guarded", "partial_configured", "fallback", "monitoring", "watch_only", "pending_scan"}:
+    elif raw_status in {"guarded", "partial_configured", "fallback", "monitoring", "watch_only", "pending_scan", "wait_pullback", "wait_support"}:
         chip_class = "pending"
     elif raw_status in {"source_missing", "not_configured", "auth_failed", "empty", "error"}:
         chip_class = "blocked"
@@ -350,8 +350,10 @@ def _terminal_dashboard_showcase(snapshot: dict[str, object], lang: str) -> str:
 
     account_exposure = sum(_float_from_any(item.get("quote_exposure")) for item in accounts)
     account_pnl = sum(_float_from_any(item.get("realized_pnl")) for item in accounts)
+    account_trades = sum(int(_float_from_any(item.get("total_trades"))) for item in accounts)
     open_positions = sum(int(_float_from_any(item.get("open_positions"))) for item in accounts)
     max_win_rate = max([_float_from_any(item.get("win_rate_pct")) for item in accounts] or [0.0])
+    max_profit_loss_ratio = max([_float_from_any(item.get("profit_loss_ratio")) for item in accounts] or [0.0])
     risk_score = _float_from_any(risk.get("risk_score"))
     allowed_symbols = risk.get("allowed_symbols") if isinstance(risk.get("allowed_symbols"), list) else []
     blocked_symbols = risk.get("blocked_symbols") if isinstance(risk.get("blocked_symbols"), dict) else {}
@@ -397,7 +399,9 @@ def _terminal_dashboard_showcase(snapshot: dict[str, object], lang: str) -> str:
 
     kpis = [
         (t("今日信号", "Signals"), str(int(snapshot.get("returned_signals") or len(strategy_hits))), t("策略候选", "strategy candidates"), "blue"),
-        (t("账户权益", "Exposure"), f"{account_exposure:,.2f}", t("已用敞口 USDT", "used exposure USDT"), "green"),
+        (t("累计交易", "Trades"), str(account_trades), t("模拟账户成交", "paper account fills"), "green"),
+        (t("胜率", "Win Rate"), f"{max_win_rate:.1f}%", f"{t('盈亏比', 'P/L')} {max_profit_loss_ratio:.2f}", "cyan"),
+        (t("账户盈亏", "Account PnL"), f"{account_pnl:+,.2f}", f"{t('敞口', 'exposure')} {account_exposure:,.2f}", "green"),
         (t("情报项", "Intel"), str(len(intel_items)), t("交易所/社区聚合", "exchange/community"), "cyan"),
         (t("风险评分", "Risk"), f"{risk_score:.0f}", _terminal_dashboard_value(risk.get("status"), lang), "amber"),
     ]
@@ -513,7 +517,7 @@ def render_terminal_page(
         [
             _terminal_dashboard_showcase(snapshot, active_lang),
             _terminal_panel(t("功能实现状态", "Capability Status"), t("架构组件、API 入口和配置状态。", "Architecture components, API endpoints, and configuration state."), _terminal_rows(platform["components"], [(t("层级", "Layer"), "layer"), (t("名称", "Name"), "name"), (t("状态", "Status"), "status"), (t("能力", "Capability"), "capability"), (t("接口", "Endpoint"), "endpoint")], lang=active_lang), wide=True),
-            _terminal_panel(t("交易账户概览", "Trading Accounts"), t("模拟交易和真实交易账户状态。", "Paper and live account state."), _terminal_rows(platform["accounts"], [(t("交易所", "Exchange"), "exchange"), (t("模式", "Mode"), "mode"), (t("状态", "Status"), "status"), (t("持仓数", "Positions"), "open_positions"), (t("敞口", "Exposure"), "quote_exposure"), (t("已实现盈亏", "Realized PnL"), "realized_pnl"), (t("胜率", "Win Rate"), "win_rate_pct")], lang=active_lang), wide=True),
+            _terminal_panel(t("交易账户概览", "Trading Accounts"), t("模拟交易和真实交易账户状态。", "Paper and live account state."), _terminal_rows(platform["accounts"], [(t("交易所", "Exchange"), "exchange"), (t("模式", "Mode"), "mode"), (t("状态", "Status"), "status"), (t("持仓数", "Positions"), "open_positions"), (t("敞口", "Exposure"), "quote_exposure"), (t("累计交易", "Trades"), "total_trades"), (t("平仓数", "Closed"), "closed_trades"), (t("胜率", "Win Rate"), "win_rate_pct"), (t("盈亏比", "P/L Ratio"), "profit_loss_ratio"), (t("已实现盈亏", "Realized PnL"), "realized_pnl")], lang=active_lang), wide=True),
             _terminal_panel(t("大模型分析", "LLM Analysis"), t("基于行情、社区、链上、价差、资金费率和风控快照生成机会、风险和执行建议。", "Generates opportunity, risk, and execution suggestions from market, community, on-chain, basis, funding, and risk snapshots."), _llm_analysis_content(llm, active_lang), wide=True),
             _terminal_panel(
                 t("执行前风控", "Pre-trade Risk Gate"),
@@ -653,6 +657,7 @@ def render_terminal_module_page(
         exchange_status = readiness.get("exchange_status") if isinstance(readiness, dict) and isinstance(readiness.get("exchange_status"), dict) else {}
         positions = trading_status["open_positions"]
         events = trading_status["events"]
+        account_metrics = trading_status.get("account_metrics") if isinstance(trading_status.get("account_metrics"), dict) else {}
         auto_status = paper_auto_status or {}
         auto_running = bool(auto_status.get("running"))
         auto_error = str(auto_status.get("last_error") or "")
@@ -701,12 +706,13 @@ def render_terminal_module_page(
             <div class="mini-stat"><span>{t("授权", "Auth")}</span><strong>{escape(_display_value(exchange_status.get("status", "not_configured"), active_lang))}</strong></div>
             <div class="mini-stat"><span>{t("实盘就绪", "Live Ready")}</span><strong>{t("是", "Yes") if readiness.get("live_ready") else t("否", "No")}</strong></div>
           </div>
+          {_trading_account_metric_cards(account_metrics, active_lang)}
           {f'<div class="notice notice-success">{escape(message)}</div>' if message else ""}
         """
         panels = "".join(
             [
                 _terminal_panel(t("模拟账户执行", "Paper Account Execution"), t("用策略信号源完成一轮 paper 自动交易。", "Complete one paper auto-trading run from the strategy signal source."), command, wide=True),
-                _terminal_panel(t("账户表现", "Account Performance"), t("持仓敞口、已实现盈亏和最近平仓胜率。", "Open exposure, realized PnL, and recent closed-trade win rate."), _terminal_rows(platform["accounts"], [(t("交易所", "Exchange"), "exchange"), (t("模式", "Mode"), "mode"), (t("持仓", "Positions"), "open_positions"), (t("敞口", "Exposure"), "quote_exposure"), (t("已实现盈亏", "Realized PnL"), "realized_pnl"), (t("平仓数", "Closed"), "closed_trades"), (t("胜率", "Win Rate"), "win_rate_pct")], lang=active_lang), wide=True),
+                _terminal_panel(t("账户表现", "Account Performance"), t("累计交易、持仓敞口、盈亏比、胜率和已实现盈亏。", "Total trades, exposure, P/L ratio, win rate, and realized PnL."), _terminal_rows(platform["accounts"], [(t("交易所", "Exchange"), "exchange"), (t("模式", "Mode"), "mode"), (t("持仓", "Positions"), "open_positions"), (t("敞口", "Exposure"), "quote_exposure"), (t("累计交易", "Trades"), "total_trades"), (t("平仓数", "Closed"), "closed_trades"), (t("胜率", "Win Rate"), "win_rate_pct"), (t("盈亏比", "P/L Ratio"), "profit_loss_ratio"), ("Profit Factor", "profit_factor"), (t("已实现盈亏", "Realized PnL"), "realized_pnl")], lang=active_lang), wide=True),
                 _terminal_panel(t("持仓状态", "Position State"), t("本地模拟账户持仓。", "Local paper account positions."), _trading_position_rows(positions, active_lang), wide=True),
                 _terminal_panel(t("交易日志", "Trading Logs"), t("自动交易执行、跳过、阻断和下单事件。", "Automated trading execution, skip, block, and order events."), _trading_event_rows(events, active_lang), wide=True),
             ]

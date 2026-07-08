@@ -7,12 +7,15 @@ import math
 import os
 from pathlib import Path
 
+from .entry_filters import anti_chase_reason_from_config, structure_adjusted_exit_prices, structure_entry_reason_from_config
 from .feishu import FeishuTradeNotifier
 from .runtime_config import AutoTradeDefaults
 from .service import SignalScanner
 from .time_utils import now_app_time, to_app_time
 
 LIVE_CONFIRM_VALUE = "I_UNDERSTAND_REAL_ORDERS"
+MIN_EMERGENCY_ALERT_COOLDOWN_MINUTES = 30
+EMERGENCY_DRAWDOWN_STATUS = "emergency_drawdown"
 
 
 @dataclass
@@ -208,6 +211,7 @@ class AutoTrader:
 
     def run_once(self, config: AutoTradeDefaults) -> TradingRunReport:
         positions = self.state_store.load()
+        recent_events = self.state_store.load_events()
         events: list[TradingEvent] = []
         summary, signals = self.scanner.scan()
         now = now_app_time()
@@ -222,6 +226,7 @@ class AutoTrader:
             events,
             latest_prices,
             signal_by_symbol={signal.symbol: signal for signal in signals},
+            recent_events=recent_events,
         )
         if not config.enabled:
             self.state_store.save(positions)
@@ -305,6 +310,36 @@ class AutoTrader:
                 continue
             if signal.indicators.buy_pressure_ratio < config.min_buy_pressure:
                 continue
+            anti_chase = self._anti_chase_reason(signal, config)
+            if anti_chase:
+                events.append(
+                    TradingEvent(
+                        action="SKIP",
+                        symbol=signal.symbol,
+                        mode=config.mode,
+                        status="wait_pullback",
+                        message=anti_chase,
+                        score=signal.score,
+                        price=signal.ticker.last_price,
+                        exchange=config.execution_exchange.upper(),
+                    )
+                )
+                continue
+            structure_issue = self._structure_entry_reason(signal, config)
+            if structure_issue:
+                events.append(
+                    TradingEvent(
+                        action="SKIP",
+                        symbol=signal.symbol,
+                        mode=config.mode,
+                        status="wait_support",
+                        message=structure_issue,
+                        score=signal.score,
+                        price=signal.ticker.last_price,
+                        exchange=config.execution_exchange.upper(),
+                    )
+                )
+                continue
 
             position, event = self._open_position(signal, config)
             events.append(event)
@@ -332,10 +367,12 @@ class AutoTrader:
         events: list[TradingEvent],
         latest_prices: dict[str, float],
         signal_by_symbol: dict[str, object] | None = None,
+        recent_events: list[TradingEvent] | None = None,
     ) -> list[TradingPosition]:
         if not positions:
             return []
         signal_by_symbol = signal_by_symbol or {}
+        recent_events = recent_events or []
         remaining: list[TradingPosition] = []
         for position in positions:
             price = latest_prices.get(position.symbol)
@@ -344,7 +381,11 @@ class AutoTrader:
                 continue
             position = self._apply_profit_protection(position, price, config)
             emergency_event = self._emergency_drawdown_event(position, price, config)
-            if emergency_event is not None:
+            if emergency_event is not None and self._should_emit_emergency_drawdown_alert(
+                event=emergency_event,
+                config=config,
+                recent_events=[*recent_events, *events],
+            ):
                 events.append(emergency_event)
                 self._notify_trade_event(event=emergency_event, position=position)
             exit_reason = ""
@@ -441,12 +482,31 @@ class AutoTrader:
             action="ALERT",
             symbol=position.symbol,
             mode=position.mode,
-            status="emergency_drawdown",
+            status=EMERGENCY_DRAWDOWN_STATUS,
             message=f"价格较持仓最高价快速回撤 {drawdown_pct:.2f}%，请检查突发风险和盘口流动性。",
             price=price,
             quantity=position.quantity,
             quote_notional=position.quote_notional,
             exchange=position.exchange,
+        )
+
+    def _should_emit_emergency_drawdown_alert(
+        self,
+        *,
+        event: TradingEvent,
+        config: AutoTradeDefaults,
+        recent_events: list[TradingEvent],
+    ) -> bool:
+        cooldown_minutes = max(
+            MIN_EMERGENCY_ALERT_COOLDOWN_MINUTES,
+            int(config.cooldown_minutes or 0),
+        )
+        cutoff = event.created_at - timedelta(minutes=cooldown_minutes)
+        return not any(
+            item.status == EMERGENCY_DRAWDOWN_STATUS
+            and item.symbol == event.symbol
+            and item.created_at >= cutoff
+            for item in recent_events
         )
 
     @staticmethod
@@ -475,6 +535,59 @@ class AutoTrader:
             return float(raw_value or default)
         except (TypeError, ValueError):
             return default
+
+    def _anti_chase_reason(self, signal: object, config: AutoTradeDefaults) -> str:
+        return anti_chase_reason_from_config(
+            rsi=self._signal_indicator_float(signal, "rsi_14", 50.0),
+            price_vs_ema20_pct=self._signal_indicator_float(signal, "price_vs_ema20_pct", 0.0),
+            recent_change_pct=self._signal_indicator_float(signal, "recent_change_pct", 0.0),
+            config=config,
+        )
+
+    def _structure_entry_reason(self, signal: object, config: AutoTradeDefaults) -> str:
+        return structure_entry_reason_from_config(
+            close_price=self._signal_price(signal),
+            support_level=self._signal_indicator_float(signal, "support_level", 0.0),
+            resistance_level=self._signal_indicator_float(signal, "resistance_level", 0.0),
+            support_distance_pct=self._signal_indicator_float(signal, "support_distance_pct", 0.0),
+            resistance_distance_pct=self._signal_indicator_float(signal, "resistance_distance_pct", 0.0),
+            support_strength=self._signal_indicator_float(signal, "support_strength", 0.0),
+            risk_reward_ratio=self._signal_indicator_float(signal, "structure_risk_reward", 0.0),
+            volume_ratio=self._signal_indicator_float(signal, "volume_ratio", 1.0),
+            buy_pressure_ratio=self._signal_indicator_float(signal, "buy_pressure_ratio", 0.0),
+            community_score=self._signal_community_score(signal),
+            config=config,
+        )
+
+    @staticmethod
+    def _signal_price(signal: object | None) -> float:
+        if signal is None:
+            return 0.0
+        if isinstance(signal, dict):
+            raw_value = signal.get("last_price", signal.get("price", 0.0))
+        else:
+            ticker = getattr(signal, "ticker", None)
+            raw_value = getattr(ticker, "last_price", 0.0)
+        try:
+            return float(raw_value or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _signal_community_score(signal: object | None) -> float | None:
+        if signal is None:
+            return None
+        if isinstance(signal, dict):
+            raw_value = signal.get("community_score")
+        else:
+            community_signal = getattr(signal, "community_signal", None)
+            raw_value = getattr(community_signal, "score", None)
+        if raw_value is None:
+            return None
+        try:
+            return float(raw_value)
+        except (TypeError, ValueError):
+            return None
 
     def _latest_prices_for_positions(
         self,
@@ -509,6 +622,7 @@ class AutoTrader:
         position_notional = margin_notional * leverage
         quantity = position_notional / price
         client_order_id = self._client_order_id("buy", signal.symbol, now)
+        stop_price, take_profit_price = self._structured_exit_prices(signal, price, config)
         position = TradingPosition(
             exchange=config.execution_exchange.upper(),
             symbol=signal.symbol,
@@ -518,8 +632,8 @@ class AutoTrader:
             score=signal.score,
             grade=signal.grade,
             opened_at=now,
-            stop_price=price * (1 - config.stop_loss_pct / 100),
-            take_profit_price=price * (1 + config.take_profit_pct / 100),
+            stop_price=stop_price,
+            take_profit_price=take_profit_price,
             mode=config.mode,
             client_order_id=client_order_id,
             highest_price=price,
@@ -579,6 +693,18 @@ class AutoTrader:
             quote_notional=position.quote_notional,
             response=response_payload,
             exchange=config.execution_exchange.upper(),
+        )
+
+    def _structured_exit_prices(self, signal: object, price: float, config: AutoTradeDefaults) -> tuple[float, float]:
+        return structure_adjusted_exit_prices(
+            entry_price=price,
+            stop_loss_pct=config.stop_loss_pct,
+            take_profit_pct=config.take_profit_pct,
+            support_level=self._signal_indicator_float(signal, "support_level", 0.0),
+            resistance_level=self._signal_indicator_float(signal, "resistance_level", 0.0),
+            enabled=config.structure_filter_enabled,
+            support_stop_buffer_pct=config.support_stop_buffer_pct,
+            resistance_take_profit_buffer_pct=config.resistance_take_profit_buffer_pct,
         )
 
     @staticmethod
@@ -716,6 +842,22 @@ class AutoTrader:
             raise ValueError("退出档位不受支持。")
         if config.stop_loss_pct <= 0 or config.take_profit_pct <= 0:
             raise ValueError("止损和止盈比例必须大于 0。")
+        if config.max_entry_rsi < 0 or config.max_entry_rsi > 100:
+            raise ValueError("反追高 RSI 上限必须在 0 到 100 之间。")
+        if config.max_entry_price_vs_ema20_pct < 0:
+            raise ValueError("反追高 EMA20 偏离上限不能小于 0。")
+        if config.max_entry_recent_change_pct < 0:
+            raise ValueError("反追高近端涨幅上限不能小于 0。")
+        if config.max_entry_support_distance_pct < 0:
+            raise ValueError("结构支撑距离上限不能小于 0。")
+        if config.min_entry_support_strength < 0:
+            raise ValueError("结构支撑强度下限不能小于 0。")
+        if config.min_entry_risk_reward_ratio < 0:
+            raise ValueError("结构盈亏比下限不能小于 0。")
+        if config.min_entry_resistance_distance_pct < 0:
+            raise ValueError("上方阻力空间下限不能小于 0。")
+        if config.support_stop_buffer_pct < 0 or config.resistance_take_profit_buffer_pct < 0:
+            raise ValueError("结构止损/止盈缓冲不能小于 0。")
         if config.profit_protection_trigger_pct < 0:
             raise ValueError("浮盈保护触发比例不能小于 0。")
         if config.profit_protection_lock_pct < 0:

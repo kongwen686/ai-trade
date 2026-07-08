@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 import csv
 import io
 from urllib.parse import urlencode
@@ -33,11 +33,33 @@ from .presets import apply_backtest_preset
 from .runtime_config import RuntimeConfig
 from .strategy import EntryRuleConfig, ExecutionConfig, ExitRuleConfig
 from .tradingview_data import fetch_tradingview_history
+from .time_utils import APP_TIMEZONE
 from .ui import format_backtest_report, format_portfolio_report, format_rebalance_premium_report
 from .views_common import normalize_language
 
 
 LOCAL_TRADINGVIEW_ARCHIVE_PATTERN = "data/tradingview_klines/*/*/*.csv"
+BACKTEST_SAMPLE_START_AT = datetime(2026, 7, 6, 0, 0, tzinfo=APP_TIMEZONE)
+BACKTEST_SAMPLE_START_LABEL = "2026-07-06 00:00:00 UTC+8"
+BACKTEST_PREWARM_BARS = 60
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _backtest_sample_window(candles: list, *, prewarm_bars: int = BACKTEST_PREWARM_BARS) -> tuple[list, list, int]:
+    cutoff = _as_utc(BACKTEST_SAMPLE_START_AT)
+    sample_start_index = next(
+        (index for index, candle in enumerate(candles) if _as_utc(candle.open_time) >= cutoff),
+        None,
+    )
+    if sample_start_index is None:
+        return [], [], len(candles)
+    analysis_start_index = max(0, sample_start_index - prewarm_bars)
+    return candles[analysis_start_index:], candles[sample_start_index:], sample_start_index
 
 
 def _to_jsonable(value: object) -> object:
@@ -188,6 +210,7 @@ def _backtest_payload(
         "tradingview_interval": _get_first(query, "tradingview_interval", runtime_config.tradingview_interval),
         "tradingview_bars": _parse_query_int(query, "tradingview_bars", runtime_config.tradingview_bars, "TradingView Bars"),
         "tv_fetched": _parse_bool_flag(query, "tv_fetched"),
+        "sample_start_at": BACKTEST_SAMPLE_START_LABEL,
     }
     if not str(params["archives"]).strip() and query:
         params["archives"] = _cached_archive_pattern_if_available()
@@ -212,6 +235,7 @@ def _backtest_payload(
         min_buy_pressure_ratio=float(params["min_buy_pressure"]),
         min_rsi=float(params["min_rsi"]),
         max_rsi=float(params["max_rsi"]),
+        max_entry_rsi=float(params["max_rsi"]),
         require_kdj_confirmation=not bool(params["no_kdj_confirmation"]),
     )
     exit_config = ExitRuleConfig(
@@ -260,15 +284,27 @@ def _backtest_payload(
     series_contexts = []
     data_warnings: list[str] = []
     for (symbol, interval), archive_paths in sorted(grouped.items()):
-        candles = merge_candles(archive_paths)
-        candles_by_interval.setdefault(interval, {})[symbol] = candles
-        if len(candles) < int(params["lookback_bars"]):
+        is_overnight_preset = str(params["preset"]) == "btc_overnight_seasonality"
+        raw_candles = merge_candles(archive_paths)
+        candles, sample_candles, excluded_candles = _backtest_sample_window(raw_candles)
+        if excluded_candles:
             data_warnings.append(
-                f"{symbol} {interval} 只有 {len(candles)} 根 K 线，低于当前 lookback {int(params['lookback_bars'])}；建议重新拉取更多历史数据。"
+                f"{symbol} {interval} 已排除 {excluded_candles} 根 {BACKTEST_SAMPLE_START_LABEL} 之前的 K 线；"
+                f"最多 {BACKTEST_PREWARM_BARS} 根仅作为指标预热，不计入交易、收益和资金曲线。"
             )
-        if len(candles) < minimum_required_bars:
+        if not sample_candles:
+            data_warnings.append(f"{symbol} {interval} 已跳过：{BACKTEST_SAMPLE_START_LABEL} 之后没有可回测 K 线。")
+            continue
+        candles_by_interval.setdefault(interval, {})[symbol] = sample_candles
+        if not is_overnight_preset and len(sample_candles) < int(params["lookback_bars"]):
             data_warnings.append(
-                f"{symbol} {interval} 已跳过：至少需要 {minimum_required_bars} 根 K 线才能覆盖指标预热和退出窗口，当前只有 {len(candles)} 根。"
+                f"{symbol} {interval} 有效样本只有 {len(sample_candles)} 根 K 线，低于当前 lookback {int(params['lookback_bars'])}；"
+                f"当前回测仅统计 {BACKTEST_SAMPLE_START_LABEL} 及之后的数据。"
+            )
+        if not is_overnight_preset and len(candles) < minimum_required_bars:
+            data_warnings.append(
+                f"{symbol} {interval} 已跳过：至少需要 {minimum_required_bars} 根 K 线才能覆盖指标预热和退出窗口，"
+                f"当前有效样本 {len(sample_candles)} 根，连同预热上下文共 {len(candles)} 根。"
             )
             continue
         try:
@@ -283,12 +319,12 @@ def _backtest_payload(
             )
         except Exception as exc:  # noqa: BLE001
             return _empty_backtest_payload(params), params, str(exc)
-        if str(params["preset"]) == "btc_overnight_seasonality":
+        if is_overnight_preset:
             try:
                 report = run_overnight_seasonality_backtest(
                     symbol=symbol,
                     interval=interval,
-                    candles=candles,
+                    candles=sample_candles,
                     execution_config=report_execution_config,
                 )
             except ValueError as exc:
@@ -307,13 +343,14 @@ def _backtest_payload(
                     exit_config=exit_config,
                     execution_config=report_execution_config,
                     cooldown_bars=int(params["cooldown_bars"]) or None,
+                    sample_start_time=BACKTEST_SAMPLE_START_AT,
                 )
             except ValueError as exc:
                 data_warnings.append(f"{symbol} {interval} 已跳过：{exc}")
                 continue
         reports_by_interval.setdefault(interval, []).append(report)
         series_reports.append(format_backtest_report(report))
-        series_contexts.append((symbol, interval, candles, report_execution_config))
+        series_contexts.append((symbol, interval, candles, report_execution_config, BACKTEST_SAMPLE_START_AT))
 
     portfolio_reports = []
     if int(params["portfolio_top_n"]) > 0:
@@ -387,7 +424,7 @@ def _empty_backtest_payload(params: dict[str, object], *, data_warnings: list[st
 
 def _run_backtest_stability_checks(
     *,
-    series_contexts: list[tuple[str, str, list, ExecutionConfig]],
+    series_contexts: list[tuple[str, str, list, ExecutionConfig, datetime | None]],
     params: dict[str, object],
     holding_periods: list[int],
     entry_config: EntryRuleConfig,
@@ -396,7 +433,7 @@ def _run_backtest_stability_checks(
     checks: list[dict[str, object]] = []
     base_score = float(params["score_threshold"])
     base_slippage = float(params["slippage_bps"])
-    for symbol, interval, candles, execution_config in series_contexts[:2]:
+    for symbol, interval, candles, execution_config, sample_start_time in series_contexts[:2]:
         variants = [
             ("score_minus_3", candles, replace(entry_config, min_score=max(0.0, base_score - 3.0)), execution_config),
             ("score_plus_3", candles, replace(entry_config, min_score=min(100.0, base_score + 3.0)), execution_config),
@@ -414,6 +451,7 @@ def _run_backtest_stability_checks(
                     entry_config=variant_entry_config,
                     exit_config=exit_config,
                     execution_config=variant_execution_config,
+                    sample_start_time=sample_start_time,
                 )
             )
         walk_forward_windows = _walk_forward_validation_windows(
@@ -443,6 +481,7 @@ def _run_backtest_stability_checks(
                 entry_config=entry_config,
                 exit_config=exit_config,
                 execution_config=execution_config,
+                sample_start_time=sample_start_time,
             )
             item.update(window)
             checks.append(item)
@@ -460,6 +499,7 @@ def _run_single_stability_check(
     entry_config: EntryRuleConfig,
     exit_config: ExitRuleConfig,
     execution_config: ExecutionConfig,
+    sample_start_time: datetime | None,
 ) -> dict[str, object]:
     try:
         report = run_backtest_for_series(
@@ -473,6 +513,7 @@ def _run_single_stability_check(
             exit_config=exit_config,
             execution_config=execution_config,
             cooldown_bars=int(params["cooldown_bars"]) or None,
+            sample_start_time=sample_start_time,
         )
         return {
             "symbol": symbol,
@@ -579,6 +620,7 @@ def _build_backtest_strategy_explanation(
     cost_notes = _backtest_cost_notes(params)
     notes = [
         strategy_summary,
+        f"数据窗口：仅统计 {params.get('sample_start_at', BACKTEST_SAMPLE_START_LABEL)} 及之后的 K 线；此前 K 线不计入交易、收益和资金曲线。",
         f"入场过滤：score >= {float(params.get('score_threshold', 0.0)):.1f}, volume_ratio >= {float(params.get('min_volume_ratio', 0.0)):.2f}, buy_pressure >= {float(params.get('min_buy_pressure', 0.0)):.2f}。",
         f"退出假设：止损 {float(params.get('stop_loss_pct', 0.0)):.1f}%，止盈 {float(params.get('take_profit_pct', 0.0)):.1f}%，最多持有 {int(params.get('max_holding_bars', 0))} 根 K 线。",
         *cost_notes,

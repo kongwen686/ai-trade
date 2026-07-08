@@ -58,11 +58,11 @@ from trade_signal_app.views import (
 )
 
 
-def _build_archive(path: Path) -> None:
+def _build_archive(path: Path, *, start: datetime | None = None, bars: int = 180) -> None:
     rows: list[str] = []
-    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    start = start or main_backtest.BACKTEST_SAMPLE_START_AT.astimezone(timezone.utc)
     price = 100.0
-    for index in range(180):
+    for index in range(bars):
         if index < 50:
             price += 0.25
         elif index < 130:
@@ -927,6 +927,35 @@ class MainTests(unittest.TestCase):
         self.assertIn("只有 180 根 K 线", diagnostics)
         self.assertIn("低于当前 lookback 240", diagnostics)
 
+    def test_backtest_payload_excludes_candles_before_sample_start(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive = Path(temp_dir) / "BTCUSDT-4h-2026-07.zip"
+            sample_start_utc = main_backtest.BACKTEST_SAMPLE_START_AT.astimezone(timezone.utc)
+            _build_archive(archive, start=sample_start_utc - timedelta(hours=16))
+            payload, _, error = _backtest_payload(
+                {
+                    "archives": [str(archive)],
+                    "lookback_bars": ["80"],
+                    "score_threshold": ["60"],
+                    "holding_periods": ["3,6"],
+                    "portfolio_top_n": ["0"],
+                    "min_volume_ratio": ["1.0"],
+                    "min_buy_pressure": ["0.5"],
+                    "max_rsi": ["99"],
+                    "no_kdj_confirmation": ["1"],
+                }
+            )
+
+        self.assertIsNone(error)
+        report = payload["series_reports"][0]
+        self.assertEqual(report["candle_count"], 176)
+        diagnostics = " ".join(payload["strategy_explanation"]["diagnostics"])
+        self.assertIn("已排除 4 根", diagnostics)
+        notes = " ".join(payload["strategy_explanation"]["notes"])
+        self.assertIn(main_backtest.BACKTEST_SAMPLE_START_LABEL, notes)
+        for event in report["events"]:
+            self.assertGreaterEqual(datetime.fromisoformat(str(event["entry_time"])), sample_start_utc)
+
     def test_render_backtest_page_includes_extended_controls(self) -> None:
         params = {
             "archives": "data/spot/monthly/klines/*/4h/*.zip",
@@ -1118,6 +1147,17 @@ class MainTests(unittest.TestCase):
                 "autotrade_score_threshold": 75.0,
                 "autotrade_min_volume_ratio": 1.1,
                 "autotrade_min_buy_pressure": 0.52,
+                "autotrade_anti_chase_enabled": True,
+                "autotrade_max_entry_rsi": 72.0,
+                "autotrade_max_entry_price_vs_ema20_pct": 5.0,
+                "autotrade_max_entry_recent_change_pct": 4.0,
+                "autotrade_structure_filter_enabled": True,
+                "autotrade_max_entry_support_distance_pct": 2.5,
+                "autotrade_min_entry_support_strength": 2.0,
+                "autotrade_min_entry_risk_reward_ratio": 1.4,
+                "autotrade_min_entry_resistance_distance_pct": 2.0,
+                "autotrade_support_stop_buffer_pct": 0.6,
+                "autotrade_resistance_take_profit_buffer_pct": 0.4,
                 "autotrade_stop_loss_pct": 4.0,
                 "autotrade_take_profit_pct": 9.0,
                 "autotrade_cooldown_minutes": 240,
@@ -1214,6 +1254,10 @@ class MainTests(unittest.TestCase):
         self.assertIn("Market Data Preset", html)
         self.assertIn("TradingView Username", html)
         self.assertIn("TradingView Symbols", html)
+        self.assertIn("Enable anti-chase filter", html)
+        self.assertIn("Max EMA20 Deviation %", html)
+        self.assertIn("Enable structure filter", html)
+        self.assertIn("Min Structure R/R", html)
         self.assertIn("TradingView 为非官方补充源", html)
         self.assertIn("On-chain Data Preset", html)
         self.assertIn("DefiLlama", html)
@@ -1643,7 +1687,21 @@ class MainTests(unittest.TestCase):
                 "platform": {
                     "generated_at": "2026-04-28T00:00:00+00:00",
                     "components": [],
-                    "accounts": [{"exchange": "BINANCE", "mode": "paper", "status": "paper_ready", "open_positions": 0, "quote_exposure": 0.0}],
+                    "accounts": [
+                        {
+                            "exchange": "BINANCE",
+                            "mode": "paper",
+                            "status": "paper_ready",
+                            "open_positions": 0,
+                            "quote_exposure": 0.0,
+                            "total_trades": 8,
+                            "closed_trades": 4,
+                            "win_rate_pct": 75.0,
+                            "profit_loss_ratio": 2.5,
+                            "profit_factor": 3.0,
+                            "realized_pnl": 16.0,
+                        }
+                    ],
                     "strategies": [{"strategy_id": "auto_score_breakout", "name": "综合评分突破", "status": "watch_only", "trigger": "score >= 75.0", "execution": "paper/live 市价买入", "risk_controls": ["risk_gate"]}],
                     "risk_rules": [{"name": "最大持仓数", "status": "active", "threshold": "3", "action": "拒绝新开仓"}],
                     "recent_events": [],
@@ -1677,6 +1735,21 @@ class MainTests(unittest.TestCase):
                     }
                 ],
                 "events": [],
+                "account_metrics": {
+                    "total_trades": 8,
+                    "buy_trades": 4,
+                    "sell_trades": 4,
+                    "closed_trades": 4,
+                    "winning_trades": 3,
+                    "losing_trades": 1,
+                    "breakeven_trades": 0,
+                    "win_rate_pct": 75.0,
+                    "profit_loss_ratio": 2.5,
+                    "profit_factor": 3.0,
+                    "realized_pnl": 16.0,
+                    "unrealized_pnl": 3.0,
+                    "total_pnl": 19.0,
+                },
             },
             message="模拟量化交易已执行",
             paper_auto_status={
@@ -1695,6 +1768,9 @@ class MainTests(unittest.TestCase):
         self.assertIn('action="/terminal/trading/auto/start"', html)
         self.assertIn('action="/terminal/trading/auto/stop"', html)
         self.assertIn("启动自动策略交易", html)
+        self.assertIn("累计交易次数", html)
+        self.assertIn("盈亏比", html)
+        self.assertIn("75.0%", html)
         self.assertIn("收益率", html)
         self.assertIn("+12.00%", html)
         self.assertIn('sidebar-link active" href="/terminal/trading"', html)
@@ -1806,6 +1882,57 @@ class MainTests(unittest.TestCase):
         )
 
         self.assertEqual([event["message"] for event in payload["events"]], ["newer", "older"])
+
+    def test_serialize_trading_report_includes_paper_account_metrics(self) -> None:
+        buy = TradingEvent(
+            action="BUY",
+            symbol="BTCUSDT",
+            mode="paper",
+            status="paper_filled",
+            message="buy",
+            created_at=datetime(2026, 4, 28, 1, tzinfo=timezone.utc),
+        )
+        win = TradingEvent(
+            action="SELL",
+            symbol="BTCUSDT",
+            mode="paper",
+            status="paper_filled",
+            message="win",
+            realized_pnl=10.0,
+            realized_pnl_pct=10.0,
+            created_at=datetime(2026, 4, 28, 2, tzinfo=timezone.utc),
+        )
+        loss = TradingEvent(
+            action="SELL",
+            symbol="ETHUSDT",
+            mode="paper",
+            status="paper_filled",
+            message="loss",
+            realized_pnl=-4.0,
+            realized_pnl_pct=-4.0,
+            created_at=datetime(2026, 4, 28, 3, tzinfo=timezone.utc),
+        )
+
+        payload = _serialize_trading_report(
+            TradingRunReport(
+                enabled=True,
+                mode="paper",
+                scanned_symbols=2,
+                returned_signals=2,
+                open_positions=[],
+                events=[buy, win, loss],
+            )
+        )
+
+        metrics = payload["account_metrics"]
+        self.assertEqual(metrics["total_trades"], 3)
+        self.assertEqual(metrics["closed_trades"], 2)
+        self.assertEqual(metrics["winning_trades"], 1)
+        self.assertEqual(metrics["losing_trades"], 1)
+        self.assertEqual(metrics["win_rate_pct"], 50.0)
+        self.assertEqual(metrics["profit_loss_ratio"], 2.5)
+        self.assertEqual(metrics["profit_factor"], 2.5)
+        self.assertEqual(metrics["realized_pnl"], 6.0)
 
     def test_onchain_module_loads_without_terminal_scan(self) -> None:
         config = RuntimeConfig()
@@ -1919,10 +2046,28 @@ class MainTests(unittest.TestCase):
             },
             positions=[],
             events=[],
+            account_metrics={
+                "total_trades": 12,
+                "buy_trades": 7,
+                "sell_trades": 5,
+                "closed_trades": 5,
+                "winning_trades": 3,
+                "losing_trades": 2,
+                "breakeven_trades": 0,
+                "win_rate_pct": 60.0,
+                "profit_loss_ratio": 1.8,
+                "profit_factor": 2.2,
+                "realized_pnl": 18.0,
+                "unrealized_pnl": 3.0,
+                "total_pnl": 21.0,
+            },
         )
 
         self.assertIn("AI Trade Auto Execution", html)
         self.assertIn("运行一次自动交易", html)
+        self.assertIn("累计交易次数", html)
+        self.assertIn("盈亏比", html)
+        self.assertIn("60.0%", html)
         self.assertIn("持仓", html)
         self.assertIn("执行事件", html)
         self.assertIn('href="#trading-positions"', html)
@@ -2059,6 +2204,100 @@ class MainTests(unittest.TestCase):
         self.assertEqual(payload["events"][0]["status"], "paper_filled")
         self.assertEqual(payload["open_positions"][0]["symbol"], "BTCUSDT")
         notifier.notify_trade.assert_called_once()
+
+    def test_forced_paper_trading_run_waits_for_pullback_on_spike(self) -> None:
+        signal = SimpleNamespace(
+            symbol="BTCUSDT",
+            score=84.0,
+            grade="A",
+            reasons=["EMA20/EMA50 多头排列", "MACD 动能转强"],
+            ticker=SimpleNamespace(
+                last_price=100.0,
+                price_change_percent=8.0,
+                quote_volume=20_000_000.0,
+            ),
+            indicators=SimpleNamespace(
+                volume_ratio=1.6,
+                buy_pressure_ratio=0.63,
+                ema_spread_pct=1.2,
+                rsi_14=78.0,
+                price_vs_ema20_pct=8.0,
+                recent_change_pct=6.0,
+            ),
+        )
+        scanner = SimpleNamespace(
+            scan=lambda: (SimpleNamespace(scanned_symbols=10, returned_signals=1), [signal]),
+        )
+        config = RuntimeConfig()
+        config.autotrade_defaults.enabled = False
+        config.autotrade_defaults.mode = "live"
+        config.autotrade_defaults.quote_order_qty = 25.0
+        config.autotrade_defaults.score_threshold = 75.0
+        notifier = Mock()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            with (
+                patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, scanner)),
+                patch("trade_signal_app.main._trading_store", return_value=store),
+                patch("trade_signal_app.main._feishu_trade_notifier", return_value=notifier),
+                patch("trade_signal_app.main._fast_risk_module_payload", return_value={"execution_risk": {"blocked_symbols": {}}}),
+            ):
+                payload = _run_trading_once(force_paper=True)
+
+        self.assertEqual(payload["open_positions"], [])
+        self.assertEqual(payload["events"][0]["status"], "wait_pullback")
+        self.assertIn("等待回调", payload["events"][0]["message"])
+        notifier.notify_trade.assert_not_called()
+
+    def test_forced_paper_trading_run_waits_for_support_on_poor_structure(self) -> None:
+        signal = SimpleNamespace(
+            symbol="BTCUSDT",
+            score=84.0,
+            grade="A",
+            reasons=["EMA20/EMA50 多头排列", "MACD 动能转强"],
+            ticker=SimpleNamespace(
+                last_price=100.0,
+                price_change_percent=2.0,
+                quote_volume=20_000_000.0,
+            ),
+            indicators=SimpleNamespace(
+                volume_ratio=1.6,
+                buy_pressure_ratio=0.63,
+                ema_spread_pct=1.2,
+                rsi_14=58.0,
+                price_vs_ema20_pct=1.5,
+                recent_change_pct=1.0,
+                support_level=94.0,
+                resistance_level=101.0,
+                support_distance_pct=6.0,
+                resistance_distance_pct=1.0,
+                support_strength=1.0,
+                structure_risk_reward=0.4,
+            ),
+        )
+        scanner = SimpleNamespace(
+            scan=lambda: (SimpleNamespace(scanned_symbols=10, returned_signals=1), [signal]),
+        )
+        config = RuntimeConfig()
+        config.autotrade_defaults.enabled = False
+        config.autotrade_defaults.mode = "live"
+        config.autotrade_defaults.quote_order_qty = 25.0
+        config.autotrade_defaults.score_threshold = 75.0
+        notifier = Mock()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            with (
+                patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, scanner)),
+                patch("trade_signal_app.main._trading_store", return_value=store),
+                patch("trade_signal_app.main._feishu_trade_notifier", return_value=notifier),
+                patch("trade_signal_app.main._fast_risk_module_payload", return_value={"execution_risk": {"blocked_symbols": {}}}),
+            ):
+                payload = _run_trading_once(force_paper=True)
+
+        self.assertEqual(payload["open_positions"], [])
+        self.assertEqual(payload["events"][0]["status"], "wait_support")
+        self.assertIn("等待更合理买点", payload["events"][0]["message"])
+        notifier.notify_trade.assert_not_called()
 
     def test_forced_paper_trading_run_closes_positions_on_exit_rules(self) -> None:
         def signal(symbol: str, price: float) -> SimpleNamespace:
@@ -2199,6 +2438,17 @@ class MainTests(unittest.TestCase):
                     "autotrade_score_threshold": ["78"],
                     "autotrade_min_volume_ratio": ["1.2"],
                     "autotrade_min_buy_pressure": ["0.58"],
+                    "autotrade_anti_chase_enabled": ["on"],
+                    "autotrade_max_entry_rsi": ["70"],
+                    "autotrade_max_entry_price_vs_ema20_pct": ["4.5"],
+                    "autotrade_max_entry_recent_change_pct": ["3.5"],
+                    "autotrade_structure_filter_enabled": ["on"],
+                    "autotrade_max_entry_support_distance_pct": ["2.2"],
+                    "autotrade_min_entry_support_strength": ["2.5"],
+                    "autotrade_min_entry_risk_reward_ratio": ["1.8"],
+                    "autotrade_min_entry_resistance_distance_pct": ["2.8"],
+                    "autotrade_support_stop_buffer_pct": ["0.7"],
+                    "autotrade_resistance_take_profit_buffer_pct": ["0.5"],
                     "autotrade_stop_loss_pct": ["3"],
                     "autotrade_take_profit_pct": ["8"],
                     "autotrade_trend_hold_enabled": ["on"],
@@ -2292,6 +2542,17 @@ class MainTests(unittest.TestCase):
         self.assertEqual(config.autotrade_defaults.risk_per_trade_pct, 6.0)
         self.assertEqual(config.autotrade_defaults.exit_profile, "trend_following")
         self.assertEqual(config.autotrade_defaults.max_open_positions, 2)
+        self.assertTrue(config.autotrade_defaults.anti_chase_enabled)
+        self.assertEqual(config.autotrade_defaults.max_entry_rsi, 70.0)
+        self.assertEqual(config.autotrade_defaults.max_entry_price_vs_ema20_pct, 4.5)
+        self.assertEqual(config.autotrade_defaults.max_entry_recent_change_pct, 3.5)
+        self.assertTrue(config.autotrade_defaults.structure_filter_enabled)
+        self.assertEqual(config.autotrade_defaults.max_entry_support_distance_pct, 2.2)
+        self.assertEqual(config.autotrade_defaults.min_entry_support_strength, 2.5)
+        self.assertEqual(config.autotrade_defaults.min_entry_risk_reward_ratio, 1.8)
+        self.assertEqual(config.autotrade_defaults.min_entry_resistance_distance_pct, 2.8)
+        self.assertEqual(config.autotrade_defaults.support_stop_buffer_pct, 0.7)
+        self.assertEqual(config.autotrade_defaults.resistance_take_profit_buffer_pct, 0.5)
         self.assertTrue(config.autotrade_defaults.trend_hold_enabled)
         self.assertEqual(config.autotrade_defaults.trend_hold_min_score, 86.0)
         self.assertEqual(config.autotrade_defaults.trend_hold_min_volume_ratio, 1.4)

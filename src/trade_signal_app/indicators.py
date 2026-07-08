@@ -88,6 +88,51 @@ def stochastic_kdj(highs: list[float], lows: list[float], closes: list[float], p
     return k_values, d_values, j_values
 
 
+def _level_strength(values: list[float], level: float, tolerance_pct: float = 0.006) -> float:
+    if level <= 0:
+        return 0.0
+    tolerance = level * tolerance_pct
+    return float(sum(1 for value in values if abs(value - level) <= tolerance))
+
+
+def _nearest_structure_levels(
+    *,
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+    lookback: int = 48,
+) -> dict[str, float]:
+    latest_close = closes[-1]
+    start = max(0, len(closes) - lookback)
+    previous_lows = lows[start:-1] or lows[start:]
+    previous_highs = highs[start:-1] or highs[start:]
+    support_candidates = [low for low in previous_lows if low <= latest_close]
+    resistance_candidates = [high for high in previous_highs if high >= latest_close]
+
+    support_level = max(support_candidates) if support_candidates else min(previous_lows)
+    resistance_level = min(resistance_candidates) if resistance_candidates else max(previous_highs)
+    support_distance_pct = ((latest_close - support_level) / latest_close) * 100 if latest_close and support_level <= latest_close else 0.0
+    resistance_distance_pct = ((resistance_level - latest_close) / latest_close) * 100 if latest_close and resistance_level > latest_close else 0.0
+    support_strength = _level_strength(previous_lows, support_level)
+    resistance_strength = _level_strength(previous_highs, resistance_level)
+    recent_high = max(previous_highs + [highs[-1]])
+    pullback_from_high_pct = ((recent_high - latest_close) / recent_high) * 100 if recent_high else 0.0
+    risk_pct = max(support_distance_pct + 0.6, 0.1)
+    reward_pct = max(resistance_distance_pct - 0.4, 0.0)
+    structure_risk_reward = reward_pct / risk_pct if risk_pct else 0.0
+
+    return {
+        "support_level": support_level,
+        "resistance_level": resistance_level,
+        "support_distance_pct": support_distance_pct,
+        "resistance_distance_pct": resistance_distance_pct,
+        "support_strength": support_strength,
+        "resistance_strength": resistance_strength,
+        "structure_risk_reward": structure_risk_reward,
+        "pullback_from_high_pct": pullback_from_high_pct,
+    }
+
+
 def build_indicator_snapshot(candles: list[Candlestick]) -> IndicatorSnapshot:
     if len(candles) < 60:
         raise ValueError("At least 60 klines are required to compute stable indicators.")
@@ -112,6 +157,7 @@ def build_indicator_snapshot(candles: list[Candlestick]) -> IndicatorSnapshot:
     previous_volume_window = volumes[-21:-1] if len(volumes) >= 21 else volumes[:-1]
     avg_volume = sum(previous_volume_window) / max(len(previous_volume_window), 1)
     volume_ratio = volumes[-1] / avg_volume if avg_volume else 1.0
+    structure = _nearest_structure_levels(highs=highs, lows=lows, closes=closes)
 
     return IndicatorSnapshot(
         close_price=latest_close,
@@ -132,5 +178,13 @@ def build_indicator_snapshot(candles: list[Candlestick]) -> IndicatorSnapshot:
         volume_ratio=volume_ratio,
         buy_pressure_ratio=taker_buy_ratios[-1],
         recent_change_pct=((latest_close - closes[-7]) / closes[-7]) * 100 if len(closes) > 6 and closes[-7] else 0.0,
+        support_level=structure["support_level"],
+        resistance_level=structure["resistance_level"],
+        support_distance_pct=structure["support_distance_pct"],
+        resistance_distance_pct=structure["resistance_distance_pct"],
+        support_strength=structure["support_strength"],
+        resistance_strength=structure["resistance_strength"],
+        structure_risk_reward=structure["structure_risk_reward"],
+        pullback_from_high_pct=structure["pullback_from_high_pct"],
         closes=closes[-48:],
     )

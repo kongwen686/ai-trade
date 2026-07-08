@@ -146,6 +146,8 @@ def build_reasons(ticker: MarketTicker, indicators: IndicatorSnapshot, community
         reasons.append("KDJ 上拐确认")
     if ticker.price_change_percent > 0:
         reasons.append(f"24h 涨幅 {ticker.price_change_percent:.2f}%")
+    if indicators.support_level > 0 and indicators.support_distance_pct <= 2.5 and indicators.support_strength >= 2:
+        reasons.append(f"靠近结构支撑 {indicators.support_distance_pct:.1f}%")
     if community_signal and community_signal.score >= 70:
         reasons.append(f"社区热度较高 ({community_signal.source})")
 
@@ -157,5 +159,9 @@ def build_reasons(ticker: MarketTicker, indicators: IndicatorSnapshot, community
         warnings.append("最近一根 K 线量能不足")
     if ticker.price_change_percent <= -3:
         warnings.append("24h 价格仍偏弱")
+    if indicators.structure_risk_reward and indicators.structure_risk_reward < 1.4:
+        warnings.append(f"结构盈亏比偏低 {indicators.structure_risk_reward:.2f}")
+    if indicators.support_level > 0 and indicators.support_distance_pct > 2.5:
+        warnings.append("当前价距离结构支撑偏远")
 
     return reasons[:4], warnings[:3]

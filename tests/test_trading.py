@@ -8,16 +8,43 @@ import unittest
 from unittest.mock import patch
 
 from trade_signal_app.runtime_config import AutoTradeDefaults
-from trade_signal_app.trading import AutoTrader, LIVE_CONFIRM_VALUE, TradingPosition, TradingStateStore
+from trade_signal_app.time_utils import now_app_time
+from trade_signal_app.trading import AutoTrader, LIVE_CONFIRM_VALUE, TradingEvent, TradingPosition, TradingStateStore
 
 
-def _signal(symbol: str = "BTCUSDT", score: float = 82.0, price: float = 100.0) -> SimpleNamespace:
+def _signal(
+    symbol: str = "BTCUSDT",
+    score: float = 82.0,
+    price: float = 100.0,
+    *,
+    rsi: float = 50.0,
+    price_vs_ema20_pct: float = 0.0,
+    recent_change_pct: float = 0.0,
+    support_level: float = 0.0,
+    resistance_level: float = 0.0,
+    support_distance_pct: float = 0.0,
+    resistance_distance_pct: float = 0.0,
+    support_strength: float = 0.0,
+    structure_risk_reward: float = 0.0,
+) -> SimpleNamespace:
     return SimpleNamespace(
         symbol=symbol,
         score=score,
         grade="A",
         ticker=SimpleNamespace(last_price=price),
-        indicators=SimpleNamespace(volume_ratio=1.4, buy_pressure_ratio=0.62),
+        indicators=SimpleNamespace(
+            volume_ratio=1.4,
+            buy_pressure_ratio=0.62,
+            rsi_14=rsi,
+            price_vs_ema20_pct=price_vs_ema20_pct,
+            recent_change_pct=recent_change_pct,
+            support_level=support_level,
+            resistance_level=resistance_level,
+            support_distance_pct=support_distance_pct,
+            resistance_distance_pct=resistance_distance_pct,
+            support_strength=support_strength,
+            structure_risk_reward=structure_risk_reward,
+        ),
     )
 
 
@@ -227,6 +254,60 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(report.events[0].status, "emergency_drawdown")
         self.assertEqual(notifier.calls, [("ALERT", "BTCUSDT", "BTCUSDT")])
 
+    def test_emergency_drawdown_alert_respects_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            store.save(
+                [
+                    TradingPosition(
+                        symbol="BTCUSDT",
+                        quantity=1.0,
+                        entry_price=100.0,
+                        quote_notional=100.0,
+                        score=82.0,
+                        grade="A",
+                        opened_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                        stop_price=96.0,
+                        take_profit_price=120.0,
+                        mode="paper",
+                        highest_price=110.0,
+                    )
+                ]
+            )
+            store.append_events(
+                [
+                    TradingEvent(
+                        action="ALERT",
+                        symbol="BTCUSDT",
+                        mode="paper",
+                        status="emergency_drawdown",
+                        message="recent alert",
+                        price=107.0,
+                        quantity=1.0,
+                        quote_notional=100.0,
+                        created_at=now_app_time(),
+                    )
+                ]
+            )
+            scanner = FakeScanner([_signal(score=10.0, price=106.0)])
+            notifier = FakeTradeNotifier()
+            trader = AutoTrader(scanner=scanner, state_store=store, trade_notifier=notifier)
+
+            report = trader.run_once(
+                AutoTradeDefaults(
+                    enabled=True,
+                    mode="paper",
+                    score_threshold=99.0,
+                    profit_protection_enabled=False,
+                    emergency_drawdown_pct=2.5,
+                    cooldown_minutes=240,
+                )
+            )
+
+        self.assertEqual(report.open_positions[0].symbol, "BTCUSDT")
+        self.assertEqual(report.events, [])
+        self.assertEqual(notifier.calls, [])
+
     def test_risk_blocked_symbol_does_not_open_position(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = TradingStateStore(Path(temp_dir) / "state.json")
@@ -250,6 +331,102 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(len(report.open_positions), 0)
         self.assertEqual(report.events[0].status, "risk_blocked")
         self.assertEqual(stored_events[0].status, "risk_blocked")
+
+    def test_paper_run_waits_for_pullback_after_short_term_spike(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            scanner = FakeScanner(
+                [
+                    _signal(
+                        rsi=78.0,
+                        price_vs_ema20_pct=8.0,
+                        recent_change_pct=6.2,
+                    )
+                ]
+            )
+            notifier = FakeTradeNotifier()
+            trader = AutoTrader(scanner=scanner, state_store=store, trade_notifier=notifier)
+
+            report = trader.run_once(
+                AutoTradeDefaults(
+                    enabled=True,
+                    mode="paper",
+                    quote_order_qty=50.0,
+                    score_threshold=75.0,
+                )
+            )
+            stored_events = store.load_events()
+
+        self.assertEqual(report.open_positions, [])
+        self.assertEqual(report.events[0].status, "wait_pullback")
+        self.assertIn("等待回调", report.events[0].message)
+        self.assertEqual(stored_events[0].status, "wait_pullback")
+        self.assertEqual(notifier.calls, [])
+
+    def test_paper_run_waits_for_support_when_structure_risk_reward_is_weak(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            scanner = FakeScanner(
+                [
+                    _signal(
+                        support_level=94.0,
+                        resistance_level=101.0,
+                        support_distance_pct=6.0,
+                        resistance_distance_pct=1.0,
+                        support_strength=1.0,
+                        structure_risk_reward=0.4,
+                    )
+                ]
+            )
+            notifier = FakeTradeNotifier()
+            trader = AutoTrader(scanner=scanner, state_store=store, trade_notifier=notifier)
+
+            report = trader.run_once(
+                AutoTradeDefaults(
+                    enabled=True,
+                    mode="paper",
+                    quote_order_qty=50.0,
+                    score_threshold=75.0,
+                )
+            )
+
+        self.assertEqual(report.open_positions, [])
+        self.assertEqual(report.events[0].status, "wait_support")
+        self.assertIn("等待更合理买点", report.events[0].message)
+        self.assertEqual(notifier.calls, [])
+
+    def test_paper_entry_uses_structure_stop_and_resistance_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            scanner = FakeScanner(
+                [
+                    _signal(
+                        price=100.0,
+                        support_level=98.0,
+                        resistance_level=106.0,
+                        support_distance_pct=2.0,
+                        resistance_distance_pct=6.0,
+                        support_strength=3.0,
+                        structure_risk_reward=2.0,
+                    )
+                ]
+            )
+            trader = AutoTrader(scanner=scanner, state_store=store)
+
+            report = trader.run_once(
+                AutoTradeDefaults(
+                    enabled=True,
+                    mode="paper",
+                    quote_order_qty=50.0,
+                    score_threshold=75.0,
+                    stop_loss_pct=4.0,
+                    take_profit_pct=9.0,
+                )
+            )
+
+        self.assertEqual(len(report.open_positions), 1)
+        self.assertAlmostEqual(report.open_positions[0].stop_price, 97.412)
+        self.assertAlmostEqual(report.open_positions[0].take_profit_price, 105.576)
 
     def test_live_run_is_blocked_without_confirmation_env(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -62,6 +62,14 @@ class IndicatorSnapshot:
     volume_ratio: float
     buy_pressure_ratio: float
     recent_change_pct: float
+    support_level: float = 0.0
+    resistance_level: float = 0.0
+    support_distance_pct: float = 0.0
+    resistance_distance_pct: float = 0.0
+    support_strength: float = 0.0
+    resistance_strength: float = 0.0
+    structure_risk_reward: float = 0.0
+    pullback_from_high_pct: float = 0.0
     closes: list[float] = field(default_factory=list)
 
 

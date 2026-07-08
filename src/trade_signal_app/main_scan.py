@@ -13,7 +13,7 @@ from .time_utils import now_app_time
 from .ui import format_signal_row
 
 SCAN_SYNC_TIMEOUT_SECONDS = 0.8
-SCAN_INTERVALS = {"15m", "1h", "4h", "1d"}
+SCAN_INTERVALS = {"15m", "1h", "2h", "4h", "1d"}
 SCAN_VIEW_MODES = {"cards", "table"}
 _SCAN_CACHE_LOCK = RLock()
 _SCAN_PAYLOAD_CACHE: dict[tuple[object, ...], tuple[datetime, dict[str, object]]] = {}
@@ -145,7 +145,18 @@ def _format_scan_signal_row(signal: object) -> dict[str, object]:
             "price_change_percent": float(getattr(ticker, "price_change_percent", 0.0) or 0.0),
             "rsi_14": float(getattr(indicators, "rsi_14", 50.0) or 50.0),
             "ema_spread_pct": float(getattr(indicators, "ema_spread_pct", 0.0) or 0.0),
+            "price_vs_ema20_pct": float(getattr(indicators, "price_vs_ema20_pct", 0.0) or 0.0),
+            "recent_change_pct": float(getattr(indicators, "recent_change_pct", 0.0) or 0.0),
+            "support_level": float(getattr(indicators, "support_level", 0.0) or 0.0),
+            "resistance_level": float(getattr(indicators, "resistance_level", 0.0) or 0.0),
+            "support_distance_pct": float(getattr(indicators, "support_distance_pct", 0.0) or 0.0),
+            "resistance_distance_pct": float(getattr(indicators, "resistance_distance_pct", 0.0) or 0.0),
+            "support_strength": float(getattr(indicators, "support_strength", 0.0) or 0.0),
+            "resistance_strength": float(getattr(indicators, "resistance_strength", 0.0) or 0.0),
+            "structure_risk_reward": float(getattr(indicators, "structure_risk_reward", 0.0) or 0.0),
+            "pullback_from_high_pct": float(getattr(indicators, "pullback_from_high_pct", 0.0) or 0.0),
             "volume_ratio": float(getattr(indicators, "volume_ratio", 1.0) or 1.0),
+            "buy_pressure_ratio": float(getattr(indicators, "buy_pressure_ratio", 0.5) or 0.5),
             "macd_hist": float(getattr(indicators, "macd_hist", 0.0) or 0.0),
             "community_score": None,
             "community_source": None,
@@ -257,7 +268,18 @@ def _fallback_scan_payload(params: dict[str, object], warning: str, *, scanner: 
                 "price_change_percent": ticker.price_change_percent,
                 "rsi_14": 50.0,
                 "ema_spread_pct": 0.0,
+                "price_vs_ema20_pct": 0.0,
+                "recent_change_pct": 0.0,
+                "support_level": 0.0,
+                "resistance_level": 0.0,
+                "support_distance_pct": 0.0,
+                "resistance_distance_pct": 0.0,
+                "support_strength": 0.0,
+                "resistance_strength": 0.0,
+                "structure_risk_reward": 0.0,
+                "pullback_from_high_pct": 0.0,
                 "volume_ratio": 1.0,
+                "buy_pressure_ratio": 0.5,
                 "macd_hist": 0.0,
                 "community_score": None,
                 "community_source": None,

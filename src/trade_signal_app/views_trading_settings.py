@@ -3,7 +3,7 @@ from __future__ import annotations
 from html import escape
 
 from .views_common import _backtest_preset_options, _display_value, _hidden_lang_input, _layout, _module_tabs, _option, _option_with_label, _text, _url, normalize_language
-from .views_components import _trading_event_rows, _trading_position_rows
+from .views_components import _trading_account_metric_cards, _trading_event_rows, _trading_position_rows
 
 
 def _settings_description_map(lang: str) -> dict[str, str]:
@@ -75,6 +75,17 @@ def _settings_description_map(lang: str) -> dict[str, str]:
         "Score Threshold": ("信号分数达到该阈值才允许进入候选或回测交易。", "Signal score must reach this threshold before trading or backtesting entries."),
         "Min Volume Ratio": ("量能放大倍数门槛，低于该值会过滤。", "Minimum volume expansion ratio."),
         "Min Buy Pressure": ("主动买入占比门槛，用于过滤买盘不足的信号。", "Minimum taker-buy pressure ratio."),
+        "Enable anti-chase filter": ("开启后，高分但短线急拉、RSI 过热或远离 EMA20 的信号会先等待回调，不会立即开仓。", "When enabled, high-score signals that are extended, overheated, or far above EMA20 wait for a pullback instead of entering immediately."),
+        "Max Entry RSI": ("允许自动买入的最高 RSI；超过后视为短线过热。", "Maximum RSI allowed for automated entries; higher values are treated as overheated."),
+        "Max EMA20 Deviation %": ("价格高于 EMA20 的最大允许偏离，超过后避免追高。", "Maximum allowed price deviation above EMA20 before avoiding a chase entry."),
+        "Max Recent Change %": ("近 7 根K线涨幅上限，用于过滤刚快速拉升后的候选。", "Maximum gain over the recent 7 candles before filtering spike entries."),
+        "Enable structure filter": ("开启后，自动买入前必须通过结构支撑、上方阻力空间和盈亏比检查。", "When enabled, automated entries must pass support, resistance-room, and risk/reward checks."),
+        "Max Support Distance %": ("入场价距离最近结构支撑的最大允许距离；越小越强调贴近支撑买入。", "Maximum distance from entry to nearest structural support."),
+        "Min Support Strength": ("支撑位附近历史触碰次数下限；量能/社区强时可略微降低有效门槛。", "Minimum historical touches around support; strong volume/community slightly relaxes the effective threshold."),
+        "Min Structure R/R": ("按支撑止损和阻力目标估算的最低结构盈亏比。", "Minimum structure risk/reward based on support stop and resistance target."),
+        "Min Resistance Room %": ("上方阻力或目标空间太近时等待更合理买点。", "Minimum room to overhead resistance/target."),
+        "Support Stop Buffer %": ("结构止损放在支撑下方的缓冲比例。", "Buffer below support for structure-based stop."),
+        "Resistance TP Buffer %": ("结构止盈放在阻力前方的缓冲比例。", "Buffer before resistance for structure-based take profit."),
         "Stop Loss %": ("价格相对入场价下跌到该比例时触发止损。", "Stop loss percentage from entry price."),
         "Take Profit %": ("价格相对入场价上涨到该比例时触发止盈。", "Take profit percentage from entry price."),
         "Enable profit protection": ("开启后，浮盈达到触发阈值会自动抬高止损，避免盈利单回撤成亏损单。", "Raises the stop after a profit threshold so winners do not fall back into losing trades."),
@@ -135,6 +146,7 @@ def render_trading_page(
     config: dict[str, object],
     positions: list[dict[str, object]],
     events: list[dict[str, object]],
+    account_metrics: dict[str, object] | None = None,
     readiness: dict[str, object] | None = None,
     lang: str = "zh",
     layout_context: dict[str, object] | None = None,
@@ -143,6 +155,28 @@ def render_trading_page(
     t = lambda zh, en: _text(active_lang, zh, en)
     exposure = sum(float(position["quote_notional"]) for position in positions)
     realized_pnl = sum(float(event["realized_pnl"]) for event in events if event.get("realized_pnl") is not None)
+    fallback_realized_values = [float(event["realized_pnl"]) for event in events if event.get("realized_pnl") is not None]
+    fallback_wins = [value for value in fallback_realized_values if value > 0]
+    fallback_losses = [value for value in fallback_realized_values if value < 0]
+    fallback_gross_profit = sum(fallback_wins)
+    fallback_gross_loss = abs(sum(fallback_losses))
+    fallback_avg_win = fallback_gross_profit / len(fallback_wins) if fallback_wins else 0.0
+    fallback_avg_loss = fallback_gross_loss / len(fallback_losses) if fallback_losses else 0.0
+    account_metrics = account_metrics or {
+        "total_trades": sum(1 for event in events if event.get("action") in {"BUY", "SELL"} and event.get("status") in {"filled", "paper_filled"}),
+        "buy_trades": sum(1 for event in events if event.get("action") == "BUY" and event.get("status") in {"filled", "paper_filled"}),
+        "sell_trades": sum(1 for event in events if event.get("action") == "SELL" and event.get("status") in {"filled", "paper_filled"}),
+        "closed_trades": len(fallback_realized_values),
+        "winning_trades": len(fallback_wins),
+        "losing_trades": len(fallback_losses),
+        "breakeven_trades": sum(1 for value in fallback_realized_values if value == 0),
+        "win_rate_pct": (len(fallback_wins) / len(fallback_realized_values)) * 100 if fallback_realized_values else 0.0,
+        "profit_loss_ratio": (fallback_avg_win / fallback_avg_loss) if fallback_avg_loss else (999.0 if fallback_avg_win else 0.0),
+        "profit_factor": (fallback_gross_profit / fallback_gross_loss) if fallback_gross_loss else (999.0 if fallback_gross_profit else 0.0),
+        "realized_pnl": realized_pnl,
+        "unrealized_pnl": sum(float(position.get("unrealized_pnl") or 0.0) for position in positions),
+        "total_pnl": realized_pnl + sum(float(position.get("unrealized_pnl") or 0.0) for position in positions),
+    }
     readiness = readiness or {}
     blockers = readiness.get("blockers") if isinstance(readiness.get("blockers"), list) else []
     exchange_status = readiness.get("exchange_status") if isinstance(readiness.get("exchange_status"), dict) else {}
@@ -180,9 +214,14 @@ def render_trading_page(
         <small>{t("上限", "limit")} {float(config["max_total_quote_exposure"]):.0f}</small>
       </div>
       <div class="ant-statistic-card stat-card">
-        <span>{t("已实现盈亏", "Realized PnL")}</span>
-        <strong>{realized_pnl:+.2f}</strong>
-        <small>{t("最近事件", "recent events")}</small>
+        <span>{t("累计交易", "Total Trades")}</span>
+        <strong>{int(float(account_metrics.get("total_trades") or 0))}</strong>
+        <small>{t("平仓", "closed")} {int(float(account_metrics.get("closed_trades") or 0))}</small>
+      </div>
+      <div class="ant-statistic-card stat-card">
+        <span>{t("胜率", "Win Rate")}</span>
+        <strong>{float(account_metrics.get("win_rate_pct") or 0.0):.1f}%</strong>
+        <small>{t("盈亏比", "P/L")} {float(account_metrics.get("profit_loss_ratio") or 0.0):.2f}</small>
       </div>
       <div class="ant-statistic-card stat-card">
         <span>{t("交易所授权", "Exchange Auth")}</span>
@@ -221,6 +260,7 @@ def render_trading_page(
           <div class="mini-stat"><span>{t("浮盈保护", "Profit Guard")}</span><strong>{float(config.get("profit_protection_trigger_pct", 0)):.1f}%</strong><small>{t("锁盈", "lock")} {float(config.get("profit_protection_lock_pct", 0)):.1f}%</small></div>
           <div class="mini-stat"><span>{t("移动止损", "Trailing Stop")}</span><strong>{float(config.get("trailing_stop_pct", 0)):.1f}%</strong></div>
         </div>
+        {_trading_account_metric_cards(account_metrics, active_lang)}
       </section>
 
       <section id="trading-positions" class="ant-section section-block">
@@ -503,7 +543,7 @@ def render_settings_page(
           <div class="settings-group-head"><h3>扫描候选池</h3><p>控制扫描范围、周期和基础流动性过滤，避免低质量标的拖慢页面。</p></div>
           <div class="settings-grid settings-grid-compact">
           <label><span>Quote Asset</span><input type="text" name="scan_quote_asset" value="{escape(str(params['scan_quote_asset']))}" /></label>
-          <label><span>Scan Interval</span><select name="scan_interval">{''.join(_option(item, str(params['scan_interval'])) for item in ['15m', '1h', '4h', '1d'])}</select></label>
+          <label><span>Scan Interval</span><select name="scan_interval">{''.join(_option(item, str(params['scan_interval'])) for item in ['15m', '1h', '2h', '4h', '1d'])}</select></label>
           <label><span>Candidate Pool</span><input type="number" min="5" max="40" name="scan_candidate_pool" value="{int(params['scan_candidate_pool'])}" /></label>
           <label><span>Min Quote Volume</span><input type="number" min="1000000" step="1000000" name="scan_min_quote_volume" value="{int(params['scan_min_quote_volume'])}" /></label>
           <label><span>Min Trade Count</span><input type="number" min="100" step="100" name="scan_min_trade_count" value="{int(params['scan_min_trade_count'])}" /></label>
@@ -543,6 +583,17 @@ def render_settings_page(
           <label><span>Score Threshold</span><input type="number" step="0.1" min="0" max="100" name="autotrade_score_threshold" value="{float(params['autotrade_score_threshold']):.1f}" /></label>
           <label><span>Min Volume Ratio</span><input type="number" step="0.01" min="0" name="autotrade_min_volume_ratio" value="{float(params['autotrade_min_volume_ratio']):.2f}" /></label>
           <label><span>Min Buy Pressure</span><input type="number" step="0.01" min="0" max="1" name="autotrade_min_buy_pressure" value="{float(params['autotrade_min_buy_pressure']):.2f}" /></label>
+          <label class="inline-check"><input type="hidden" name="autotrade_anti_chase_enabled" value="0" /><input type="checkbox" name="autotrade_anti_chase_enabled" value="1" {"checked" if params.get("autotrade_anti_chase_enabled") else ""} /><span>Enable anti-chase filter</span></label>
+          <label><span>Max Entry RSI</span><input type="number" step="0.1" min="0" max="100" name="autotrade_max_entry_rsi" value="{float(params.get('autotrade_max_entry_rsi', 72.0)):.1f}" /></label>
+          <label><span>Max EMA20 Deviation %</span><input type="number" step="0.1" min="0" name="autotrade_max_entry_price_vs_ema20_pct" value="{float(params.get('autotrade_max_entry_price_vs_ema20_pct', 5.0)):.1f}" /></label>
+          <label><span>Max Recent Change %</span><input type="number" step="0.1" min="0" name="autotrade_max_entry_recent_change_pct" value="{float(params.get('autotrade_max_entry_recent_change_pct', 4.0)):.1f}" /></label>
+          <label class="inline-check"><input type="hidden" name="autotrade_structure_filter_enabled" value="0" /><input type="checkbox" name="autotrade_structure_filter_enabled" value="1" {"checked" if params.get("autotrade_structure_filter_enabled") else ""} /><span>Enable structure filter</span></label>
+          <label><span>Max Support Distance %</span><input type="number" step="0.1" min="0" name="autotrade_max_entry_support_distance_pct" value="{float(params.get('autotrade_max_entry_support_distance_pct', 2.5)):.1f}" /></label>
+          <label><span>Min Support Strength</span><input type="number" step="0.1" min="0" name="autotrade_min_entry_support_strength" value="{float(params.get('autotrade_min_entry_support_strength', 2.0)):.1f}" /></label>
+          <label><span>Min Structure R/R</span><input type="number" step="0.1" min="0" name="autotrade_min_entry_risk_reward_ratio" value="{float(params.get('autotrade_min_entry_risk_reward_ratio', 1.4)):.1f}" /></label>
+          <label><span>Min Resistance Room %</span><input type="number" step="0.1" min="0" name="autotrade_min_entry_resistance_distance_pct" value="{float(params.get('autotrade_min_entry_resistance_distance_pct', 2.0)):.1f}" /></label>
+          <label><span>Support Stop Buffer %</span><input type="number" step="0.1" min="0" name="autotrade_support_stop_buffer_pct" value="{float(params.get('autotrade_support_stop_buffer_pct', 0.6)):.1f}" /></label>
+          <label><span>Resistance TP Buffer %</span><input type="number" step="0.1" min="0" name="autotrade_resistance_take_profit_buffer_pct" value="{float(params.get('autotrade_resistance_take_profit_buffer_pct', 0.4)):.1f}" /></label>
           <label><span>Stop Loss %</span><input type="number" step="0.1" min="0.1" name="autotrade_stop_loss_pct" value="{float(params['autotrade_stop_loss_pct']):.1f}" /></label>
           <label><span>Take Profit %</span><input type="number" step="0.1" min="0.1" name="autotrade_take_profit_pct" value="{float(params['autotrade_take_profit_pct']):.1f}" /></label>
           <label class="inline-check"><input type="hidden" name="autotrade_profit_protection_enabled" value="0" /><input type="checkbox" name="autotrade_profit_protection_enabled" value="1" {"checked" if params.get("autotrade_profit_protection_enabled") else ""} /><span>Enable profit protection</span></label>

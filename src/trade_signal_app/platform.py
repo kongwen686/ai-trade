@@ -47,8 +47,20 @@ class AccountSnapshot:
     quote_exposure: float
     max_quote_exposure: float
     realized_pnl: float = 0.0
+    total_trades: int = 0
+    buy_trades: int = 0
+    sell_trades: int = 0
     closed_trades: int = 0
+    winning_trades: int = 0
+    losing_trades: int = 0
+    breakeven_trades: int = 0
     win_rate_pct: float = 0.0
+    profit_loss_ratio: float = 0.0
+    profit_factor: float = 0.0
+    avg_realized_pnl: float = 0.0
+    avg_realized_pnl_pct: float = 0.0
+    best_trade_pnl: float = 0.0
+    worst_trade_pnl: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -178,7 +190,7 @@ def build_strategy_catalog(config: RuntimeConfig) -> list[StrategyDefinition]:
             auto_status,
             f"score >= {config.autotrade_defaults.score_threshold:.1f}",
             "paper/live 市价买入",
-            ["max_open_positions", "max_total_quote_exposure", "risk_gate"],
+            ["anti_chase", "structure_filter", "max_open_positions", "max_total_quote_exposure", "risk_gate"],
         ),
         StrategyDefinition(
             "volume_pressure",
@@ -275,6 +287,20 @@ def build_risk_rules(config: RuntimeConfig) -> list[RiskRule]:
     return [
         RiskRule("max_positions", "最大持仓数", "active", str(config.autotrade_defaults.max_open_positions), "拒绝新开仓"),
         RiskRule("max_exposure", "最大总敞口", "active", f"{config.autotrade_defaults.max_total_quote_exposure:.2f}", "拒绝超额订单"),
+        RiskRule(
+            "anti_chase",
+            "反追高入场过滤",
+            "active" if config.autotrade_defaults.anti_chase_enabled else "disabled",
+            f"RSI <= {config.autotrade_defaults.max_entry_rsi:.1f}, EMA20偏离 <= {config.autotrade_defaults.max_entry_price_vs_ema20_pct:.1f}%, 近7K <= {config.autotrade_defaults.max_entry_recent_change_pct:.1f}%",
+            "等待回调",
+        ),
+        RiskRule(
+            "structure_filter",
+            "结构买点过滤",
+            "active" if config.autotrade_defaults.structure_filter_enabled else "disabled",
+            f"支撑距离 <= {config.autotrade_defaults.max_entry_support_distance_pct:.1f}%, 支撑强度 >= {config.autotrade_defaults.min_entry_support_strength:.1f}, R/R >= {config.autotrade_defaults.min_entry_risk_reward_ratio:.1f}",
+            "等待支撑确认",
+        ),
         RiskRule("stop_loss", "单仓止损", "active", f"{config.autotrade_defaults.stop_loss_pct:.1f}%", "触发平仓"),
         RiskRule("take_profit", "单仓止盈", "active", f"{config.autotrade_defaults.take_profit_pct:.1f}%", "触发平仓"),
         RiskRule("cooldown", "同标的冷却", "active", f"{config.autotrade_defaults.cooldown_minutes} minutes", "跳过重复开仓"),
@@ -304,22 +330,53 @@ def build_account_snapshots_from_events(
         for event in events
         if event.action == "SELL" and event.status in {"filled", "paper_filled"} and event.realized_pnl is not None
     ]
-    realized_by_exchange = {
-        exchange: sum(float(event.realized_pnl or 0.0) for event in closed_events if event.exchange.upper() == exchange)
-        for exchange in {"BINANCE", "OKX"}
-    }
+    filled_events = [
+        event
+        for event in events
+        if event.action in {"BUY", "SELL"} and event.status in {"filled", "paper_filled"}
+    ]
     closed_by_exchange = {
         exchange: [event for event in closed_events if event.exchange.upper() == exchange]
         for exchange in {"BINANCE", "OKX"}
     }
-    wins_by_exchange = {
-        exchange: sum(1 for event in exchange_events if float(event.realized_pnl or 0.0) > 0)
-        for exchange, exchange_events in closed_by_exchange.items()
+    filled_by_exchange = {
+        exchange: [event for event in filled_events if event.exchange.upper() == exchange]
+        for exchange in {"BINANCE", "OKX"}
     }
-    win_rate_by_exchange = {
-        exchange: (wins_by_exchange[exchange] / len(exchange_events)) * 100 if exchange_events else 0.0
-        for exchange, exchange_events in closed_by_exchange.items()
-    }
+
+    def metrics(exchange: str) -> dict[str, float | int]:
+        exchange_closed = closed_by_exchange[exchange]
+        pnl_values = [float(event.realized_pnl or 0.0) for event in exchange_closed]
+        pnl_pct_values = [float(event.realized_pnl_pct or 0.0) for event in exchange_closed if event.realized_pnl_pct is not None]
+        wins = [value for value in pnl_values if value > 0]
+        losses = [value for value in pnl_values if value < 0]
+        gross_profit = sum(wins)
+        gross_loss = abs(sum(losses))
+        avg_win = gross_profit / len(wins) if wins else 0.0
+        avg_loss = gross_loss / len(losses) if losses else 0.0
+        filled = filled_by_exchange[exchange]
+        buy_count = sum(1 for event in filled if event.action == "BUY")
+        sell_count = sum(1 for event in filled if event.action == "SELL")
+        return {
+            "realized_pnl": round(sum(pnl_values), 8),
+            "total_trades": len(filled),
+            "buy_trades": buy_count,
+            "sell_trades": sell_count,
+            "closed_trades": len(exchange_closed),
+            "winning_trades": len(wins),
+            "losing_trades": len(losses),
+            "breakeven_trades": sum(1 for value in pnl_values if value == 0),
+            "win_rate_pct": round((len(wins) / len(exchange_closed)) * 100, 2) if exchange_closed else 0.0,
+            "profit_loss_ratio": round(avg_win / avg_loss, 4) if avg_loss else (999.0 if avg_win else 0.0),
+            "profit_factor": round(gross_profit / gross_loss, 4) if gross_loss else (999.0 if gross_profit else 0.0),
+            "avg_realized_pnl": round(sum(pnl_values) / len(pnl_values), 8) if pnl_values else 0.0,
+            "avg_realized_pnl_pct": round(sum(pnl_pct_values) / len(pnl_pct_values), 4) if pnl_pct_values else 0.0,
+            "best_trade_pnl": round(max(pnl_values), 8) if pnl_values else 0.0,
+            "worst_trade_pnl": round(min(pnl_values), 8) if pnl_values else 0.0,
+        }
+
+    binance_metrics = metrics("BINANCE")
+    okx_metrics = metrics("OKX")
     return [
         AccountSnapshot(
             exchange="BINANCE",
@@ -328,9 +385,7 @@ def build_account_snapshots_from_events(
             open_positions=len(binance_positions),
             quote_exposure=binance_exposure,
             max_quote_exposure=config.autotrade_defaults.max_total_quote_exposure,
-            realized_pnl=round(realized_by_exchange["BINANCE"], 8),
-            closed_trades=len(closed_by_exchange["BINANCE"]),
-            win_rate_pct=round(win_rate_by_exchange["BINANCE"], 2),
+            **binance_metrics,
         ),
         AccountSnapshot(
             exchange="OKX",
@@ -339,8 +394,6 @@ def build_account_snapshots_from_events(
             open_positions=len(okx_positions),
             quote_exposure=okx_exposure,
             max_quote_exposure=config.autotrade_defaults.max_total_quote_exposure if config.autotrade_defaults.execution_exchange.lower() == "okx" else 0.0,
-            realized_pnl=round(realized_by_exchange["OKX"], 8),
-            closed_trades=len(closed_by_exchange["OKX"]),
-            win_rate_pct=round(win_rate_by_exchange["OKX"], 2),
+            **okx_metrics,
         ),
     ]

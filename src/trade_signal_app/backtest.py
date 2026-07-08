@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 import argparse
 import glob
 import json
@@ -35,6 +35,19 @@ from .tradingview_data import load_tradingview_csv
 
 
 HISTORICAL_DATA_SUFFIXES = {".zip", ".csv"}
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _candles_at_or_after(candles: list[Candlestick], start_time: datetime | None) -> list[Candlestick]:
+    if start_time is None:
+        return candles
+    cutoff = _as_utc(start_time)
+    return [candle for candle in candles if _as_utc(candle.open_time) >= cutoff]
 
 
 def archive_key(path: Path) -> tuple[str, str]:
@@ -157,6 +170,7 @@ def run_backtest_for_series(
     exit_config: ExitRuleConfig | None = None,
     execution_config: ExecutionConfig | None = None,
     cooldown_bars: int | None = None,
+    sample_start_time: datetime | None = None,
 ) -> BacktestReport:
     entry_config = entry_config or EntryRuleConfig(min_score=score_threshold)
     horizons = sorted({value for value in holding_periods if value > 0})
@@ -168,6 +182,8 @@ def run_backtest_for_series(
     if len(candles) < 60 + max_horizon:
         raise ValueError(f"Not enough candles for backtest: {symbol} {interval} has {len(candles)} bars.")
 
+    sample_start_utc = _as_utc(sample_start_time) if sample_start_time is not None else None
+    sample_candles = _candles_at_or_after(candles, sample_start_utc)
     day_bars = bars_per_day(candles)
     cooldown_bars = cooldown_bars if cooldown_bars is not None else exit_config.cooldown_bars_after_exit
     warmup = 60
@@ -192,6 +208,8 @@ def run_backtest_for_series(
     )
 
     for index in range(warmup - 1, len(candles) - max_horizon):
+        if sample_start_utc is not None and _as_utc(candles[index].close_time) < sample_start_utc:
+            continue
         evaluated_bars += 1
         if index < next_entry_index:
             continue
@@ -271,11 +289,11 @@ def run_backtest_for_series(
     stats = summarize_events(events, horizons)
     trade_stat = summarize_realized_trades(events)
     equity_curve = build_equity_curve_from_events(events, capital_fraction_pct=execution_config.capital_fraction_pct)
-    buy_hold_equity_curve = build_buy_hold_equity_curve(candles)
+    buy_hold_equity_curve = build_buy_hold_equity_curve(sample_candles)
     return BacktestReport(
         symbol=symbol,
         interval=interval,
-        candle_count=len(candles),
+        candle_count=len(sample_candles),
         evaluated_bars=evaluated_bars,
         signal_count=len(events),
         lookback_bars=lookback_bars,
@@ -1581,6 +1599,7 @@ def main(argv: list[str] | None = None) -> None:
         min_buy_pressure_ratio=args.min_buy_pressure,
         min_rsi=args.min_rsi,
         max_rsi=args.max_rsi,
+        max_entry_rsi=args.max_rsi,
         require_kdj_confirmation=not args.no_kdj_confirmation,
     )
     exit_config = ExitRuleConfig(

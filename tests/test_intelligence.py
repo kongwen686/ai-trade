@@ -16,7 +16,8 @@ def _signal(
     price: float,
     change: float = 2.0,
     rsi: float = 58.0,
-    price_vs_ema20: float = 6.0,
+    price_vs_ema20: float = 2.0,
+    recent_change: float = 1.5,
     volume_ratio: float = 1.8,
 ) -> SimpleNamespace:
     return SimpleNamespace(
@@ -31,6 +32,7 @@ def _signal(
             ema_spread_pct=1.2,
             rsi_14=rsi,
             price_vs_ema20_pct=price_vs_ema20,
+            recent_change_pct=recent_change,
         ),
     )
 

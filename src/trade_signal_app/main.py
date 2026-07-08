@@ -17,6 +17,7 @@ from .app_state import AppState
 from .backtest import resolve_execution_config_from_binance
 from .binance_client import BinancePublicAPIError, parse_ticker
 from .config import BASE_DIR, SETTINGS
+from .entry_filters import anti_chase_reason_from_config, structure_adjusted_exit_prices, structure_entry_reason_from_config
 from .feishu import FeishuNotificationError, FeishuTradeNotifier
 from .intelligence import IntelligenceHub, IntelligenceSnapshot, LlmInsightClient
 from .okx_client import OKXSpotGateway
@@ -380,6 +381,76 @@ def _serialize_trading_event(event: TradingEvent) -> dict[str, object]:
     }
 
 
+def _ratio_metric(numerator: float, denominator: float) -> float:
+    if denominator:
+        return round(numerator / denominator, 4)
+    return 999.0 if numerator else 0.0
+
+
+def _paper_account_metrics(
+    *,
+    positions: list[TradingPosition],
+    events: list[TradingEvent],
+    latest_prices: dict[str, float] | None = None,
+) -> dict[str, object]:
+    latest_prices = latest_prices or {}
+    paper_positions = [position for position in positions if position.mode == "paper"]
+    paper_events = [event for event in events if event.mode == "paper"]
+    filled_events = [
+        event
+        for event in paper_events
+        if event.action in {"BUY", "SELL"} and event.status == "paper_filled"
+    ]
+    closed_events = [
+        event
+        for event in filled_events
+        if event.action == "SELL" and event.realized_pnl is not None
+    ]
+    realized_values = [float(event.realized_pnl or 0.0) for event in closed_events]
+    realized_pct_values = [float(event.realized_pnl_pct or 0.0) for event in closed_events if event.realized_pnl_pct is not None]
+    wins = [value for value in realized_values if value > 0]
+    losses = [value for value in realized_values if value < 0]
+    gross_profit = sum(wins)
+    gross_loss = abs(sum(losses))
+    avg_win = gross_profit / len(wins) if wins else 0.0
+    avg_loss = gross_loss / len(losses) if losses else 0.0
+    unrealized_values: list[float] = []
+    for position in paper_positions:
+        latest_price = latest_prices.get(position.symbol.upper())
+        if latest_price is not None and latest_price > 0:
+            unrealized_values.append((position.quantity * latest_price) - position.quote_notional)
+    realized_pnl = sum(realized_values)
+    unrealized_pnl = sum(unrealized_values)
+    return {
+        "mode": "paper",
+        "open_positions": len(paper_positions),
+        "quote_exposure": round(sum(position.quote_notional for position in paper_positions), 8),
+        "margin_exposure": round(
+            sum(position.margin_notional if position.margin_notional is not None else position.quote_notional for position in paper_positions),
+            8,
+        ),
+        "total_trades": len(filled_events),
+        "buy_trades": sum(1 for event in filled_events if event.action == "BUY"),
+        "sell_trades": sum(1 for event in filled_events if event.action == "SELL"),
+        "closed_trades": len(closed_events),
+        "winning_trades": len(wins),
+        "losing_trades": len(losses),
+        "breakeven_trades": sum(1 for value in realized_values if value == 0),
+        "win_rate_pct": round((len(wins) / len(closed_events)) * 100, 2) if closed_events else 0.0,
+        "profit_loss_ratio": _ratio_metric(avg_win, avg_loss),
+        "profit_factor": _ratio_metric(gross_profit, gross_loss),
+        "gross_profit": round(gross_profit, 8),
+        "gross_loss": round(gross_loss, 8),
+        "realized_pnl": round(realized_pnl, 8),
+        "unrealized_pnl": round(unrealized_pnl, 8),
+        "total_pnl": round(realized_pnl + unrealized_pnl, 8),
+        "avg_realized_pnl": round(realized_pnl / len(realized_values), 8) if realized_values else 0.0,
+        "avg_realized_pnl_pct": round(sum(realized_pct_values) / len(realized_pct_values), 4) if realized_pct_values else 0.0,
+        "best_trade_pnl": round(max(realized_values), 8) if realized_values else 0.0,
+        "worst_trade_pnl": round(min(realized_values), 8) if realized_values else 0.0,
+    }
+
+
 def _sort_trading_events_desc(events: list[TradingEvent]) -> list[TradingEvent]:
     return sorted(events, key=_event_created_at_utc, reverse=True)
 
@@ -396,6 +467,11 @@ def _serialize_trading_report(report: TradingRunReport, latest_prices: dict[str,
             for position in report.open_positions
         ],
         "events": [_serialize_trading_event(event) for event in _sort_trading_events_desc(report.events)],
+        "account_metrics": _paper_account_metrics(
+            positions=report.open_positions,
+            events=report.events,
+            latest_prices=latest_prices,
+        ),
         "generated_at": report.generated_at.isoformat(),
     }
 
@@ -414,6 +490,11 @@ def _trading_status_payload() -> dict[str, object]:
             for position in positions
         ],
         "events": [_serialize_trading_event(event) for event in events[:30]],
+        "account_metrics": _paper_account_metrics(
+            positions=positions,
+            events=events,
+            latest_prices=latest_prices,
+        ),
     }
 
 
@@ -830,10 +911,41 @@ def _run_forced_paper_trading_once() -> dict[str, object]:
             continue
         if score < config.score_threshold:
             continue
+        anti_chase = _scan_signal_anti_chase_reason(signal, config)
+        if anti_chase:
+            events.append(
+                TradingEvent(
+                    action="SKIP",
+                    symbol=symbol,
+                    mode="paper",
+                    status="wait_pullback",
+                    message=anti_chase,
+                    score=score,
+                    price=price,
+                    exchange=config.execution_exchange.upper(),
+                )
+            )
+            continue
+        structure_issue = _scan_signal_structure_entry_reason(signal, config)
+        if structure_issue:
+            events.append(
+                TradingEvent(
+                    action="SKIP",
+                    symbol=symbol,
+                    mode="paper",
+                    status="wait_support",
+                    message=structure_issue,
+                    score=score,
+                    price=price,
+                    exchange=config.execution_exchange.upper(),
+                )
+            )
+            continue
         leverage = max(1.0, config.leverage)
         margin_notional = config.quote_order_qty
         position_notional = margin_notional * leverage
         quantity = position_notional / price
+        stop_price, take_profit_price = _scan_signal_structured_exit_prices(signal, price, config)
         position = TradingPosition(
             symbol=symbol,
             quantity=quantity,
@@ -842,8 +954,8 @@ def _run_forced_paper_trading_once() -> dict[str, object]:
             score=score,
             grade=str(signal.get("grade") or "B"),
             opened_at=now,
-            stop_price=price * (1 - config.stop_loss_pct / 100),
-            take_profit_price=price * (1 + config.take_profit_pct / 100),
+            stop_price=stop_price,
+            take_profit_price=take_profit_price,
             mode="paper",
             client_order_id=f"aitrade-paper-{symbol.lower()}-{int(now.timestamp())}",
             exchange=config.execution_exchange.upper(),
@@ -893,6 +1005,53 @@ def _run_forced_paper_trading_once() -> dict[str, object]:
             events=events,
         ),
         latest_prices=latest_prices,
+    )
+
+
+def _scan_signal_anti_chase_reason(signal: dict[str, object], config: AutoTradeDefaults) -> str:
+    return anti_chase_reason_from_config(
+        rsi=_float_from_mapping(signal, "rsi_14", 50.0),
+        price_vs_ema20_pct=_float_from_mapping(signal, "price_vs_ema20_pct"),
+        recent_change_pct=_float_from_mapping(signal, "recent_change_pct"),
+        config=config,
+    )
+
+
+def _scan_signal_structure_entry_reason(signal: dict[str, object], config: AutoTradeDefaults) -> str:
+    community_score = signal.get("community_score")
+    try:
+        parsed_community_score = float(community_score) if community_score is not None else None
+    except (TypeError, ValueError):
+        parsed_community_score = None
+    return structure_entry_reason_from_config(
+        close_price=_float_from_mapping(signal, "last_price"),
+        support_level=_float_from_mapping(signal, "support_level"),
+        resistance_level=_float_from_mapping(signal, "resistance_level"),
+        support_distance_pct=_float_from_mapping(signal, "support_distance_pct"),
+        resistance_distance_pct=_float_from_mapping(signal, "resistance_distance_pct"),
+        support_strength=_float_from_mapping(signal, "support_strength"),
+        risk_reward_ratio=_float_from_mapping(signal, "structure_risk_reward"),
+        volume_ratio=_float_from_mapping(signal, "volume_ratio", 1.0),
+        buy_pressure_ratio=_float_from_mapping(signal, "buy_pressure_ratio", 0.0),
+        community_score=parsed_community_score,
+        config=config,
+    )
+
+
+def _scan_signal_structured_exit_prices(
+    signal: dict[str, object],
+    price: float,
+    config: AutoTradeDefaults,
+) -> tuple[float, float]:
+    return structure_adjusted_exit_prices(
+        entry_price=price,
+        stop_loss_pct=config.stop_loss_pct,
+        take_profit_pct=config.take_profit_pct,
+        support_level=_float_from_mapping(signal, "support_level"),
+        resistance_level=_float_from_mapping(signal, "resistance_level"),
+        enabled=config.structure_filter_enabled,
+        support_stop_buffer_pct=config.support_stop_buffer_pct,
+        resistance_take_profit_buffer_pct=config.resistance_take_profit_buffer_pct,
     )
 
 
@@ -1422,7 +1581,16 @@ def _strategy_hits_from_signal_rows(
         volume_ratio = _float_from_mapping(signal, "volume_ratio", 1.0)
         rsi = _float_from_mapping(signal, "rsi_14", 50.0)
         ema_spread = _float_from_mapping(signal, "ema_spread_pct")
+        price_vs_ema20 = _float_from_mapping(signal, "price_vs_ema20_pct")
+        recent_change = _float_from_mapping(signal, "recent_change_pct")
         funding_rate = _float_from_mapping(funding or {}, "funding_rate")
+        anti_chase = anti_chase_reason_from_config(
+            rsi=rsi,
+            price_vs_ema20_pct=price_vs_ema20,
+            recent_change_pct=recent_change,
+            config=runtime_config.autotrade_defaults,
+        )
+        structure_issue = _scan_signal_structure_entry_reason(signal, runtime_config.autotrade_defaults)
 
         if score >= threshold:
             add_hit(
@@ -1431,8 +1599,18 @@ def _strategy_hits_from_signal_rows(
                     strategy="auto_score_breakout",
                     score=score,
                     grade=grade,
-                    action="candidate_buy" if runtime_config.autotrade_defaults.enabled else "watch",
-                    reasons=reasons or ["综合评分达到自动交易阈值"],
+                    action="wait_pullback"
+                    if anti_chase
+                    else "wait_support"
+                    if structure_issue
+                    else "candidate_buy"
+                    if runtime_config.autotrade_defaults.enabled
+                    else "watch",
+                    reasons=[anti_chase, *reasons[:4]]
+                    if anti_chase
+                    else [structure_issue, *reasons[:4]]
+                    if structure_issue
+                    else reasons or ["综合评分达到自动交易阈值"],
                     funding_bps=funding_bps,
                     spread_bps=spread_bps,
                     source=source,
@@ -2445,7 +2623,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     summary=payload["summary"],
                     signals=payload["signals"],
                     params=params,
-                    intervals=["15m", "1h", "4h", "1d"],
+                    intervals=["15m", "1h", "2h", "4h", "1d"],
                     lang=lang,
                     layout_context=_layout_context(),
                 )
@@ -2564,6 +2742,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     readiness=payload["readiness"],
                     positions=payload["open_positions"],
                     events=payload["events"],
+                    account_metrics=payload["account_metrics"],
                     lang=lang,
                     layout_context=_layout_context(payload["readiness"]),
                 )
@@ -2837,6 +3016,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     readiness=readiness,
                     positions=payload["open_positions"],
                     events=payload["events"],
+                    account_metrics=status_payload["account_metrics"],
                     lang=lang,
                     layout_context=_layout_context(readiness),
                 )
