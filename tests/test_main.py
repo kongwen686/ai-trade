@@ -1051,6 +1051,8 @@ class MainTests(unittest.TestCase):
 
         self.assertIn("notice-warning", html)
         self.assertIn("实时 ticker 快速结果", html)
+        self.assertIn('data-scan-fallback="true"', html)
+        self.assertIn('name="refresh" value="1"', html)
 
     def test_terminal_payload_returns_fast_snapshot_when_refresh_times_out(self) -> None:
         runtime_config = RuntimeConfig()
@@ -1395,6 +1397,7 @@ class MainTests(unittest.TestCase):
                 "lookback_bars": ["120"],
                 "score_threshold": ["60"],
                 "portfolio_top_n": ["0"],
+                "fee_source": ["manual"],
             }
             with main_backtest._BACKTEST_RESULT_CACHE_LOCK:
                 main_backtest._BACKTEST_RESULT_CACHE.clear()
@@ -3026,6 +3029,7 @@ class MainTests(unittest.TestCase):
         calls: list[tuple[str, bool]] = []
         isolate_flags: list[bool] = []
         scan_results: list[object] = []
+        metric_snapshots: list[tuple[str, dict[str, object]]] = []
 
         class FakeAutoTrader:
             def __init__(self, **kwargs):
@@ -3061,6 +3065,11 @@ class MainTests(unittest.TestCase):
                 patch("trade_signal_app.main._trading_store", return_value=store),
                 patch("trade_signal_app.main._feishu_trade_notifier", return_value=None),
                 patch("trade_signal_app.main._execution_gateway", return_value=object()),
+                patch.object(
+                    store,
+                    "record_metric_snapshot",
+                    side_effect=lambda scope, metrics: metric_snapshots.append((scope, metrics)),
+                ),
                 patch("trade_signal_app.main.IntelligenceHub") as hub_cls,
                 patch("trade_signal_app.main.AutoTrader", FakeAutoTrader),
             ):
@@ -3076,6 +3085,8 @@ class MainTests(unittest.TestCase):
         self.assertEqual(payload["mode"], "paper+live")
         self.assertEqual(payload["scanned_symbols"], 1)
         self.assertEqual({event["status"] for event in payload["events"]}, {"paper_done", "live_done"})
+        self.assertEqual(metric_snapshots[0][0], "signal_scan")
+        self.assertEqual(metric_snapshots[0][1]["returned_signals"], 1)
 
     def test_live_insufficient_balance_does_not_block_paper_fill(self) -> None:
         signal = SimpleNamespace(

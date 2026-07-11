@@ -10,7 +10,27 @@ from .models import MarketTicker, ScanSummary, TradeSignal
 from .scoring import build_reasons, build_subscores, composite_score, compute_liquidity_score, grade_from_score
 from .time_utils import now_app_time
 
-STABLELIKE_BASES = {"USDT", "USDC", "FDUSD", "BUSD", "TUSD", "USDP", "DAI"}
+STABLELIKE_BASES = {
+    "AEUR",
+    "BFUSD",
+    "BUSD",
+    "DAI",
+    "EURI",
+    "FDUSD",
+    "GUSD",
+    "PAX",
+    "PYUSD",
+    "SUSD",
+    "TUSD",
+    "USD1",
+    "USDC",
+    "USDE",
+    "USDJ",
+    "USDP",
+    "USDS",
+    "USDT",
+    "USTC",
+}
 LEVERAGED_SUFFIXES = ("UP", "DOWN", "BULL", "BEAR")
 SCAN_LIQUIDITY_SPECIAL_BASES = ("BTC", "ETH", "XRP", "SOL", "BNB")
 SCAN_LIQUIDITY_TIERS = (*SCAN_LIQUIDITY_SPECIAL_BASES, "top30", "alt")

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from math import log1p
+
 from .indicators import clamp
 from .models import CommunitySignal, IndicatorSnapshot, MarketTicker, ScoreBreakdown
+
+LIQUIDITY_SCORE_FLOOR = 35.0
 
 
 def _scaled_range(value: float, lower: float, upper: float) -> float:
@@ -12,8 +16,18 @@ def _scaled_range(value: float, lower: float, upper: float) -> float:
 
 
 def compute_liquidity_score(ticker: MarketTicker, quote_volumes: list[float], trade_counts: list[int]) -> float:
-    quote_score = _scaled_range(ticker.quote_volume, min(quote_volumes), max(quote_volumes))
-    trade_score = _scaled_range(float(ticker.trade_count), float(min(trade_counts)), float(max(trade_counts)))
+    # Every ticker here has already passed its tier's liquidity gate. A log scale
+    # prevents BTC-sized outliers from forcing otherwise tradable candidates to 0.
+    quote_score = LIQUIDITY_SCORE_FLOOR + (
+        _scaled_range(log1p(ticker.quote_volume), log1p(min(quote_volumes)), log1p(max(quote_volumes)))
+        * (100.0 - LIQUIDITY_SCORE_FLOOR)
+        / 100.0
+    )
+    trade_score = LIQUIDITY_SCORE_FLOOR + (
+        _scaled_range(log1p(float(ticker.trade_count)), log1p(float(min(trade_counts))), log1p(float(max(trade_counts))))
+        * (100.0 - LIQUIDITY_SCORE_FLOOR)
+        / 100.0
+    )
     return round((quote_score * 0.65) + (trade_score * 0.35), 2)
 
 

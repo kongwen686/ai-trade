@@ -121,6 +121,19 @@ class SignalScannerTests(unittest.TestCase):
         self.assertEqual(summary.scanned_symbols, 2)
         self.assertEqual(signals, [])
 
+    def test_eligible_symbols_excludes_current_stablecoin_bases(self) -> None:
+        exchange_info = {
+            "symbols": [
+                {"symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT", "status": "TRADING"},
+                {"symbol": "USDEUSDT", "baseAsset": "USDE", "quoteAsset": "USDT", "status": "TRADING"},
+                {"symbol": "USD1USDT", "baseAsset": "USD1", "quoteAsset": "USDT", "status": "TRADING"},
+            ]
+        }
+
+        eligible = SignalScanner._eligible_symbols(exchange_info, "USDT")
+
+        self.assertEqual(eligible, {"BTCUSDT"})
+
     def test_liquidity_filter_applies_symbol_top30_and_alt_profiles(self) -> None:
         symbols = ["BTC", "ETH", "XRP", "SOL", "BNB", *[f"ALT{index}" for index in range(35)]]
         tickers = [

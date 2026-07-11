@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from .models import Candlestick, IndicatorSnapshot
 from .volatility import build_volatility_state
 
@@ -134,7 +136,30 @@ def _nearest_structure_levels(
     }
 
 
-def build_indicator_snapshot(candles: list[Candlestick]) -> IndicatorSnapshot:
+def _volume_ratio(candles: list[Candlestick], volumes: list[float], *, as_of: datetime) -> float:
+    previous_volume_window = volumes[-21:-1] if len(volumes) >= 21 else volumes[:-1]
+    avg_volume = sum(previous_volume_window) / max(len(previous_volume_window), 1)
+    raw_ratio = volumes[-1] / avg_volume if avg_volume else 1.0
+    latest = candles[-1]
+    if latest.close_time <= as_of or latest.open_time >= as_of or len(volumes) < 3:
+        return raw_ratio
+
+    duration = (latest.close_time - latest.open_time).total_seconds()
+    elapsed = (as_of - latest.open_time).total_seconds()
+    if duration <= 0 or elapsed <= 0:
+        return raw_ratio
+
+    progress = clamp(elapsed / duration, 0.0, 1.0)
+    earlier_window = volumes[-22:-2] if len(volumes) >= 22 else volumes[:-2]
+    earlier_avg = sum(earlier_window) / max(len(earlier_window), 1)
+    previous_closed_ratio = volumes[-2] / earlier_avg if earlier_avg else 1.0
+    # Blend observed current volume with the last closed bar for the unfinished
+    # portion. This removes the strong time-of-bar bias without extrapolating a
+    # few early trades into an extreme volume spike.
+    return raw_ratio + ((1.0 - progress) * previous_closed_ratio)
+
+
+def build_indicator_snapshot(candles: list[Candlestick], *, as_of: datetime | None = None) -> IndicatorSnapshot:
     if len(candles) < 60:
         raise ValueError("At least 60 klines are required to compute stable indicators.")
 
@@ -155,9 +180,8 @@ def build_indicator_snapshot(candles: list[Candlestick]) -> IndicatorSnapshot:
     latest_close = closes[-1]
     latest_ema_20 = ema_20_series[-1]
     latest_ema_50 = ema_50_series[-1]
-    previous_volume_window = volumes[-21:-1] if len(volumes) >= 21 else volumes[:-1]
-    avg_volume = sum(previous_volume_window) / max(len(previous_volume_window), 1)
-    volume_ratio = volumes[-1] / avg_volume if avg_volume else 1.0
+    effective_as_of = as_of or datetime.now(timezone.utc)
+    volume_ratio = _volume_ratio(candles, volumes, as_of=effective_as_of)
     structure = _nearest_structure_levels(highs=highs, lows=lows, closes=closes)
     volatility = build_volatility_state(candles)
 

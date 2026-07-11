@@ -1833,7 +1833,16 @@ def _run_forced_paper_trading_once() -> dict[str, object]:
         "min_quote_volume": [str(runtime_config.scan_defaults.min_quote_volume)],
         "min_trade_count": [str(runtime_config.scan_defaults.min_trade_count)],
     }
-    scan_payload, _ = _scan_payload(query, force_refresh=True)
+    scan_payload = scan_handlers._run_scan_payload(
+        scanner,
+        {
+            "quote_asset": runtime_config.scan_defaults.quote_asset,
+            "interval": runtime_config.scan_defaults.interval,
+            "candidate_pool": runtime_config.scan_defaults.candidate_pool,
+            "min_quote_volume": runtime_config.scan_defaults.min_quote_volume,
+            "min_trade_count": runtime_config.scan_defaults.min_trade_count,
+        },
+    )
     signals = [item for item in scan_payload.get("signals", []) if isinstance(item, dict)]
     store = _trading_store()
     all_positions = store.load()
@@ -2105,6 +2114,44 @@ def _combined_trading_report(
     )
 
 
+def _record_signal_scan_snapshot(summary: object, signals: list[object]) -> None:
+    def value(source: object, key: str, default: object = 0) -> object:
+        return source.get(key, default) if isinstance(source, dict) else getattr(source, key, default)
+
+    scored = []
+    for signal in signals:
+        try:
+            score = float(value(signal, "score"))
+        except (TypeError, ValueError):
+            continue
+        scored.append((str(value(signal, "symbol", "")).upper(), score))
+    scores = sorted(score for _, score in scored)
+    midpoint = len(scores) // 2
+    median_score = (
+        (scores[midpoint - 1] + scores[midpoint]) / 2
+        if scores and len(scores) % 2 == 0
+        else scores[midpoint]
+        if scores
+        else 0.0
+    )
+    top_signals = sorted(scored, key=lambda item: item[1], reverse=True)[:10]
+    _trading_store().record_metric_snapshot(
+        "signal_scan",
+        {
+            "quote_asset": str(value(summary, "quote_asset", "")),
+            "interval": str(value(summary, "interval", "")),
+            "scanned_symbols": int(value(summary, "scanned_symbols", len(signals)) or 0),
+            "returned_signals": int(value(summary, "returned_signals", len(signals)) or 0),
+            "max_score": round(max(scores, default=0.0), 2),
+            "average_score": round(sum(scores) / len(scores), 2) if scores else 0.0,
+            "median_score": round(median_score, 2),
+            "score_gte_70": sum(score >= 70.0 for score in scores),
+            "score_gte_75": sum(score >= 75.0 for score in scores),
+            "top_signals": [{"symbol": symbol, "score": round(score, 2)} for symbol, score in top_signals],
+        },
+    )
+
+
 def _run_trading_once(*, force_paper: bool = False) -> dict[str, object]:
     runtime_config, scanner = APP_STATE.snapshot()
     autotrade_config = runtime_config.autotrade_defaults
@@ -2166,6 +2213,7 @@ def _run_trading_once(*, force_paper: bool = False) -> dict[str, object]:
     risk_snapshot = IntelligenceHub(scanner=scanner, runtime_config=runtime_config, settings=SETTINGS).snapshot()
     blocked_symbols = risk_snapshot.execution_risk.blocked_symbols
     shared_scan_result = scanner.scan()
+    _record_signal_scan_snapshot(*shared_scan_result)
     reports: list[TradingRunReport] = []
     mode_isolated = autotrade_config.paper_enabled or autotrade_config.live_enabled or len(active_modes) > 1
     for mode in runnable_modes:
@@ -3825,7 +3873,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
 
             if parsed.path == "/":
-                payload, params = _scan_payload(query, force_refresh=True)
+                payload, params = _scan_payload(query, force_refresh=_parse_bool_flag(query, "refresh"))
                 html = render_index_page(
                     summary=payload["summary"],
                     signals=payload["signals"],

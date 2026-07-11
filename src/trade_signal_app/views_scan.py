@@ -382,6 +382,7 @@ def render_index_page(
       <section
         class="scan-live-market"
         data-live-market
+        data-scan-fallback="{'true' if bool(summary.get('fallback')) else 'false'}"
         data-live-state="connecting"
         data-label-connecting="{escape(t('正在连接实时行情', 'Connecting live market'), quote=True)}"
         data-label-live="{escape(t('实时行情在线', 'Live market online'), quote=True)}"
@@ -454,7 +455,7 @@ def render_index_page(
             <span>{t("其他山寨币最小成交笔数", "Alt Min Trades")}</span>
             <input type="number" name="min_trade_count" min="100" step="100" value="{int(params["min_trade_count"])}" />
           </label>
-          <button type="submit">{t("刷新信号", "Refresh Signals")}</button>
+          <button type="submit" name="refresh" value="1">{t("刷新信号", "Refresh Signals")}</button>
         </form>
         <p class="helper-text">
           {t("BTC、ETH、XRP、SOL、BNB 与 Top 30 使用系统配置中的分类流动性门槛；此处仅临时覆盖其他山寨币门槛。数据来自 Binance Spot 市场接口。社区热度支持 Binance/OKX 官方热点、X/Twitter、Reddit 和本地", "BTC, ETH, XRP, SOL, BNB, and Top 30 use tiered liquidity thresholds from system settings; these controls only override other altcoins. Market data comes from Binance Spot APIs. Community heat supports Binance/OKX official trends, X/Twitter, Reddit, and local")} <code>data/community_scores.csv</code>{t("，未配置时会自动忽略不可用来源。", "; unavailable sources are skipped automatically.")}

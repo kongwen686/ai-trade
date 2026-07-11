@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import unittest
 import zipfile
@@ -7,7 +8,7 @@ import zipfile
 from trade_signal_app.archive_loader import load_public_data_klines
 from trade_signal_app.indicators import build_indicator_snapshot
 from trade_signal_app.models import Candlestick, MarketTicker
-from trade_signal_app.scoring import build_subscores, composite_score
+from trade_signal_app.scoring import LIQUIDITY_SCORE_FLOOR, build_subscores, composite_score, compute_liquidity_score
 
 
 def _make_candles() -> list[Candlestick]:
@@ -68,6 +69,41 @@ class IndicatorTests(unittest.TestCase):
             community_signal=None,
         )
         self.assertGreaterEqual(composite_score(breakdown), 70)
+
+    def test_unfinished_candle_volume_ratio_is_not_penalized_by_elapsed_time(self) -> None:
+        candles = _make_candles()
+        current = candles[-1]
+        previous_volumes = [candle.volume for candle in candles[-21:-1]]
+        average_volume = sum(previous_volumes) / len(previous_volumes)
+        candles[-1] = replace(
+            current,
+            close_time=current.open_time + timedelta(hours=1),
+            volume=average_volume * 0.25,
+            taker_buy_base_volume=average_volume * 0.15,
+        )
+
+        snapshot = build_indicator_snapshot(candles, as_of=current.open_time + timedelta(minutes=15))
+
+        self.assertGreater(snapshot.volume_ratio, 0.8)
+        self.assertLess(snapshot.volume_ratio, 1.3)
+
+    def test_liquidity_score_keeps_eligible_candidate_floor_with_large_outlier(self) -> None:
+        ticker = MarketTicker(
+            symbol="ALTUSDT",
+            last_price=1.0,
+            price_change_percent=1.0,
+            quote_volume=30_000_000,
+            volume=1_000_000,
+            trade_count=8_000,
+        )
+
+        score = compute_liquidity_score(
+            ticker,
+            quote_volumes=[30_000_000, 2_000_000_000],
+            trade_counts=[8_000, 500_000],
+        )
+
+        self.assertGreaterEqual(score, LIQUIDITY_SCORE_FLOOR)
 
     def test_public_data_loader_accepts_microsecond_timestamps(self) -> None:
         from pathlib import Path

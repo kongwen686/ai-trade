@@ -4,6 +4,21 @@
   const root = document.querySelector("[data-live-market]");
   if (!root) return;
 
+  const refreshKey = `scan-full-refresh:${window.location.pathname}:${window.location.search}`;
+  if (root.dataset.scanFallback === "true") {
+    const attempts = Number(window.sessionStorage.getItem(refreshKey) || 0);
+    if (attempts < 12) {
+      window.sessionStorage.setItem(refreshKey, String(attempts + 1));
+      window.setTimeout(() => {
+        const url = new URL(window.location.href);
+        url.searchParams.delete("refresh");
+        window.location.replace(url.toString());
+      }, 1500);
+    }
+  } else {
+    window.sessionStorage.removeItem(refreshKey);
+  }
+
   const symbolNodes = Array.from(document.querySelectorAll("[data-live-symbol]"));
   const symbols = Array.from(
     new Set(symbolNodes.map((node) => String(node.dataset.liveSymbol || "").toUpperCase()).filter(Boolean)),
