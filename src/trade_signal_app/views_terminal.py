@@ -875,6 +875,15 @@ def render_terminal_module_page(
             else t("按配置：模拟/实盘", "Configured: paper/live")
         )
         auto_status_notice = f'<div class="notice notice-error">{escape(auto_error)}</div>' if auto_error else ""
+        readiness_blockers = readiness.get("blockers") if isinstance(readiness.get("blockers"), list) else []
+        readiness_message = str(exchange_status.get("message") or "").strip()
+        if bool(config.get("live_enabled")) and bool(readiness.get("live_ready")):
+            current_live_notice = f'<div class="notice notice-success">{escape(t("当前实盘状态：", "Current live status: ") + (readiness_message or t("账户认证正常，可以交易。", "Account authenticated and ready to trade.")))}</div>'
+        elif bool(config.get("live_enabled")):
+            blocker_text = "；".join(str(item) for item in readiness_blockers) or readiness_message or t("实盘账户尚未就绪。", "Live account is not ready.")
+            current_live_notice = f'<div class="notice notice-error">{escape(t("当前实盘状态：", "Current live status: ") + blocker_text)}</div>'
+        else:
+            current_live_notice = ""
         command = f"""
           <form method="post" action="{_url('/terminal/trading/run', active_lang)}" class="ant-form trading-command terminal-action-form">
             {_hidden_lang_input(active_lang)}
@@ -918,9 +927,10 @@ def render_terminal_module_page(
             <div class="mini-stat"><span>{t("评分阈值", "Score")}</span><strong>{float(config.get("score_threshold", 0) or 0):.1f}</strong></div>
             <div class="mini-stat"><span>Order Qty</span><strong>{float(config.get("quote_order_qty", 0) or 0):.2f}</strong></div>
             <div class="mini-stat"><span>{t("授权", "Auth")}</span><strong>{escape(_display_value(exchange_status.get("status", "not_configured"), active_lang))}</strong></div>
-            <div class="mini-stat"><span>{t("实盘就绪", "Live Ready")}</span><strong>{t("是", "Yes") if readiness.get("live_ready") else t("否", "No")}</strong></div>
-          </div>
-          {_trading_account_metric_cards(account_metrics, active_lang)}
+              <div class="mini-stat"><span>{t("实盘就绪", "Live Ready")}</span><strong>{t("是", "Yes") if readiness.get("live_ready") else t("否", "No")}</strong></div>
+            </div>
+              {current_live_notice}
+            {_trading_account_metric_cards(account_metrics, active_lang)}
           {f'<div class="notice notice-success">{escape(message)}</div>' if message else ""}
         """
         panels = "".join(
@@ -929,7 +939,7 @@ def render_terminal_module_page(
                 _terminal_panel(t("BTC交易专区", "BTC Trading Zone"), t("BTC 专属信号、模拟账户 BTC 成交统计和执行建议。", "BTC-specific signal, paper BTC metrics, and execution plan."), _btc_trading_zone(btc_trading, active_lang), wide=True),
                 _terminal_panel(t("账户表现", "Account Performance"), t("成交、执行事件、持仓敞口、盈亏比、胜率和已实现盈亏。", "Fills, execution events, exposure, P/L ratio, win rate, and realized PnL."), _terminal_rows(platform["accounts"], [(t("交易所", "Exchange"), "exchange"), (t("模式", "Mode"), "mode"), (t("持仓", "Positions"), "open_positions"), (t("敞口", "Exposure"), "quote_exposure"), (t("执行事件", "Events"), "event_count"), (t("累计成交", "Fills"), "total_trades"), (t("平仓数", "Closed"), "closed_trades"), (t("胜率", "Win Rate"), "win_rate_pct"), (t("盈亏比", "P/L Ratio"), "profit_loss_ratio"), ("Profit Factor", "profit_factor"), (t("已实现盈亏", "Realized PnL"), "realized_pnl")], lang=active_lang), wide=True),
                 _terminal_panel(t("持仓状态", "Position State"), t("本地模拟账户持仓。", "Local paper account positions."), _trading_position_rows(positions, active_lang), wide=True),
-                _terminal_panel(t("交易日志", "Trading Logs"), t("自动交易执行、跳过、阻断和下单事件；成交事件优先保留。", "Automated trading execution, skip, block, and order events; filled trades are retained first."), event_summary_html + _trading_event_rows(events, active_lang), wide=True),
+                _terminal_panel(t("交易日志", "Trading Logs"), t("以下为历史执行记录；当前账户状态以页面上方的实盘状态为准。成交事件优先保留。", "Historical execution records are shown below; use the live status above for the current account state. Filled trades are retained first."), event_summary_html + _trading_event_rows(events, active_lang), wide=True),
             ]
         )
     else:

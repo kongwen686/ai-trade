@@ -202,13 +202,14 @@ def render_trading_page(
     exchange_status = readiness.get("exchange_status") if isinstance(readiness.get("exchange_status"), dict) else {}
     live_ready = bool(readiness.get("live_ready"))
     auth_status = str(exchange_status.get("status", "unknown"))
+    exchange_message = str(exchange_status.get("message") or "").strip()
     readiness_notice = ""
     leverage = max(1.0, float(config.get("leverage", 1.0) or 1.0))
     stop_loss_roi = float(config["stop_loss_pct"]) * leverage
     take_profit_roi = float(config["take_profit_pct"]) * leverage
     if str(config["mode"]) == "live":
         if live_ready:
-            readiness_notice = f'<div class="notice notice-success">{t("实盘自动交易准备就绪。", "Live auto trading is ready.")}</div>'
+            readiness_notice = f'<div class="notice notice-success">{escape(t("当前实盘状态：", "Current live status: ") + (exchange_message or t("账户认证正常，可以交易。", "Account authenticated and ready to trade.")))}</div>'
         else:
             blocker_items = "".join(f"<li>{escape(str(item))}</li>" for item in blockers)
             readiness_notice = f"""
@@ -304,7 +305,7 @@ def render_trading_page(
       <section id="trading-events" class="ant-section section-block">
         <div class="section-heading">
           <h2>{t("执行事件", "Execution Events")}</h2>
-          <p>{t("本地保留的下单、风控、预警和跳过原因；成交事件会优先长期保留。", "Local orders, risk checks, warnings, and skip reasons; filled trade events are retained first.")}</p>
+          <p>{t("以下为本地历史执行记录；当前账户状态以上方实盘状态为准。成交事件会优先长期保留。", "Historical local execution records are shown below; use the live status above for the current account state. Filled trade events are retained first.")}</p>
           <p class="helper-text">{escape(event_summary_text)}</p>
         </div>
         <article class="ant-card backtest-card table-shell">{_trading_event_rows(events, active_lang)}</article>

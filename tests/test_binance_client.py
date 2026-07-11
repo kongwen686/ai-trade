@@ -7,7 +7,7 @@ import json
 import unittest
 from http.client import IncompleteRead
 from unittest.mock import patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 from trade_signal_app.binance_client import BinancePublicAPIError, BinanceSpotGateway
 
@@ -156,6 +156,33 @@ class BinanceClientTests(unittest.TestCase):
             gateway = BinanceSpotGateway(api_key="test-key", api_secret="test-secret")
             with self.assertRaisesRegex(ValueError, "HTTP 401"):
                 gateway.account()
+
+    def test_signed_endpoint_retries_temporary_network_failure(self) -> None:
+        with patch(
+            "trade_signal_app.binance_client.urlopen",
+            side_effect=[
+                URLError("temporary DNS failure"),
+                FakeResponse(json.dumps({"canTrade": True, "balances": []})),
+            ],
+        ) as mock_urlopen:
+            gateway = BinanceSpotGateway(api_key="test-key", api_secret="test-secret")
+            payload = gateway.account()
+
+        self.assertTrue(payload["canTrade"])
+        self.assertEqual(mock_urlopen.call_count, 2)
+
+    def test_account_status_marks_exhausted_network_failure_as_temporary_error(self) -> None:
+        with patch(
+            "trade_signal_app.binance_client.urlopen",
+            side_effect=URLError("temporary DNS failure"),
+        ) as mock_urlopen:
+            gateway = BinanceSpotGateway(api_key="test-key", api_secret="test-secret")
+            status = gateway.account_status({"USDT"})
+
+        self.assertEqual(status["status"], "error")
+        self.assertFalse(status["authenticated"])
+        self.assertIn("暂时不可用", status["message"])
+        self.assertEqual(mock_urlopen.call_count, 3)
 
     def test_market_buy_uses_signed_post_body(self) -> None:
         with patch("trade_signal_app.binance_client.time.time", return_value=1_700_000_000.0):

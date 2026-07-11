@@ -561,6 +561,31 @@ class MainTests(unittest.TestCase):
         self.assertTrue(payload["account_check_performed"])
         gateway.account_status.assert_called_once_with({"USDT"})
 
+    def test_trading_readiness_reports_temporary_account_check_error(self) -> None:
+        config = RuntimeConfig()
+        config.binance_api_key = "key"
+        config.binance_api_secret = "secret"
+        config.autotrade_defaults.live_enabled = True
+        config.autotrade_defaults.order_test_only = False
+        gateway = Mock()
+        gateway.account_status.return_value = {
+            "configured": True,
+            "authenticated": False,
+            "can_trade": False,
+            "quote_available": 0.0,
+            "status": "error",
+            "message": "temporary DNS failure",
+        }
+        scanner = SimpleNamespace(gateway=gateway)
+        with (
+            patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, scanner)),
+            patch.dict("os.environ", {"AI_TRADE_LIVE_CONFIRM": "I_UNDERSTAND_REAL_ORDERS"}),
+        ):
+            payload = _trading_readiness_payload(check_account=True)
+
+        self.assertFalse(payload["live_ready"])
+        self.assertEqual(payload["blockers"], ["BINANCE 账户检查暂时不可用：temporary DNS failure"])
+
     def test_trading_readiness_uses_okx_when_selected(self) -> None:
         config = RuntimeConfig()
         config.okx_api_key = "okx-key"
@@ -2472,6 +2497,18 @@ class MainTests(unittest.TestCase):
                 runner.assert_called_with(force_paper=False)
                 self.assertFalse(status["force_paper"])
                 self.assertEqual(status["mode_label"], "configured_paper_live")
+            finally:
+                stopped = _stop_paper_auto_trading()
+        self.assertFalse(stopped["running"])
+
+    def test_strategy_auto_trading_can_defer_first_run(self) -> None:
+        _stop_paper_auto_trading()
+        with patch("trade_signal_app.main._run_trading_once") as runner:
+            try:
+                status = _start_paper_auto_trading(30, force_paper=False, run_immediately=False)
+                self.assertTrue(status["running"])
+                self.assertFalse(status["force_paper"])
+                runner.assert_not_called()
             finally:
                 stopped = _stop_paper_auto_trading()
         self.assertFalse(stopped["running"])

@@ -21,6 +21,12 @@ class BinancePublicAPIError(RuntimeError):
     pass
 
 
+class BinanceSignedAPIError(ValueError):
+    def __init__(self, message: str, *, authentication_failure: bool) -> None:
+        super().__init__(message)
+        self.authentication_failure = authentication_failure
+
+
 @dataclass
 class TimedValue:
     expires_at: datetime
@@ -101,41 +107,55 @@ class BinanceSpotGateway:
         if not self.has_user_data_auth():
             raise ValueError("BINANCE_API_KEY / BINANCE_API_SECRET 未配置，无法访问账户级 SIGNED 接口。")
 
-        signed_params = {key: value for key, value in (params or {}).items() if value is not None}
-        signed_params["recvWindow"] = self._format_recv_window(self._recv_window_ms)
-        signed_params["timestamp"] = int(time.time() * 1000)
-        query = urlencode(signed_params, doseq=True)
-        signature = hmac.new(
-            self._api_secret.encode("utf-8"),
-            query.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-        body = f"{query}&signature={signature}".encode("utf-8")
-        url = f"{self._base_url}{path}"
-        data = body if method.upper() in {"POST", "PUT", "DELETE"} else None
-        if data is None:
-            url = f"{url}?{body.decode('utf-8')}"
-        request = Request(
-            url,
-            data=data,
-            method=method.upper(),
-            headers={
-                "User-Agent": "trade-signal-app/0.1",
-                "X-MBX-APIKEY": self._api_key,
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
-        )
-        try:
-            with urlopen(request, timeout=self._timeout, context=self._ssl_context) as response:
-                return json.load(response)
-        except HTTPError as exc:
-            detail = self._extract_http_error_detail(exc)
-            message = f"Binance SIGNED 接口请求失败：HTTP {exc.code}"
-            if detail:
-                message = f"{message}，{detail}"
-            raise ValueError(message) from exc
-        except URLError as exc:
-            raise ValueError(f"Binance SIGNED 接口请求失败：{exc.reason}") from exc
+        last_error: Exception | None = None
+        for attempt in range(3):
+            signed_params = {key: value for key, value in (params or {}).items() if value is not None}
+            signed_params["recvWindow"] = self._format_recv_window(self._recv_window_ms)
+            signed_params["timestamp"] = int(time.time() * 1000)
+            query = urlencode(signed_params, doseq=True)
+            signature = hmac.new(
+                self._api_secret.encode("utf-8"),
+                query.encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+            body = f"{query}&signature={signature}".encode("utf-8")
+            url = f"{self._base_url}{path}"
+            data = body if method.upper() in {"POST", "PUT", "DELETE"} else None
+            if data is None:
+                url = f"{url}?{body.decode('utf-8')}"
+            request = Request(
+                url,
+                data=data,
+                method=method.upper(),
+                headers={
+                    "User-Agent": "trade-signal-app/0.1",
+                    "X-MBX-APIKEY": self._api_key,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+            )
+            try:
+                with urlopen(request, timeout=self._timeout, context=self._ssl_context) as response:
+                    return json.load(response)
+            except HTTPError as exc:
+                detail = self._extract_http_error_detail(exc)
+                message = f"Binance SIGNED 接口请求失败：HTTP {exc.code}"
+                if detail:
+                    message = f"{message}，{detail}"
+                retryable = exc.code == 429 or exc.code >= 500
+                if retryable and attempt < 2:
+                    last_error = BinanceSignedAPIError(message, authentication_failure=False)
+                    time.sleep(0.2 * (attempt + 1))
+                    continue
+                raise BinanceSignedAPIError(message, authentication_failure=not retryable) from exc
+            except (HTTPException, IncompleteRead, TimeoutError, URLError, OSError, json.JSONDecodeError) as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(0.2 * (attempt + 1))
+                    continue
+        raise BinanceSignedAPIError(
+            f"Binance SIGNED 接口暂时不可用：{last_error}",
+            authentication_failure=False,
+        ) from last_error
 
     def _signed_get_json(self, path: str, params: dict[str, object] | None = None) -> object:
         return self._signed_request_json("GET", path, params)
@@ -270,6 +290,17 @@ class BinanceSpotGateway:
             }
         try:
             account = self.account(omit_zero_balances=True)
+        except BinanceSignedAPIError as exc:
+            return {
+                "exchange": "BINANCE",
+                "configured": True,
+                "authenticated": False,
+                "can_trade": False,
+                "status": "auth_failed" if exc.authentication_failure else "error",
+                "message": str(exc),
+                "balances": [],
+                "quote_available": 0.0,
+            }
         except Exception as exc:  # noqa: BLE001
             return {
                 "exchange": "BINANCE",

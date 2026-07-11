@@ -1546,6 +1546,8 @@ def _trading_readiness_payload(*, check_account: bool | None = None) -> dict[str
     has_credentials = bool(exchange_status.get("configured"))
     authenticated = bool(exchange_status.get("authenticated"))
     can_trade = bool(exchange_status.get("can_trade"))
+    exchange_state = str(exchange_status.get("status") or "")
+    exchange_message = str(exchange_status.get("message") or "").strip()
     quote_available = float(exchange_status.get("quote_available") or 0.0)
     live_ready = (
         config.live_enabled
@@ -1560,7 +1562,11 @@ def _trading_readiness_payload(*, check_account: bool | None = None) -> dict[str
         if not has_credentials:
             blockers.append(f"{exchange_label} API 凭据未配置")
         if has_credentials and not authenticated:
-            blockers.append(f"{exchange_label} 账户认证失败")
+            if exchange_state == "auth_failed":
+                blocker = f"{exchange_label} 账户认证失败"
+            else:
+                blocker = f"{exchange_label} 账户检查暂时不可用"
+            blockers.append(f"{blocker}：{exchange_message}" if exchange_message else blocker)
         if authenticated and not can_trade:
             blockers.append(f"{exchange_label} API 未开启交易权限")
         if not live_confirmed:
@@ -2245,6 +2251,7 @@ def _start_paper_auto_trading(
     interval_seconds: int = PAPER_AUTO_DEFAULT_INTERVAL_SECONDS,
     *,
     force_paper: bool = True,
+    run_immediately: bool = True,
 ) -> dict[str, object]:
     interval_seconds = max(PAPER_AUTO_MIN_INTERVAL_SECONDS, int(interval_seconds))
     global _PAPER_AUTO_STOP_EVENT, _PAPER_AUTO_THREAD
@@ -2281,7 +2288,8 @@ def _start_paper_auto_trading(
                 "mode_label": _auto_loop_mode_label(force_paper),
             }
         )
-    _run_paper_auto_once(interval_seconds, force_paper=force_paper)
+    if run_immediately:
+        _run_paper_auto_once(interval_seconds, force_paper=force_paper)
     with _PAPER_AUTO_LOCK:
         _PAPER_AUTO_THREAD = Thread(
             target=_paper_auto_worker,
@@ -4576,8 +4584,17 @@ class RequestHandler(BaseHTTPRequestHandler):
                     _get_first(form, "interval_seconds", str(PAPER_AUTO_DEFAULT_INTERVAL_SECONDS)),
                     "Auto Trade Interval",
                 )
+                run_immediately = not _parse_bool_flag(form, "defer_first_run")
                 self._send_text(
-                    json.dumps(_start_paper_auto_trading(interval_seconds, force_paper=False), ensure_ascii=False, indent=2),
+                    json.dumps(
+                        _start_paper_auto_trading(
+                            interval_seconds,
+                            force_paper=False,
+                            run_immediately=run_immediately,
+                        ),
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
                     content_type="application/json; charset=utf-8",
                 )
                 return
