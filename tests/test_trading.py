@@ -36,11 +36,13 @@ def _signal(
     buy_pressure_ratio: float = 0.62,
     ema_20: float = 0.0,
     ema_50: float = 0.0,
+    liquidity_eligible: bool = True,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         symbol=symbol,
         score=score,
         grade="A",
+        liquidity_eligible=liquidity_eligible,
         ticker=SimpleNamespace(last_price=price, quote_volume=quote_volume),
         indicators=SimpleNamespace(
             close_price=price,
@@ -223,6 +225,18 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(second.events[0].status, "no_eligible_signal")
         self.assertEqual(len(first_persisted), 1)
         self.assertEqual(len(second_persisted), 1)
+
+    def test_liquidity_observation_candidate_cannot_open_paper_position(self) -> None:
+        signal = _signal(symbol="THINUSDT", score=95.0, liquidity_eligible=False)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            trader = AutoTrader(scanner=FakeScanner([signal]), state_store=store)
+
+            report = trader.run_once(AutoTradeDefaults(enabled=True, mode="paper", score_threshold=75.0))
+
+        self.assertEqual(report.open_positions, [])
+        self.assertEqual(report.events[0].status, "no_eligible_signal")
+        self.assertIn("流动性门槛未通过的 1 个", report.events[0].message)
 
     def test_isolated_paper_mode_can_open_same_symbol_as_live_position(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

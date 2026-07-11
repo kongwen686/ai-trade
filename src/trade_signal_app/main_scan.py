@@ -12,7 +12,7 @@ from .service import (
     FALLBACK_SCAN_BASES,
     LEVERAGED_SUFFIXES,
     STABLELIKE_BASES,
-    filter_tickers_by_liquidity_tier,
+    select_tickers_for_scan,
 )
 from .time_utils import now_app_time
 from .ui import format_signal_row
@@ -173,6 +173,9 @@ def _format_scan_signal_row(signal: object) -> dict[str, object]:
             "community_drivers": [],
             "community_risks": [],
             "community_samples": [],
+            "liquidity_eligible": bool(getattr(signal, "liquidity_eligible", True)),
+            "liquidity_tier": str(getattr(signal, "liquidity_tier", "")),
+            "liquidity_issue": str(getattr(signal, "liquidity_issue", "")),
             "breakdown": {
                 "trend": 50.0,
                 "momentum": 50.0,
@@ -254,17 +257,18 @@ def _fallback_scan_payload(params: dict[str, object], warning: str, *, scanner: 
         if _is_fallback_ticker_eligible(ticker.symbol.upper(), quote_asset):
             tickers.append(ticker)
     eligible_symbols = {ticker.symbol for ticker in tickers}
-    filtered_tickers, liquidity_profiles, liquidity_tier_stats = filter_tickers_by_liquidity_tier(
+    selected_tickers, filtered_tickers, liquidity_profiles, liquidity_tier_stats, liquidity_status = select_tickers_for_scan(
         tickers,
         eligible_symbols=eligible_symbols,
         quote_asset=quote_asset,
         profile_source=params,
+        candidate_pool=int(params["candidate_pool"]),
         alt_min_quote_volume=float(params["min_quote_volume"]),
         alt_min_trade_count=int(params["min_trade_count"]),
     )
-    selected_tickers = filtered_tickers[: int(params["candidate_pool"])]
     signals = []
     for ticker in selected_tickers:
+        status = liquidity_status[ticker.symbol]
         score = min(82.0, 50.0 + abs(ticker.price_change_percent) * 3 + min(ticker.quote_volume / 1_000_000_000, 10.0))
         signals.append(
             {
@@ -272,7 +276,10 @@ def _fallback_scan_payload(params: dict[str, object], warning: str, *, scanner: 
                 "score": round(score, 2),
                 "grade": "B" if score >= 70 else "C",
                 "reasons": ["实时 ticker 快速返回", f"24h 成交额 {ticker.quote_volume / 1_000_000:.1f}M"],
-                "warnings": [warning],
+                "warnings": [item for item in (str(status["message"]), warning) if item],
+                "liquidity_eligible": bool(status["eligible"]),
+                "liquidity_tier": str(status["tier"]),
+                "liquidity_issue": str(status["message"]),
                 "last_price": ticker.last_price,
                 "quote_volume_m": ticker.quote_volume / 1_000_000,
                 "price_change_percent": ticker.price_change_percent,
@@ -305,7 +312,7 @@ def _fallback_scan_payload(params: dict[str, object], warning: str, *, scanner: 
                     "momentum": 50.0,
                     "timing": 50.0,
                     "volume": 50.0,
-                    "liquidity": min(100.0, ticker.quote_volume / 10_000_000),
+                    "liquidity": min(100.0, ticker.quote_volume / 10_000_000) if status["eligible"] else min(35.0, ticker.quote_volume / 10_000_000),
                     "market": 50.0,
                     "community": 0.0,
                 },

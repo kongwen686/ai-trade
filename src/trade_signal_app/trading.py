@@ -325,6 +325,7 @@ class AutoTrader:
         summary, signals = self.scan_result if self.scan_result is not None else self.scanner.scan()
         now = now_app_time()
         filter_counts = {
+            "liquidity": 0,
             "score": 0,
             "volume": 0,
             "buy_pressure": 0,
@@ -430,6 +431,9 @@ class AutoTrader:
                     )
                 )
                 continue
+            if not bool(getattr(signal, "liquidity_eligible", True)):
+                filter_counts["liquidity"] += 1
+                continue
             if signal.score < config.score_threshold:
                 filter_counts["score"] += 1
                 continue
@@ -503,6 +507,7 @@ class AutoTrader:
                 status=NO_ELIGIBLE_SIGNAL_STATUS,
                 message=(
                     f"本轮扫描 {summary.returned_signals} 个候选，未产生订单："
+                    f"流动性门槛未通过的 {filter_counts['liquidity']} 个，"
                     f"评分低于 {config.score_threshold:.1f} 的 {filter_counts['score']} 个，"
                     f"量比低于 {config.min_volume_ratio:.2f} 的 {filter_counts['volume']} 个，"
                     f"买压低于 {config.min_buy_pressure:.2f} 的 {filter_counts['buy_pressure']} 个，"

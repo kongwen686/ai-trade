@@ -4,7 +4,7 @@ import unittest
 from trade_signal_app.binance_client import BinancePublicAPIError
 from trade_signal_app.config import AppSettings
 from trade_signal_app.models import MarketTicker
-from trade_signal_app.service import SignalScanner, filter_tickers_by_liquidity_tier
+from trade_signal_app.service import SignalScanner, filter_tickers_by_liquidity_tier, select_tickers_for_scan
 
 
 def _permissive_settings() -> AppSettings:
@@ -127,6 +127,7 @@ class SignalScannerTests(unittest.TestCase):
                 {"symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT", "status": "TRADING"},
                 {"symbol": "USDEUSDT", "baseAsset": "USDE", "quoteAsset": "USDT", "status": "TRADING"},
                 {"symbol": "USD1USDT", "baseAsset": "USD1", "quoteAsset": "USDT", "status": "TRADING"},
+                {"symbol": "RLUSDUSDT", "baseAsset": "RLUSD", "quoteAsset": "USDT", "status": "TRADING"},
             ]
         }
 
@@ -177,6 +178,38 @@ class SignalScannerTests(unittest.TestCase):
         self.assertEqual(stats["top30"], {"universe": 25, "eligible": 25})
         self.assertEqual(stats["alt"], {"universe": 10, "eligible": 0})
         self.assertEqual(applied_profiles["top30"]["min_quote_volume"], 800.0)
+
+    def test_scan_selection_backfills_observation_candidates_to_target_size(self) -> None:
+        tickers = [
+            MarketTicker(
+                symbol=f"ALT{index}USDT",
+                last_price=1.0,
+                price_change_percent=0.0,
+                quote_volume=1_000.0 - index * 100,
+                volume=100.0,
+                trade_count=100,
+            )
+            for index in range(5)
+        ]
+        profiles = {
+            "min_quote_volume": 900,
+            "min_trade_count": 1,
+            "top30_min_quote_volume": 900,
+            "top30_min_trade_count": 1,
+        }
+
+        selected, qualified, _, _, status = select_tickers_for_scan(
+            tickers,
+            eligible_symbols={ticker.symbol for ticker in tickers},
+            quote_asset="USDT",
+            profile_source=profiles,
+            candidate_pool=4,
+        )
+
+        self.assertEqual(len(selected), 4)
+        self.assertEqual([ticker.symbol for ticker in qualified], ["ALT0USDT", "ALT1USDT"])
+        self.assertEqual(sum(bool(status[ticker.symbol]["eligible"]) for ticker in selected), 2)
+        self.assertIn("仅扫描观察", str(status["ALT2USDT"]["message"]))
 
 
 if __name__ == "__main__":

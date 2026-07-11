@@ -1900,6 +1900,8 @@ def _run_forced_paper_trading_once() -> dict[str, object]:
                 )
             )
             continue
+        if not bool(signal.get("liquidity_eligible", True)):
+            continue
         if score < config.score_threshold:
             continue
         volatility_issue = _scan_signal_volatility_entry_reason(signal, config)
@@ -2142,6 +2144,8 @@ def _record_signal_scan_snapshot(summary: object, signals: list[object]) -> None
             "interval": str(value(summary, "interval", "")),
             "scanned_symbols": int(value(summary, "scanned_symbols", len(signals)) or 0),
             "returned_signals": int(value(summary, "returned_signals", len(signals)) or 0),
+            "eligible_symbols": int(value(summary, "eligible_symbols", len(signals)) or 0),
+            "liquidity_eligible_signals": sum(bool(value(signal, "liquidity_eligible", True)) for signal in signals),
             "max_score": round(max(scores, default=0.0), 2),
             "average_score": round(sum(scores) / len(scores), 2) if scores else 0.0,
             "median_score": round(median_score, 2),

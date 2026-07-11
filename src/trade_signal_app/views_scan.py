@@ -193,6 +193,12 @@ def _signal_card(signal: dict[str, object]) -> str:
     grade_class = str(signal["grade"]).lower().replace("+", "-plus")
     community = _community_badge(signal)
     change_pct = float(signal["price_change_percent"])
+    liquidity_eligible = bool(signal.get("liquidity_eligible", True))
+    liquidity_badge = (
+        '<span class="ant-tag positive">流动性合格</span>'
+        if liquidity_eligible
+        else '<span class="ant-tag warning">仅扫描观察</span>'
+    )
 
     return f"""
     <article class="ant-card signal-card grade-{grade_class}" data-live-symbol="{escape(str(signal['symbol']))}">
@@ -235,6 +241,7 @@ def _signal_card(signal: dict[str, object]) -> str:
       </div>
 
       <div class="chips">
+        {liquidity_badge}
         {_chips(signal["reasons"], "positive")}
         {_chips(signal["warnings"], "warning")}
         {community}
@@ -415,7 +422,7 @@ def render_index_page(
       <div class="ant-statistic-card stat-card">
         <span>{t("评分候选", "Scored Candidates")}</span>
         <strong>{candidate_symbols}</strong>
-        <small>{t("候选设置", "configured")} {candidate_pool} · {t("可选池", "eligible")} {eligible_symbols}</small>
+        <small>{t("扫描目标", "target")} {candidate_pool} · {t("流动性合格", "liquidity eligible")} {eligible_symbols}</small>
       </div>
       <div class="ant-statistic-card stat-card">
         <span>{t("返回信号", "Returned Signals")}</span>
@@ -458,7 +465,7 @@ def render_index_page(
           <button type="submit" name="refresh" value="1">{t("刷新信号", "Refresh Signals")}</button>
         </form>
         <p class="helper-text">
-          {t("BTC、ETH、XRP、SOL、BNB 与 Top 30 使用系统配置中的分类流动性门槛；此处仅临时覆盖其他山寨币门槛。数据来自 Binance Spot 市场接口。社区热度支持 Binance/OKX 官方热点、X/Twitter、Reddit 和本地", "BTC, ETH, XRP, SOL, BNB, and Top 30 use tiered liquidity thresholds from system settings; these controls only override other altcoins. Market data comes from Binance Spot APIs. Community heat supports Binance/OKX official trends, X/Twitter, Reddit, and local")} <code>data/community_scores.csv</code>{t("，未配置时会自动忽略不可用来源。", "; unavailable sources are skipped automatically.")}
+          {t("候选数表示实际扫描目标；BTC、ETH、XRP、SOL、BNB、Top 30 和其他山寨币分别使用系统配置中的流动性门槛。未达门槛的币种仍可进入扫描观察，但不会进入模拟或实盘自动交易。数据来自 Binance Spot 市场接口。社区热度支持 Binance/OKX 官方热点、X/Twitter、Reddit 和本地", "Candidate count is the scan target. BTC, ETH, XRP, SOL, BNB, Top 30, and other altcoins use separate liquidity gates. Symbols below their gate remain visible for research but cannot enter paper or live auto trading. Market data comes from Binance Spot APIs. Community heat supports Binance/OKX official trends, X/Twitter, Reddit, and local")} <code>data/community_scores.csv</code>{t("，未配置时会自动忽略不可用来源。", "; unavailable sources are skipped automatically.")}
         </p>
         {_community_operation_panel(params, ordered_signals, active_lang)}
         <div class="scan-view-bar">

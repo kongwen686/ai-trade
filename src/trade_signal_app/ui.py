@@ -64,6 +64,9 @@ def format_signal_row(signal: TradeSignal) -> dict:
         "community_drivers": [] if signal.community_signal is None else signal.community_signal.drivers,
         "community_risks": [] if signal.community_signal is None else signal.community_signal.risks,
         "community_samples": [] if signal.community_signal is None else signal.community_signal.samples,
+        "liquidity_eligible": signal.liquidity_eligible,
+        "liquidity_tier": signal.liquidity_tier,
+        "liquidity_issue": signal.liquidity_issue,
         "breakdown": {
             "trend": signal.breakdown.trend,
             "momentum": signal.breakdown.momentum,

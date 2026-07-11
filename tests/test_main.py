@@ -789,7 +789,7 @@ class MainTests(unittest.TestCase):
 
         self.assertIn("展示模式", html)
         self.assertIn("评分候选", html)
-        self.assertIn("可选池", html)
+        self.assertIn("流动性合格", html)
         self.assertIn("signal-table", html)
         self.assertIn("BTCUSDT", html)
         self.assertIn("社区热度分析", html)

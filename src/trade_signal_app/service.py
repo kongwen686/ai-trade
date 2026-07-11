@@ -20,6 +20,7 @@ STABLELIKE_BASES = {
     "GUSD",
     "PAX",
     "PYUSD",
+    "RLUSD",
     "SUSD",
     "TUSD",
     "USD1",
@@ -35,6 +36,7 @@ LEVERAGED_SUFFIXES = ("UP", "DOWN", "BULL", "BEAR")
 SCAN_LIQUIDITY_SPECIAL_BASES = ("BTC", "ETH", "XRP", "SOL", "BNB")
 SCAN_LIQUIDITY_TIERS = (*SCAN_LIQUIDITY_SPECIAL_BASES, "top30", "alt")
 SCAN_TOP_RANK_SIZE = 30
+SCAN_CANDIDATE_RESERVE_SIZE = 8
 FALLBACK_SCAN_BASES = (
     "BTC",
     "ETH",
@@ -110,6 +112,32 @@ def scan_liquidity_profiles(
     return profiles
 
 
+def _ticker_liquidity_tier(ticker: MarketTicker, *, quote_asset: str, top_symbols: set[str]) -> str:
+    normalized_quote = quote_asset.upper()
+    base = ticker.symbol[: -len(normalized_quote)] if ticker.symbol.endswith(normalized_quote) else ticker.symbol
+    return base if base in SCAN_LIQUIDITY_SPECIAL_BASES else "top30" if ticker.symbol in top_symbols else "alt"
+
+
+def _liquidity_gate_status(ticker: MarketTicker, *, tier: str, threshold: dict[str, float | int]) -> dict[str, object]:
+    min_quote_volume = float(threshold["min_quote_volume"])
+    min_trade_count = int(threshold["min_trade_count"])
+    volume_pass = ticker.quote_volume >= min_quote_volume
+    trades_pass = ticker.trade_count >= min_trade_count
+    issues = []
+    if not volume_pass:
+        issues.append(f"24H成交额 {ticker.quote_volume / 1_000_000:.1f}M < {min_quote_volume / 1_000_000:.1f}M")
+    if not trades_pass:
+        issues.append(f"24H成交笔数 {ticker.trade_count} < {min_trade_count}")
+    eligible = volume_pass and trades_pass
+    return {
+        "tier": tier,
+        "eligible": eligible,
+        "volume_pass": volume_pass,
+        "trades_pass": trades_pass,
+        "message": "" if eligible else "仅扫描观察，不进入自动交易：" + "；".join(issues),
+    }
+
+
 def filter_tickers_by_liquidity_tier(
     tickers: list[MarketTicker],
     *,
@@ -132,10 +160,8 @@ def filter_tickers_by_liquidity_tier(
     )
     stats = {tier: {"universe": 0, "eligible": 0} for tier in SCAN_LIQUIDITY_TIERS}
     filtered: list[MarketTicker] = []
-    normalized_quote = quote_asset.upper()
     for ticker in ranked:
-        base = ticker.symbol[: -len(normalized_quote)] if ticker.symbol.endswith(normalized_quote) else ticker.symbol
-        tier = base if base in SCAN_LIQUIDITY_SPECIAL_BASES else "top30" if ticker.symbol in top_symbols else "alt"
+        tier = _ticker_liquidity_tier(ticker, quote_asset=quote_asset, top_symbols=top_symbols)
         stats[tier]["universe"] += 1
         threshold = profiles[tier]
         if (
@@ -145,6 +171,53 @@ def filter_tickers_by_liquidity_tier(
             filtered.append(ticker)
             stats[tier]["eligible"] += 1
     return filtered, profiles, stats
+
+
+def select_tickers_for_scan(
+    tickers: list[MarketTicker],
+    *,
+    eligible_symbols: set[str],
+    quote_asset: str,
+    profile_source: object,
+    candidate_pool: int,
+    alt_min_quote_volume: float | None = None,
+    alt_min_trade_count: int | None = None,
+) -> tuple[
+    list[MarketTicker],
+    list[MarketTicker],
+    dict[str, dict[str, float | int]],
+    dict[str, dict[str, int]],
+    dict[str, dict[str, object]],
+]:
+    ranked = sorted(
+        [ticker for ticker in tickers if ticker.symbol in eligible_symbols],
+        key=lambda item: item.quote_volume,
+        reverse=True,
+    )
+    qualified, profiles, stats = filter_tickers_by_liquidity_tier(
+        ranked,
+        eligible_symbols=eligible_symbols,
+        quote_asset=quote_asset,
+        profile_source=profile_source,
+        alt_min_quote_volume=alt_min_quote_volume,
+        alt_min_trade_count=alt_min_trade_count,
+    )
+    qualified_symbols = {ticker.symbol for ticker in qualified}
+    selected = qualified[:candidate_pool]
+    if len(selected) < candidate_pool:
+        selected.extend(
+            ticker
+            for ticker in ranked
+            if ticker.symbol not in qualified_symbols
+        )
+        selected = selected[:candidate_pool]
+
+    top_symbols = {ticker.symbol for ticker in ranked[:SCAN_TOP_RANK_SIZE]}
+    status_by_symbol = {}
+    for ticker in selected:
+        tier = _ticker_liquidity_tier(ticker, quote_asset=quote_asset, top_symbols=top_symbols)
+        status_by_symbol[ticker.symbol] = _liquidity_gate_status(ticker, tier=tier, threshold=profiles[tier])
+    return selected, qualified, profiles, stats, status_by_symbol
 
 
 class SignalScanner:
@@ -186,15 +259,16 @@ class SignalScanner:
                 eligible_symbols = self._fallback_symbols(quote_asset)
         ticker_rows = self.gateway.ticker24hr_symbols(sorted(eligible_symbols))
         tickers = [parse_ticker(row) for row in ticker_rows]
-        filtered, liquidity_profiles, liquidity_tier_stats = filter_tickers_by_liquidity_tier(
+        selected, filtered, liquidity_profiles, liquidity_tier_stats, liquidity_status = select_tickers_for_scan(
             tickers,
             eligible_symbols=eligible_symbols,
             quote_asset=quote_asset,
             profile_source=self.settings,
+            candidate_pool=candidate_pool + SCAN_CANDIDATE_RESERVE_SIZE,
             alt_min_quote_volume=min_quote_volume,
             alt_min_trade_count=min_trade_count,
         )
-        selected = filtered[:candidate_pool]
+        target_candidate_count = min(candidate_pool, len(selected))
         self.community_provider.prepare([ticker.symbol for ticker in selected])
 
         kline_map = self.gateway.map_klines(
@@ -213,32 +287,39 @@ class SignalScanner:
                 indicators = build_indicator_snapshot(candles)
             except ValueError:
                 continue
-            ready.append((ticker, indicators, self.community_provider.get(ticker.symbol)))
+            ready.append((ticker, indicators, self.community_provider.get(ticker.symbol), liquidity_status[ticker.symbol]))
+            if len(ready) >= candidate_pool:
+                break
 
         if not ready:
             summary = ScanSummary(
                 quote_asset=quote_asset,
                 interval=interval,
-                scanned_symbols=len(selected),
+                scanned_symbols=target_candidate_count,
                 returned_signals=0,
                 min_quote_volume=min_quote_volume,
                 min_trade_count=min_trade_count,
                 fetched_at=now_app_time(),
                 eligible_symbols=len(filtered),
-                candidate_symbols=len(selected),
+                candidate_symbols=target_candidate_count,
                 candidate_pool=candidate_pool,
                 liquidity_profiles=liquidity_profiles,
                 liquidity_tier_stats=liquidity_tier_stats,
             )
             return summary, []
 
-        quote_volumes = [ticker.quote_volume for ticker, _, _ in ready]
-        trade_counts = [ticker.trade_count for ticker, _, _ in ready]
+        quote_volumes = [ticker.quote_volume for ticker, _, _, _ in ready]
+        trade_counts = [ticker.trade_count for ticker, _, _, _ in ready]
         signals: list[TradeSignal] = []
         now = now_app_time()
 
-        for ticker, indicators, community_signal in ready:
-            liquidity_score = compute_liquidity_score(ticker, quote_volumes, trade_counts)
+        for ticker, indicators, community_signal, status in ready:
+            liquidity_score = compute_liquidity_score(
+                ticker,
+                quote_volumes,
+                trade_counts,
+                eligible=bool(status["eligible"]),
+            )
             breakdown = build_subscores(
                 ticker=ticker,
                 indicators=indicators,
@@ -246,6 +327,9 @@ class SignalScanner:
                 community_signal=community_signal,
             )
             reasons, warnings = build_reasons(ticker, indicators, community_signal)
+            liquidity_issue = str(status["message"])
+            if liquidity_issue:
+                warnings = [liquidity_issue, *warnings][:3]
             score = composite_score(breakdown)
             signals.append(
                 TradeSignal(
@@ -260,6 +344,9 @@ class SignalScanner:
                     liquidity_score=liquidity_score,
                     community_signal=community_signal,
                     fetched_at=now,
+                    liquidity_eligible=bool(status["eligible"]),
+                    liquidity_tier=str(status["tier"]),
+                    liquidity_issue=liquidity_issue,
                 )
             )
 
@@ -267,13 +354,13 @@ class SignalScanner:
         summary = ScanSummary(
             quote_asset=quote_asset,
             interval=interval,
-            scanned_symbols=len(selected),
+            scanned_symbols=target_candidate_count,
             returned_signals=len(signals),
             min_quote_volume=min_quote_volume,
             min_trade_count=min_trade_count,
             fetched_at=now,
             eligible_symbols=len(filtered),
-            candidate_symbols=len(selected),
+            candidate_symbols=target_candidate_count,
             candidate_pool=candidate_pool,
             liquidity_profiles=liquidity_profiles,
             liquidity_tier_stats=liquidity_tier_stats,

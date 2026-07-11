@@ -15,17 +15,24 @@ def _scaled_range(value: float, lower: float, upper: float) -> float:
     return clamp(normalized * 100, 0, 100)
 
 
-def compute_liquidity_score(ticker: MarketTicker, quote_volumes: list[float], trade_counts: list[int]) -> float:
+def compute_liquidity_score(
+    ticker: MarketTicker,
+    quote_volumes: list[float],
+    trade_counts: list[int],
+    *,
+    eligible: bool = True,
+) -> float:
     # Every ticker here has already passed its tier's liquidity gate. A log scale
     # prevents BTC-sized outliers from forcing otherwise tradable candidates to 0.
-    quote_score = LIQUIDITY_SCORE_FLOOR + (
+    floor = LIQUIDITY_SCORE_FLOOR if eligible else 0.0
+    quote_score = floor + (
         _scaled_range(log1p(ticker.quote_volume), log1p(min(quote_volumes)), log1p(max(quote_volumes)))
-        * (100.0 - LIQUIDITY_SCORE_FLOOR)
+        * (100.0 - floor)
         / 100.0
     )
-    trade_score = LIQUIDITY_SCORE_FLOOR + (
+    trade_score = floor + (
         _scaled_range(log1p(float(ticker.trade_count)), log1p(float(min(trade_counts))), log1p(float(max(trade_counts))))
-        * (100.0 - LIQUIDITY_SCORE_FLOOR)
+        * (100.0 - floor)
         / 100.0
     )
     return round((quote_score * 0.65) + (trade_score * 0.35), 2)

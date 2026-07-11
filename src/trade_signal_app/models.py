@@ -105,6 +105,9 @@ class TradeSignal:
     liquidity_score: float
     community_signal: CommunitySignal | None
     fetched_at: datetime
+    liquidity_eligible: bool = True
+    liquidity_tier: str = ""
+    liquidity_issue: str = ""
 
 
 @dataclass(frozen=True)
