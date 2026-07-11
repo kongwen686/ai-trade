@@ -34,6 +34,8 @@ def _signal(
     atr_pct: float = 1.0,
     volume_ratio: float = 1.4,
     buy_pressure_ratio: float = 0.62,
+    ema_20: float = 0.0,
+    ema_50: float = 0.0,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         symbol=symbol,
@@ -41,6 +43,9 @@ def _signal(
         grade="A",
         ticker=SimpleNamespace(last_price=price, quote_volume=quote_volume),
         indicators=SimpleNamespace(
+            close_price=price,
+            ema_20=ema_20,
+            ema_50=ema_50,
             volume_ratio=volume_ratio,
             buy_pressure_ratio=buy_pressure_ratio,
             rsi_14=rsi,
@@ -379,6 +384,93 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(report.events[0].action, "HOLD")
         self.assertEqual(report.events[0].status, "trend_hold")
         self.assertGreater(report.open_positions[0].stop_price, 100.0)
+
+    def test_trend_following_holds_when_ema_trend_is_intact_during_normal_volume_contraction(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            store.save(
+                [
+                    TradingPosition(
+                        symbol="BTCUSDT",
+                        quantity=1.0,
+                        entry_price=100.0,
+                        quote_notional=100.0,
+                        score=82.0,
+                        grade="A",
+                        opened_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                        stop_price=96.0,
+                        take_profit_price=104.0,
+                        mode="paper",
+                    )
+                ]
+            )
+            scanner = FakeScanner(
+                [
+                    _signal(
+                        score=78.0,
+                        price=105.0,
+                        volume_ratio=1.0,
+                        buy_pressure_ratio=0.50,
+                        ema_20=103.0,
+                        ema_50=100.0,
+                    )
+                ]
+            )
+            trader = AutoTrader(scanner=scanner, state_store=store)
+
+            report = trader.run_once(
+                AutoTradeDefaults(
+                    enabled=True,
+                    mode="paper",
+                    score_threshold=75.0,
+                    exit_profile="trend_following",
+                    trend_hold_min_score=82.0,
+                    trend_hold_min_volume_ratio=1.25,
+                    trend_hold_min_buy_pressure=0.56,
+                )
+            )
+
+        self.assertEqual(len(report.open_positions), 1)
+        self.assertEqual(report.events[0].status, "trend_hold")
+        self.assertGreater(report.open_positions[0].stop_price, 100.0)
+        self.assertEqual(report.events[0].response["trailing_stop_price"], report.open_positions[0].stop_price)
+
+    def test_take_profit_sale_cannot_rebuy_same_symbol_during_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            store.save(
+                [
+                    TradingPosition(
+                        symbol="BTCUSDT",
+                        quantity=1.0,
+                        entry_price=100.0,
+                        quote_notional=100.0,
+                        score=82.0,
+                        grade="A",
+                        opened_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                        stop_price=96.0,
+                        take_profit_price=104.0,
+                        mode="paper",
+                    )
+                ]
+            )
+            trader = AutoTrader(scanner=FakeScanner([_signal(score=90.0, price=105.0)]), state_store=store)
+            config = AutoTradeDefaults(
+                enabled=True,
+                mode="paper",
+                score_threshold=75.0,
+                cooldown_minutes=240,
+            )
+            report = trader.run_once(config)
+
+            next_trader = AutoTrader(scanner=FakeScanner([_signal(score=90.0, price=106.0)]), state_store=store)
+            next_report = next_trader.run_once(config)
+
+        self.assertEqual(report.open_positions, [])
+        self.assertEqual([(event.action, event.exit_reason) for event in report.events], [("SELL", "take_profit")])
+        self.assertEqual(next_report.open_positions, [])
+        self.assertEqual(next_report.events[0].status, "no_eligible_signal")
+        self.assertIn("成交冷却期内的 1 个", next_report.events[0].message)
 
     def test_emergency_drawdown_records_alert_before_stop_loss(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

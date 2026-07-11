@@ -328,6 +328,7 @@ class AutoTrader:
             "score": 0,
             "volume": 0,
             "buy_pressure": 0,
+            "cooldown": 0,
             "position_limit": 0,
             "exposure_limit": 0,
         }
@@ -394,9 +395,13 @@ class AutoTrader:
         exposure = sum(self._position_margin_notional(position) for position in positions)
         cooldown_after = now - timedelta(minutes=config.cooldown_minutes)
         recent_symbols = {
-            position.symbol
-            for position in positions
-            if position.opened_at > cooldown_after
+            event.symbol
+            for event in [*recent_events, *events]
+            if event.mode == config.mode
+            and event.action in TRADE_EVENT_ACTIONS
+            and event.status in FILLED_TRADE_STATUSES
+            and event.symbol != "*"
+            and event.created_at > cooldown_after
         }
 
         for signal_index, signal in enumerate(signals):
@@ -406,7 +411,10 @@ class AutoTrader:
             if exposure + config.quote_order_qty > config.max_total_quote_exposure:
                 filter_counts["exposure_limit"] = len(signals) - signal_index
                 break
-            if signal.symbol in open_symbols or signal.symbol in recent_symbols:
+            if signal.symbol in open_symbols:
+                continue
+            if signal.symbol in recent_symbols:
+                filter_counts["cooldown"] += 1
                 continue
             if signal.symbol in self.blocked_symbols:
                 events.append(
@@ -498,6 +506,7 @@ class AutoTrader:
                     f"评分低于 {config.score_threshold:.1f} 的 {filter_counts['score']} 个，"
                     f"量比低于 {config.min_volume_ratio:.2f} 的 {filter_counts['volume']} 个，"
                     f"买压低于 {config.min_buy_pressure:.2f} 的 {filter_counts['buy_pressure']} 个，"
+                    f"成交冷却期内的 {filter_counts['cooldown']} 个，"
                     f"持仓上限阻断 {filter_counts['position_limit']} 个，"
                     f"敞口上限阻断 {filter_counts['exposure_limit']} 个。"
                 ),
@@ -611,11 +620,16 @@ class AutoTrader:
             symbol=position.symbol,
             mode=position.mode,
             status="trend_hold",
-            message="已达到固定止盈，但趋势信号仍强，继续持有并用移动止损保护浮盈。",
+            message=f"已达到固定止盈，但评分与趋势结构仍有效；继续持有，移动止损已上移至 {position.stop_price:.8g}。",
             score=score,
             price=price,
             quantity=position.quantity,
             quote_notional=position.quote_notional,
+            response={
+                "highest_price": position.highest_price or price,
+                "trailing_stop_price": position.stop_price,
+                "fixed_take_profit_price": position.take_profit_price,
+            },
             exchange=position.exchange,
         )
 
@@ -634,11 +648,20 @@ class AutoTrader:
         score = self._signal_float(signal, "score")
         volume_ratio = self._signal_indicator_float(signal, "volume_ratio", 1.0)
         buy_pressure_ratio = self._signal_indicator_float(signal, "buy_pressure_ratio", 0.0)
-        return (
+        strong_confirmation = (
             score >= config.trend_hold_min_score
             and volume_ratio >= config.trend_hold_min_volume_ratio
             and buy_pressure_ratio >= config.trend_hold_min_buy_pressure
         )
+        close_price = self._signal_indicator_float(signal, "close_price", self._signal_price(signal))
+        ema_20 = self._signal_indicator_float(signal, "ema_20", 0.0)
+        ema_50 = self._signal_indicator_float(signal, "ema_50", 0.0)
+        if close_price <= 0 or ema_20 <= 0 or ema_50 <= 0:
+            return strong_confirmation
+
+        trend_intact = close_price >= ema_20 >= ema_50
+        hold_score_floor = max(config.score_threshold, config.trend_hold_min_score - 5.0)
+        return trend_intact and score >= hold_score_floor
 
     def _emergency_drawdown_event(
         self,

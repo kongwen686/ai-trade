@@ -9,13 +9,12 @@ from urllib.request import Request, urlopen
 
 from .config import AppSettings
 from .data_services import get_llm_provider
-from .entry_filters import anti_chase_reason_from_config, structure_entry_reason_from_config
 from .models import TradeSignal
 from .onchain import OpenMultiChainOnchainProvider
 from .runtime_config import IntelligenceDefaults, RuntimeConfig
 from .service import SignalScanner
+from .strategy_hits import score_strategy_hits
 from .time_utils import now_app_time
-from .volatility import volatility_entry_reason
 
 
 @dataclass(frozen=True)
@@ -282,7 +281,7 @@ class IntelligenceHub:
         onchain_events = self._load_onchain_events(top_signals)
         spreads = self._build_spreads(top_signals)
         funding_rates = self._build_funding_rates(top_signals)
-        strategy_hits = self._build_strategy_hits(top_signals, funding_rates)
+        strategy_hits = self._build_strategy_hits(top_signals, funding_rates, spreads)
         twitter_accounts = self._build_twitter_accounts()
         execution_risk = self._build_execution_risk(
             onchain_events=onchain_events,
@@ -543,173 +542,29 @@ class IntelligenceHub:
         self,
         signals: list[TradeSignal],
         funding_rates: list[FundingRateSnapshot] | None = None,
+        spreads: list[SpreadOpportunity] | None = None,
     ) -> list[StrategyHit]:
         hits: list[StrategyHit] = []
-        threshold = self.runtime_config.autotrade_defaults.score_threshold
         funding_by_symbol = {item.symbol: item for item in (funding_rates or [])}
+        spread_by_symbol = {item.symbol: item for item in (spreads or [])}
         for signal in signals:
-            funding = funding_by_symbol.get(signal.symbol.upper())
-            anti_chase = anti_chase_reason_from_config(
-                rsi=float(getattr(signal.indicators, "rsi_14", 50.0)),
-                price_vs_ema20_pct=float(getattr(signal.indicators, "price_vs_ema20_pct", 0.0)),
-                recent_change_pct=float(getattr(signal.indicators, "recent_change_pct", 0.0)),
+            for decision in score_strategy_hits(
+                signal,
                 config=self.runtime_config.autotrade_defaults,
-            )
-            volatility_issue = volatility_entry_reason(
-                regime=str(getattr(signal.indicators, "volatility_regime", "normal")),
-                percentile=float(getattr(signal.indicators, "volatility_percentile", 50.0)),
-                ratio=float(getattr(signal.indicators, "volatility_ratio", 1.0)),
-                atr_pct=float(getattr(signal.indicators, "atr_pct", 0.0)),
-                enabled=self.runtime_config.autotrade_defaults.volatility_filter_enabled,
-                block_extreme=self.runtime_config.autotrade_defaults.block_extreme_volatility,
-                max_percentile=self.runtime_config.autotrade_defaults.max_entry_volatility_percentile,
-                max_ratio=self.runtime_config.autotrade_defaults.max_entry_volatility_ratio,
-            )
-            community_signal = getattr(signal, "community_signal", None)
-            community_score = None if community_signal is None else float(getattr(community_signal, "score", 0.0))
-            structure_issue = structure_entry_reason_from_config(
-                close_price=float(getattr(signal.indicators, "close_price", 0.0)),
-                support_level=float(getattr(signal.indicators, "support_level", 0.0)),
-                resistance_level=float(getattr(signal.indicators, "resistance_level", 0.0)),
-                support_distance_pct=float(getattr(signal.indicators, "support_distance_pct", 0.0)),
-                resistance_distance_pct=float(getattr(signal.indicators, "resistance_distance_pct", 0.0)),
-                support_strength=float(getattr(signal.indicators, "support_strength", 0.0)),
-                risk_reward_ratio=float(getattr(signal.indicators, "structure_risk_reward", 0.0)),
-                volume_ratio=float(getattr(signal.indicators, "volume_ratio", 1.0)),
-                buy_pressure_ratio=float(getattr(signal.indicators, "buy_pressure_ratio", 0.0)),
-                community_score=community_score,
-                config=self.runtime_config.autotrade_defaults,
-            )
-            if signal.score >= threshold:
+                funding=funding_by_symbol.get(signal.symbol.upper()),
+                spread=spread_by_symbol.get(signal.symbol.upper()),
+            ):
                 hits.append(
                     StrategyHit(
                         symbol=signal.symbol,
-                        strategy="auto_score_breakout",
-                        score=signal.score,
-                        grade=signal.grade,
-                        action="wait_volatility"
-                        if volatility_issue
-                        else "wait_pullback"
-                        if anti_chase
-                        else "wait_support"
-                        if structure_issue
-                        else "candidate_buy"
-                        if self.runtime_config.autotrade_defaults.enabled
-                        else "watch",
-                        reasons=[volatility_issue, *signal.reasons[:3]]
-                        if volatility_issue
-                        else [anti_chase, *signal.reasons[:3]]
-                        if anti_chase
-                        else [structure_issue, *signal.reasons[:3]]
-                        if structure_issue
-                        else signal.reasons[:4],
+                        strategy=decision.strategy,
+                        score=decision.score,
+                        grade=decision.grade,
+                        action=decision.action,
+                        reasons=decision.reasons,
                     )
                 )
-            if signal.indicators.volume_ratio >= 1.5 and signal.indicators.buy_pressure_ratio >= 0.56:
-                hits.append(
-                    StrategyHit(
-                        symbol=signal.symbol,
-                        strategy="volume_pressure",
-                        score=min(100.0, signal.score + 5),
-                        grade=signal.grade,
-                        action="priority_watch",
-                        reasons=["量能放大", "主动买盘增强", *signal.reasons[:2]],
-                    )
-                )
-            hits.extend(self._low_float_strategy_hits(signal, funding))
         return sorted(hits, key=lambda item: item.score, reverse=True)[:12]
-
-    @staticmethod
-    def _funding_reason(funding: FundingRateSnapshot | None) -> str:
-        if funding is None:
-            return "资金费率未接入，按现货量价降级观察"
-        return f"资金费率 {funding.funding_rate_bps:+.2f}bps/8h，年化 {funding.annualized_pct:+.1f}%"
-
-    def _low_float_strategy_hits(
-        self,
-        signal: TradeSignal,
-        funding: FundingRateSnapshot | None,
-    ) -> list[StrategyHit]:
-        hits: list[StrategyHit] = []
-        funding_rate = 0.0 if funding is None else funding.funding_rate
-        funding_confirmed = funding is not None
-        change_24h = float(signal.ticker.price_change_percent)
-        volume_ratio = float(signal.indicators.volume_ratio)
-        buy_pressure = float(signal.indicators.buy_pressure_ratio)
-        rsi = float(getattr(signal.indicators, "rsi_14", 50.0))
-        price_vs_ema20 = float(getattr(signal.indicators, "price_vs_ema20_pct", 0.0))
-
-        # Early momentum long: funding must not be overheated; mild/negative funding is a better chase filter.
-        if (
-            signal.score >= 68
-            and 8 <= change_24h <= 120
-            and volume_ratio >= 2.5
-            and buy_pressure >= 0.56
-            and funding_rate <= 0.00035
-        ):
-            score = min(100.0, signal.score + 4 + min(volume_ratio, 8.0))
-            if funding_rate < 0:
-                score = min(100.0, score + 3)
-            hits.append(
-                StrategyHit(
-                    symbol=signal.symbol,
-                    strategy="low_float_momentum_long",
-                    score=score,
-                    grade=signal.grade,
-                    action="long_watch" if funding_confirmed else "watch_requires_funding",
-                    reasons=[
-                        "早期放量突破",
-                        f"24h 涨幅 {change_24h:+.1f}%",
-                        f"量能 {volume_ratio:.2f}x",
-                        self._funding_reason(funding),
-                    ],
-                )
-            )
-
-        # Blow-off distribution short: positive funding and extended price confirm crowded longs.
-        if (
-            funding_rate >= 0.00025
-            and volume_ratio >= 2.0
-            and (change_24h >= 35 or rsi >= 78 or price_vs_ema20 >= 25)
-        ):
-            hits.append(
-                StrategyHit(
-                    symbol=signal.symbol,
-                    strategy="blowoff_distribution_short",
-                    score=min(100.0, 72 + funding_rate * 100_000 + min(volume_ratio * 2, 16)),
-                    grade=signal.grade,
-                    action="short_watch",
-                    reasons=[
-                        "末端分布/拥挤多头候选",
-                        f"24h 涨幅 {change_24h:+.1f}%",
-                        f"RSI {rsi:.1f}，偏离 EMA20 {price_vs_ema20:+.1f}%",
-                        self._funding_reason(funding),
-                    ],
-                )
-            )
-
-        # Capitulation rebound long: negative funding is the required short-crowding confirmation.
-        if (
-            funding_rate <= -0.00015
-            and change_24h <= -15
-            and (rsi <= 38 or price_vs_ema20 <= -12)
-        ):
-            hits.append(
-                StrategyHit(
-                    symbol=signal.symbol,
-                    strategy="capitulation_rebound_long",
-                    score=min(100.0, 68 + abs(funding_rate) * 100_000 + max(0.0, 38 - rsi)),
-                    grade=signal.grade,
-                    action="rebound_long_watch",
-                    reasons=[
-                        "暴跌后空头拥挤反弹候选",
-                        f"24h 跌幅 {change_24h:+.1f}%",
-                        f"RSI {rsi:.1f}，偏离 EMA20 {price_vs_ema20:+.1f}%",
-                        self._funding_reason(funding),
-                    ],
-                )
-            )
-        return hits
 
     def _build_execution_risk(
         self,

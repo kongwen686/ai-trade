@@ -2187,7 +2187,10 @@ class MainTests(unittest.TestCase):
         hit = payload["strategy_hits"][0]
         self.assertEqual(hit["symbol"], "BTCUSDT")
         self.assertEqual(hit["source"], "live_ticker")
-        self.assertIn(hit["strategy"], {"market_momentum_watch", "blowoff_distribution_short"})
+        self.assertIn(
+            hit["strategy"],
+            {"auto_score_breakout", "market_momentum_watch", "blowoff_distribution_short"},
+        )
         self.assertEqual(hit["funding_rate_bps"], 3.0)
         self.assertEqual(hit["spread_bps"], 12.5)
 

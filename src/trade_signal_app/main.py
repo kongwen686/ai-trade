@@ -41,6 +41,7 @@ from . import main_scan as scan_handlers
 from .main_request_body import _read_body, _strategy_description_from_body
 from .storage import LocalDataStore
 from .stat_arb import PairStatArbConfig, run_pair_stat_arb_from_archives
+from .strategy_hits import score_strategy_hits
 from .strategy_builder import compile_strategy, compile_strategy_template
 from .time_utils import APP_TIMEZONE, now_app_time
 from .volatility import volatility_entry_reason
@@ -2643,24 +2644,6 @@ def _float_from_mapping(row: dict[str, object], key: str, default: float = 0.0) 
         return default
 
 
-def _strategy_reason_context(
-    *,
-    funding: dict[str, object] | None,
-    spread: dict[str, object] | None,
-) -> tuple[float | None, float | None, list[str]]:
-    reasons: list[str] = []
-    funding_bps: float | None = None
-    spread_bps: float | None = None
-    if funding:
-        funding_bps = _float_from_mapping(funding, "funding_rate_bps")
-        annualized = _float_from_mapping(funding, "annualized_pct")
-        reasons.append(f"资金费率 {funding_bps:+.2f}bps/8h，年化 {annualized:+.1f}%")
-    if spread:
-        spread_bps = _float_from_mapping(spread, "spread_bps")
-        reasons.append(f"现货/合约价差 {spread_bps:+.2f}bps")
-    return funding_bps, spread_bps, reasons
-
-
 def _strategy_hit_row(
     *,
     signal: dict[str, object],
@@ -2695,7 +2678,6 @@ def _strategy_hits_from_signal_rows(
     runtime_config: RuntimeConfig,
     source: str,
 ) -> list[dict[str, object]]:
-    threshold = runtime_config.autotrade_defaults.score_threshold
     funding_by_symbol = {str(item.get("symbol") or "").upper(): item for item in funding_rates}
     spread_by_symbol = {str(item.get("symbol") or "").upper(): item for item in spreads}
     hits: list[dict[str, object]] = []
@@ -2712,108 +2694,24 @@ def _strategy_hits_from_signal_rows(
         symbol = str(signal.get("symbol") or "").upper()
         if not symbol:
             continue
-        score = _float_from_mapping(signal, "score")
-        grade = str(signal.get("grade") or ("A" if score >= 80 else "B" if score >= 65 else "C"))
-        base_reasons = [str(reason) for reason in signal.get("reasons", []) if str(reason).strip()] if isinstance(signal.get("reasons"), list) else []
         funding = funding_by_symbol.get(symbol)
         spread = spread_by_symbol.get(symbol)
-        funding_bps, spread_bps, context_reasons = _strategy_reason_context(funding=funding, spread=spread)
-        reasons = [*base_reasons[:3], *context_reasons]
-        change_pct = _float_from_mapping(signal, "price_change_percent")
-        volume_ratio = _float_from_mapping(signal, "volume_ratio", 1.0)
-        rsi = _float_from_mapping(signal, "rsi_14", 50.0)
-        ema_spread = _float_from_mapping(signal, "ema_spread_pct")
-        price_vs_ema20 = _float_from_mapping(signal, "price_vs_ema20_pct")
-        recent_change = _float_from_mapping(signal, "recent_change_pct")
-        funding_rate = _float_from_mapping(funding or {}, "funding_rate")
-        anti_chase = anti_chase_reason_from_config(
-            rsi=rsi,
-            price_vs_ema20_pct=price_vs_ema20,
-            recent_change_pct=recent_change,
+        funding_bps = _float_from_mapping(funding, "funding_rate_bps") if funding else None
+        spread_bps = _float_from_mapping(spread, "spread_bps") if spread else None
+        for decision in score_strategy_hits(
+            signal,
             config=runtime_config.autotrade_defaults,
-        )
-        volatility_issue = _scan_signal_volatility_entry_reason(signal, runtime_config.autotrade_defaults)
-        structure_issue = _scan_signal_structure_entry_reason(signal, runtime_config.autotrade_defaults)
-
-        if score >= threshold:
+            funding=funding,
+            spread=spread,
+        ):
             add_hit(
                 _strategy_hit_row(
                     signal=signal,
-                    strategy="auto_score_breakout",
-                    score=score,
-                    grade=grade,
-                    action="wait_volatility"
-                    if volatility_issue
-                    else "wait_pullback"
-                    if anti_chase
-                    else "wait_support"
-                    if structure_issue
-                    else "candidate_buy"
-                    if runtime_config.autotrade_defaults.enabled
-                    else "watch",
-                    reasons=[volatility_issue, *reasons[:4]]
-                    if volatility_issue
-                    else [anti_chase, *reasons[:4]]
-                    if anti_chase
-                    else [structure_issue, *reasons[:4]]
-                    if structure_issue
-                    else reasons or ["综合评分达到自动交易阈值"],
-                    funding_bps=funding_bps,
-                    spread_bps=spread_bps,
-                    source=source,
-                )
-            )
-        elif score >= 60 or abs(change_pct) >= 1.5:
-            add_hit(
-                _strategy_hit_row(
-                    signal=signal,
-                    strategy="market_momentum_watch",
-                    score=max(score, min(74.0, 58.0 + abs(change_pct) * 2)),
-                    grade=grade,
-                    action="watch",
-                    reasons=reasons or ["实时行情进入观察池", f"24h 涨跌幅 {change_pct:+.2f}%"],
-                    funding_bps=funding_bps,
-                    spread_bps=spread_bps,
-                    source=source,
-                )
-            )
-        if volume_ratio >= 1.5:
-            add_hit(
-                _strategy_hit_row(
-                    signal=signal,
-                    strategy="volume_pressure",
-                    score=min(100.0, score + min(volume_ratio * 2, 10.0)),
-                    grade=grade,
-                    action="priority_watch",
-                    reasons=["量能放大", *reasons[:4]],
-                    funding_bps=funding_bps,
-                    spread_bps=spread_bps,
-                    source=source,
-                )
-            )
-        if funding_rate >= 0.00025 and (change_pct >= 8 or rsi >= 72 or ema_spread >= 10):
-            add_hit(
-                _strategy_hit_row(
-                    signal=signal,
-                    strategy="blowoff_distribution_short",
-                    score=min(100.0, max(score, 72.0) + funding_rate * 100_000),
-                    grade=grade,
-                    action="short_watch",
-                    reasons=["多头拥挤/末端分布候选", f"24h 涨跌幅 {change_pct:+.2f}%", *context_reasons],
-                    funding_bps=funding_bps,
-                    spread_bps=spread_bps,
-                    source=source,
-                )
-            )
-        if funding_rate <= -0.00015 and change_pct <= -5:
-            add_hit(
-                _strategy_hit_row(
-                    signal=signal,
-                    strategy="capitulation_rebound_long",
-                    score=min(100.0, max(score, 68.0) + abs(funding_rate) * 100_000),
-                    grade=grade,
-                    action="rebound_long_watch",
-                    reasons=["空头拥挤反弹候选", f"24h 涨跌幅 {change_pct:+.2f}%", *context_reasons],
+                    strategy=decision.strategy,
+                    score=decision.score,
+                    grade=decision.grade,
+                    action=decision.action,
+                    reasons=decision.reasons,
                     funding_bps=funding_bps,
                     spread_bps=spread_bps,
                     source=source,

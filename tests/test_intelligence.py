@@ -5,8 +5,9 @@ from types import SimpleNamespace
 import tempfile
 import unittest
 
+import trade_signal_app.main as app_main
 from trade_signal_app.config import AppSettings
-from trade_signal_app.intelligence import IntelligenceHub, LlmInsightClient, OpenAIInsightClient
+from trade_signal_app.intelligence import FundingRateSnapshot, IntelligenceHub, LlmInsightClient, OpenAIInsightClient, SpreadOpportunity
 from trade_signal_app.runtime_config import RuntimeConfig
 
 
@@ -131,6 +132,77 @@ class IntelligenceTests(unittest.TestCase):
         self.assertIn("capitulation_rebound_long", strategies)
         reasons = " ".join(" ".join(hit.reasons) for hit in snapshot.strategy_hits)
         self.assertIn("资金费率", reasons)
+
+    def test_fast_and_full_strategy_scoring_paths_are_identical(self) -> None:
+        config = RuntimeConfig()
+        config.autotrade_defaults.enabled = True
+        signal = _signal("EARLYUSDT", 72.0, 1.0, change=35.0, volume_ratio=3.2)
+        funding = FundingRateSnapshot(
+            symbol="EARLYUSDT",
+            futures_exchange="BINANCE-PERP",
+            funding_rate=-0.0001,
+            funding_rate_bps=-1.0,
+            annualized_pct=-10.95,
+        )
+        spread = SpreadOpportunity(
+            symbol="EARLYUSDT",
+            spot_exchange="BINANCE",
+            futures_exchange="BINANCE-PERP",
+            spot_price=1.0,
+            futures_price=1.001,
+            spread_bps=10.0,
+            direction="basis",
+        )
+        hub = IntelligenceHub(
+            scanner=FakeScanner([signal]),
+            runtime_config=config,
+            settings=AppSettings(),
+        )
+
+        full_hits = hub._build_strategy_hits([signal], [funding], [spread])
+        fast_hits = app_main._strategy_hits_from_signal_rows(
+            [
+                {
+                    "symbol": signal.symbol,
+                    "score": signal.score,
+                    "grade": signal.grade,
+                    "reasons": signal.reasons,
+                    "last_price": signal.ticker.last_price,
+                    "price_change_percent": signal.ticker.price_change_percent,
+                    "volume_ratio": signal.indicators.volume_ratio,
+                    "buy_pressure_ratio": signal.indicators.buy_pressure_ratio,
+                    "ema_spread_pct": signal.indicators.ema_spread_pct,
+                    "rsi_14": signal.indicators.rsi_14,
+                    "price_vs_ema20_pct": signal.indicators.price_vs_ema20_pct,
+                    "recent_change_pct": signal.indicators.recent_change_pct,
+                }
+            ],
+            funding_rates=[
+                {
+                    "symbol": funding.symbol,
+                    "funding_rate": funding.funding_rate,
+                    "funding_rate_bps": funding.funding_rate_bps,
+                    "annualized_pct": funding.annualized_pct,
+                }
+            ],
+            spreads=[{"symbol": spread.symbol, "spread_bps": spread.spread_bps}],
+            runtime_config=config,
+            source="test",
+        )
+
+        full_payload = [
+            (hit.strategy, hit.score, hit.grade, hit.action, hit.reasons)
+            for hit in full_hits
+        ]
+        fast_payload = [
+            (hit["strategy"], hit["score"], hit["grade"], hit["action"], hit["reasons"])
+            for hit in fast_hits
+        ]
+        self.assertEqual(fast_payload, full_payload)
+        self.assertEqual(
+            {hit.strategy for hit in full_hits},
+            {"market_momentum_watch", "volume_pressure", "low_float_momentum_long"},
+        )
 
     def test_openai_response_text_extractor(self) -> None:
         payload = {
