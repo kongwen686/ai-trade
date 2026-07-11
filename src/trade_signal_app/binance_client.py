@@ -196,6 +196,50 @@ class BinanceSpotGateway:
         self._cache_set(cache_key, chunk_rows)
         return chunk_rows
 
+    def ticker_price(self, symbol: str) -> float:
+        normalized = symbol.upper().strip()
+        if not normalized:
+            raise ValueError("symbol is required")
+        data = self._get_json("/api/v3/ticker/price", {"symbol": normalized})
+        if not isinstance(data, dict) or "price" not in data:
+            raise BinancePublicAPIError("Binance ticker price response is invalid.")
+        return float(data["price"])
+
+    def ticker_prices(self, symbols: list[str]) -> dict[str, float]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for symbol in symbols:
+            normalized_symbol = symbol.upper().strip()
+            if normalized_symbol and normalized_symbol not in seen:
+                normalized.append(normalized_symbol)
+                seen.add(normalized_symbol)
+        if not normalized:
+            return {}
+        if len(normalized) == 1:
+            symbol = normalized[0]
+            return {symbol: self.ticker_price(symbol)}
+
+        try:
+            data = self._get_json("/api/v3/ticker/price", {"symbols": json.dumps(normalized, separators=(",", ":"))})
+        except BinancePublicAPIError:
+            prices: dict[str, float] = {}
+            for symbol in normalized:
+                try:
+                    prices[symbol] = self.ticker_price(symbol)
+                except Exception:  # noqa: BLE001
+                    continue
+            return prices
+
+        rows = [data] if isinstance(data, dict) else data if isinstance(data, list) else []
+        prices: dict[str, float] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            symbol = str(row.get("symbol", "")).upper()
+            if symbol in seen and row.get("price") is not None:
+                prices[symbol] = float(row["price"])
+        return prices
+
     def cached_ticker24hr(self) -> list[dict] | None:
         cached = self._cache_get("ticker24hr")
         return cached if isinstance(cached, list) else None

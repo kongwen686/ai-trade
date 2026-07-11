@@ -47,6 +47,9 @@ class IndicatorTests(unittest.TestCase):
         self.assertGreater(snapshot.support_level, 0)
         self.assertGreaterEqual(snapshot.support_distance_pct, 0)
         self.assertGreaterEqual(snapshot.structure_risk_reward, 0)
+        self.assertIn(snapshot.volatility_regime, {"compressed", "normal", "expansion", "extreme"})
+        self.assertGreaterEqual(snapshot.volatility_percentile, 0)
+        self.assertGreaterEqual(snapshot.atr_pct, 0)
 
     def test_composite_score_rewards_bullish_setup(self) -> None:
         snapshot = build_indicator_snapshot(_make_candles())

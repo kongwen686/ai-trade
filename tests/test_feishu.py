@@ -6,7 +6,12 @@ import json
 import unittest
 from unittest.mock import patch
 
-from trade_signal_app.feishu import FeishuTradeNotifier, build_feishu_trade_payload
+from trade_signal_app.feishu import (
+    FeishuTradeNotifier,
+    build_feishu_btc_signal_payload,
+    build_feishu_daily_summary_payload,
+    build_feishu_trade_payload,
+)
 from trade_signal_app.trading import TradingEvent, TradingPosition
 
 
@@ -19,6 +24,98 @@ class FakeResponse(io.BytesIO):
 
 
 class FeishuTests(unittest.TestCase):
+    def test_build_btc_signal_payload_contains_structured_btc_metrics(self) -> None:
+        payload = build_feishu_btc_signal_payload(
+            summary={
+                "symbol": "BTCUSDT",
+                "action": "BUY",
+                "action_label": "买入",
+                "signal": "btc_regime_trend_pullback_buy",
+                "generated_at": "2026-07-10T22:00:00+08:00",
+                "price": 118000.0,
+                "score": 82.35,
+                "grade": "A",
+                "confidence": "高",
+                "regime": {"label": "多头趋势", "entry_rsi_14": 58.2},
+                "trade_levels": {
+                    "support_level": 115500.0,
+                    "resistance_level": 126000.0,
+                    "stop_price": 114900.0,
+                    "take_profit_price": 125496.0,
+                    "stop_pct": 2.6271,
+                    "take_profit_pct": 6.3525,
+                    "risk_reward_ratio": 2.42,
+                    "leverage_reference": 5.0,
+                    "leveraged_stop_roi_pct": -13.1355,
+                    "leveraged_take_profit_roi_pct": 31.7625,
+                },
+                "selected_preset": {"label": "BTC Core Trading", "win_rate_pct": 62.5, "profit_factor": 1.8},
+                "preset_backtests": [
+                    {"status": "ok", "label": "BTC Core Trading", "signal_count": 31, "win_rate_pct": 62.5, "profit_factor": 1.8}
+                ],
+                "statistics": {
+                    "sample": {"primary_bars": 19476},
+                    "buy_hold_return_pct": 2600.0,
+                    "max_drawdown_pct": -76.2,
+                    "return_90d_pct": 18.5,
+                },
+                "reasons": ["1d 收盘价位于 EMA200 上方"],
+                "warnings": ["1h RSI 偏热时不追价"],
+                "advice": "分批试多。",
+            }
+        )
+
+        rendered = json.dumps(payload, ensure_ascii=False)
+        self.assertEqual(payload["msg_type"], "interactive")
+        self.assertIn("AI Trade BTC 专属买入信号", rendered)
+        self.assertIn("btc_regime_trend_pullback_buy", rendered)
+        self.assertIn("**5x 止损参考**", rendered)
+        self.assertIn("5.0x ≈ -13.14% ROI", rendered)
+        self.assertIn("**10年持有收益**", rendered)
+        self.assertIn("+2600.00%", rendered)
+        self.assertIn("BTC Core Trading", rendered)
+
+    def test_build_daily_summary_payload_contains_structured_metrics(self) -> None:
+        payload = build_feishu_daily_summary_payload(
+            summary={
+                "date": "2026-07-10",
+                "generated_at": "2026-07-10T22:00:00+08:00",
+                "scan": {"returned_signals": 6, "scanned_symbols": 30, "top_symbols": ["BTCUSDT", "ETHUSDT"]},
+                "trading": {
+                    "today_trades": 3,
+                    "today_realized_pnl": 2.75,
+                    "total_trades": 42,
+                    "win_rate_pct": 61.9,
+                    "total_pnl": 18.5,
+                    "realized_pnl": 12.0,
+                    "unrealized_pnl": 6.5,
+                    "open_positions": 4,
+                },
+                "intelligence": {"intel_items": 5, "onchain_events": 2, "strategy_hits": 7},
+                "risk": {"risk_score": 32.5, "status": "clear", "blocked": 0},
+                "warnings": ["本地缓存数据参与统计"],
+            }
+        )
+
+        self.assertEqual(payload["msg_type"], "interactive")
+        rendered = json.dumps(payload, ensure_ascii=False)
+        self.assertIn("AI Trade 每日数据统计 2026-07-10", rendered)
+        self.assertIn("**信号**", rendered)
+        self.assertIn("6 / 30", rendered)
+        self.assertIn("**累计成交**", rendered)
+        self.assertIn("42", rendered)
+        self.assertIn("**当日已实现盈亏**", rendered)
+        self.assertIn("+2.75", rendered)
+        self.assertIn("**胜率**", rendered)
+        self.assertIn("61.90%", rendered)
+        self.assertIn("**账户盈亏**", rendered)
+        self.assertIn("+18.50", rendered)
+        self.assertIn("市场 5 / 链上 2 / 策略 7", rendered)
+        self.assertIn("**风险评分**", rendered)
+        self.assertIn("32.5", rendered)
+        self.assertIn("正常", rendered)
+        self.assertIn("BTCUSDT、ETHUSDT", rendered)
+
     def test_build_trade_payload_contains_buy_structure(self) -> None:
         event = TradingEvent(
             action="BUY",
@@ -163,6 +260,61 @@ class FeishuTests(unittest.TestCase):
         self.assertIn("**杠杆止损价**", rendered)
         self.assertNotIn("emergency_drawdown", rendered)
         self.assertNotIn("**状态**", rendered)
+
+    def test_notifier_skips_emergency_drawdown_without_position(self) -> None:
+        notifier = FeishuTradeNotifier("https://open.feishu.cn/test-webhook")
+        event = TradingEvent(
+            action="ALERT",
+            symbol="BTCUSDT",
+            mode="paper",
+            status="emergency_drawdown",
+            message="价格快速回撤，请检查风险。",
+            price=106.0,
+            quantity=1.0,
+            quote_notional=100.0,
+            created_at=datetime(2026, 7, 6, 6, 10, tzinfo=timezone.utc),
+            exchange="BINANCE",
+        )
+
+        with patch("trade_signal_app.feishu.urlopen") as mock_urlopen:
+            sent = notifier.notify_trade(event=event, position=None)
+
+        self.assertFalse(sent)
+        mock_urlopen.assert_not_called()
+
+    def test_notifier_skips_emergency_drawdown_with_empty_position(self) -> None:
+        notifier = FeishuTradeNotifier("https://open.feishu.cn/test-webhook")
+        event = TradingEvent(
+            action="ALERT",
+            symbol="BTCUSDT",
+            mode="paper",
+            status="emergency_drawdown",
+            message="价格快速回撤，请检查风险。",
+            price=106.0,
+            quantity=0.0,
+            quote_notional=0.0,
+            created_at=datetime(2026, 7, 6, 6, 10, tzinfo=timezone.utc),
+            exchange="BINANCE",
+        )
+        position = TradingPosition(
+            symbol="BTCUSDT",
+            quantity=0.0,
+            entry_price=100.0,
+            quote_notional=0.0,
+            score=82.0,
+            grade="A",
+            opened_at=datetime(2026, 7, 6, 6, 0, tzinfo=timezone.utc),
+            stop_price=96.0,
+            take_profit_price=109.0,
+            leverage=5.0,
+            margin_notional=0.0,
+        )
+
+        with patch("trade_signal_app.feishu.urlopen") as mock_urlopen:
+            sent = notifier.notify_trade(event=event, position=position)
+
+        self.assertFalse(sent)
+        mock_urlopen.assert_not_called()
 
 
 if __name__ == "__main__":

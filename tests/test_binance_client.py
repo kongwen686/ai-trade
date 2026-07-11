@@ -126,6 +126,23 @@ class BinanceClientTests(unittest.TestCase):
         self.assertEqual([row["symbol"] for row in payload], ["BTCUSDT", "ETHUSDT"])
         self.assertEqual(mock_get_json.call_count, 3)
 
+    def test_ticker_price_fetches_uncached_latest_price(self) -> None:
+        with patch(
+            "trade_signal_app.binance_client.urlopen",
+            side_effect=[
+                FakeResponse(json.dumps({"symbol": "BTCUSDT", "price": "100.50"})),
+                FakeResponse(json.dumps({"symbol": "BTCUSDT", "price": "101.25"})),
+            ],
+        ) as mock_urlopen:
+            gateway = BinanceSpotGateway(ttl_seconds=999)
+            first = gateway.ticker_price("BTCUSDT")
+            second = gateway.ticker_price("BTCUSDT")
+
+        self.assertEqual(first, 100.5)
+        self.assertEqual(second, 101.25)
+        self.assertEqual(mock_urlopen.call_count, 2)
+        self.assertIn("/api/v3/ticker/price", mock_urlopen.call_args.args[0].full_url)
+
     def test_signed_endpoint_surfaces_http_error_details(self) -> None:
         response = io.BytesIO(b'{"msg":"Invalid API-key, IP, or permissions for action."}')
         error = HTTPError(

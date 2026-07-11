@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+from collections import OrderedDict
+from copy import deepcopy
 from dataclasses import asdict, is_dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime
+from html import escape
+from pathlib import Path
 import csv
 import io
+import json
+from threading import RLock
+from time import perf_counter
 from urllib.parse import urlencode
 
 from .backtest import (
@@ -30,36 +37,16 @@ from .main_settings import (
     _validate_range,
 )
 from .presets import apply_backtest_preset
-from .runtime_config import RuntimeConfig
+from .runtime_config import TRADINGVIEW_BARS_MAX, TRADINGVIEW_BARS_MIN, RuntimeConfig
 from .strategy import EntryRuleConfig, ExecutionConfig, ExitRuleConfig
 from .tradingview_data import fetch_tradingview_history
-from .time_utils import APP_TIMEZONE
 from .ui import format_backtest_report, format_portfolio_report, format_rebalance_premium_report
 from .views_common import normalize_language
 
 
-LOCAL_TRADINGVIEW_ARCHIVE_PATTERN = "data/tradingview_klines/*/*/*.csv"
-BACKTEST_SAMPLE_START_AT = datetime(2026, 7, 6, 0, 0, tzinfo=APP_TIMEZONE)
-BACKTEST_SAMPLE_START_LABEL = "2026-07-06 00:00:00 UTC+8"
-BACKTEST_PREWARM_BARS = 60
-
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
-
-
-def _backtest_sample_window(candles: list, *, prewarm_bars: int = BACKTEST_PREWARM_BARS) -> tuple[list, list, int]:
-    cutoff = _as_utc(BACKTEST_SAMPLE_START_AT)
-    sample_start_index = next(
-        (index for index, candle in enumerate(candles) if _as_utc(candle.open_time) >= cutoff),
-        None,
-    )
-    if sample_start_index is None:
-        return [], [], len(candles)
-    analysis_start_index = max(0, sample_start_index - prewarm_bars)
-    return candles[analysis_start_index:], candles[sample_start_index:], sample_start_index
+_BACKTEST_RESULT_CACHE_MAX_ENTRIES = 6
+_BACKTEST_RESULT_CACHE_LOCK = RLock()
+_BACKTEST_RESULT_CACHE: OrderedDict[str, dict[str, object]] = OrderedDict()
 
 
 def _to_jsonable(value: object) -> object:
@@ -100,8 +87,39 @@ def _split_archives(value: str) -> list[str]:
     return items
 
 
-def _cached_archive_pattern_if_available() -> str:
-    return LOCAL_TRADINGVIEW_ARCHIVE_PATTERN if resolve_archive_paths([LOCAL_TRADINGVIEW_ARCHIVE_PATTERN]) else ""
+def _selected_cached_archive_if_available(*, exchange: object, symbol: object, interval: object) -> str:
+    exchange_value = str(exchange).strip().upper()
+    symbol_value = str(symbol).strip().upper()
+    interval_value = str(interval).strip()
+    if not all(value and value.replace("-", "").replace("_", "").isalnum() for value in (exchange_value, symbol_value, interval_value)):
+        return ""
+    candidate = Path("data/tradingview_klines") / exchange_value / symbol_value / f"{interval_value}.csv"
+    return str(candidate) if resolve_archive_paths([str(candidate)]) else ""
+
+
+def _backtest_cache_key(params: dict[str, object], paths: list[Path]) -> str:
+    files = []
+    for path in paths:
+        stat = path.stat()
+        files.append((str(path.resolve()), stat.st_size, stat.st_mtime_ns))
+    return json.dumps({"params": params, "files": files}, ensure_ascii=True, sort_keys=True, default=str)
+
+
+def _cached_backtest_payload(cache_key: str) -> dict[str, object] | None:
+    with _BACKTEST_RESULT_CACHE_LOCK:
+        payload = _BACKTEST_RESULT_CACHE.get(cache_key)
+        if payload is None:
+            return None
+        _BACKTEST_RESULT_CACHE.move_to_end(cache_key)
+        return deepcopy(payload)
+
+
+def _store_backtest_payload(cache_key: str, payload: dict[str, object]) -> None:
+    with _BACKTEST_RESULT_CACHE_LOCK:
+        _BACKTEST_RESULT_CACHE[cache_key] = deepcopy(payload)
+        _BACKTEST_RESULT_CACHE.move_to_end(cache_key)
+        while len(_BACKTEST_RESULT_CACHE) > _BACKTEST_RESULT_CACHE_MAX_ENTRIES:
+            _BACKTEST_RESULT_CACHE.popitem(last=False)
 
 
 def _minimum_required_backtest_bars(holding_periods: list[int], exit_config: ExitRuleConfig) -> int:
@@ -118,7 +136,7 @@ def _tradingview_fetch_result(form: dict[str, list[str]], *, runtime_config: Run
     exchange = _get_first(form, "tradingview_exchange", runtime_config.tradingview_exchange).strip().upper() or "BINANCE"
     interval = _get_first(form, "tradingview_interval", runtime_config.tradingview_interval).strip() or runtime_config.tradingview_interval
     bars = _parse_int_value(_get_first(form, "tradingview_bars", str(runtime_config.tradingview_bars)), "TradingView Bars")
-    _validate_range(bars, "TradingView Bars", minimum=100, maximum=50000)
+    _validate_range(bars, "TradingView Bars", minimum=TRADINGVIEW_BARS_MIN, maximum=TRADINGVIEW_BARS_MAX)
 
     result = fetch_tradingview_history(
         cache_root=tradingview_cache_dir,
@@ -164,6 +182,7 @@ def _backtest_payload(
     scanner: object,
     resolve_execution_config,
 ) -> tuple[dict[str, object], dict[str, object], str | None]:
+    request_started = perf_counter()
     defaults = _backtest_params_from_config(runtime_config)
     preset_id = _get_first(query, "preset", str(defaults["preset"]))
     base_params = apply_backtest_preset(dict(defaults), preset_id)
@@ -200,7 +219,22 @@ def _backtest_payload(
         "min_rsi": _parse_query_float(query, "min_rsi", base_params["min_rsi"], "Min RSI"),
         "max_rsi": _parse_query_float(query, "max_rsi", base_params["max_rsi"], "Max RSI"),
         "no_kdj_confirmation": _parse_bool_flag(query, "no_kdj_confirmation"),
+        "volatility_filter_enabled": _parse_bool_flag(query, "volatility_filter_enabled"),
+        "block_extreme_volatility": _parse_bool_flag(query, "block_extreme_volatility"),
+        "max_entry_volatility_percentile": _parse_query_float(
+            query,
+            "max_entry_volatility_percentile",
+            base_params["max_entry_volatility_percentile"],
+            "Max Volatility Percentile",
+        ),
+        "max_entry_volatility_ratio": _parse_query_float(
+            query,
+            "max_entry_volatility_ratio",
+            base_params["max_entry_volatility_ratio"],
+            "Max Volatility Ratio",
+        ),
         "stability_checks": _parse_bool_flag(query, "stability_checks"),
+        "parameter_sweep": _parse_bool_flag(query, "parameter_sweep"),
         "tradingview_exchange": _get_first(query, "tradingview_exchange", runtime_config.tradingview_exchange),
         "tradingview_symbol": _get_first(
             query,
@@ -210,23 +244,44 @@ def _backtest_payload(
         "tradingview_interval": _get_first(query, "tradingview_interval", runtime_config.tradingview_interval),
         "tradingview_bars": _parse_query_int(query, "tradingview_bars", runtime_config.tradingview_bars, "TradingView Bars"),
         "tv_fetched": _parse_bool_flag(query, "tv_fetched"),
-        "sample_start_at": BACKTEST_SAMPLE_START_LABEL,
+        "sample_start_at": "全部历史 K 线",
     }
     if not str(params["archives"]).strip() and query:
-        params["archives"] = _cached_archive_pattern_if_available()
+        params["archives"] = _selected_cached_archive_if_available(
+            exchange=params["tradingview_exchange"],
+            symbol=params["tradingview_symbol"],
+            interval=params["tradingview_interval"],
+        )
     if "no_binance_discount" not in query:
         params["no_binance_discount"] = bool(base_params["no_binance_discount"])
     if "no_kdj_confirmation" not in query:
         params["no_kdj_confirmation"] = bool(base_params["no_kdj_confirmation"])
+    if "volatility_filter_enabled" not in query:
+        params["volatility_filter_enabled"] = bool(base_params["volatility_filter_enabled"])
+    if "block_extreme_volatility" not in query:
+        params["block_extreme_volatility"] = bool(base_params["block_extreme_volatility"])
 
     archive_patterns = _split_archives(str(params["archives"]))
     if not archive_patterns:
         error = "没有填写 ZIP/CSV 历史数据；可先使用右侧 TradingView 拉取，或填入本地缓存路径。" if query else None
         return _empty_backtest_payload(params), params, error
 
+    resolve_started = perf_counter()
     paths = resolve_archive_paths(archive_patterns)
+    resolve_archives_seconds = perf_counter() - resolve_started
     if not paths:
         return _empty_backtest_payload(params), params, "没有匹配到任何 ZIP/CSV 历史 K 线文件。"
+
+    cache_key = _backtest_cache_key(params, paths) if str(params["fee_source"]) == "manual" else ""
+    cached_payload = _cached_backtest_payload(cache_key) if cache_key else None
+    if cached_payload is not None:
+        cached_payload["performance"] = {
+            **dict(cached_payload.get("performance") or {}),
+            "cache_hit": True,
+            "total_seconds": round(perf_counter() - request_started, 4),
+            "resolve_archives_seconds": round(resolve_archives_seconds, 4),
+        }
+        return cached_payload, params, None
 
     holding_periods = [int(item) for item in str(params["holding_periods"]).split(",") if item.strip()]
     entry_config = EntryRuleConfig(
@@ -237,6 +292,10 @@ def _backtest_payload(
         max_rsi=float(params["max_rsi"]),
         max_entry_rsi=float(params["max_rsi"]),
         require_kdj_confirmation=not bool(params["no_kdj_confirmation"]),
+        volatility_filter_enabled=bool(params["volatility_filter_enabled"]),
+        block_extreme_volatility=bool(params["block_extreme_volatility"]),
+        max_entry_volatility_percentile=float(params["max_entry_volatility_percentile"]),
+        max_entry_volatility_ratio=float(params["max_entry_volatility_ratio"]),
     )
     exit_config = ExitRuleConfig(
         max_holding_bars=int(params["max_holding_bars"]),
@@ -283,28 +342,29 @@ def _backtest_payload(
     candles_by_interval: dict[str, dict[str, list]] = {}
     series_contexts = []
     data_warnings: list[str] = []
+    load_data_seconds = 0.0
+    series_backtest_seconds = 0.0
+    candle_count = 0
     for (symbol, interval), archive_paths in sorted(grouped.items()):
         is_overnight_preset = str(params["preset"]) == "btc_overnight_seasonality"
-        raw_candles = merge_candles(archive_paths)
-        candles, sample_candles, excluded_candles = _backtest_sample_window(raw_candles)
-        if excluded_candles:
-            data_warnings.append(
-                f"{symbol} {interval} 已排除 {excluded_candles} 根 {BACKTEST_SAMPLE_START_LABEL} 之前的 K 线；"
-                f"最多 {BACKTEST_PREWARM_BARS} 根仅作为指标预热，不计入交易、收益和资金曲线。"
-            )
-        if not sample_candles:
-            data_warnings.append(f"{symbol} {interval} 已跳过：{BACKTEST_SAMPLE_START_LABEL} 之后没有可回测 K 线。")
+        analysis_cache = {}
+        load_started = perf_counter()
+        candles = merge_candles(archive_paths)
+        load_data_seconds += perf_counter() - load_started
+        if not candles:
+            data_warnings.append(f"{symbol} {interval} 已跳过：没有可回测 K 线。")
             continue
-        candles_by_interval.setdefault(interval, {})[symbol] = sample_candles
-        if not is_overnight_preset and len(sample_candles) < int(params["lookback_bars"]):
+        candle_count += len(candles)
+        candles_by_interval.setdefault(interval, {})[symbol] = candles
+        if not is_overnight_preset and len(candles) < int(params["lookback_bars"]):
             data_warnings.append(
-                f"{symbol} {interval} 有效样本只有 {len(sample_candles)} 根 K 线，低于当前 lookback {int(params['lookback_bars'])}；"
-                f"当前回测仅统计 {BACKTEST_SAMPLE_START_LABEL} 及之后的数据。"
+                f"{symbol} {interval} 有效样本只有 {len(candles)} 根 K 线，低于当前 lookback {int(params['lookback_bars'])}；"
+                "当前回测会使用输入文件中的全部历史 K 线。"
             )
         if not is_overnight_preset and len(candles) < minimum_required_bars:
             data_warnings.append(
                 f"{symbol} {interval} 已跳过：至少需要 {minimum_required_bars} 根 K 线才能覆盖指标预热和退出窗口，"
-                f"当前有效样本 {len(sample_candles)} 根，连同预热上下文共 {len(candles)} 根。"
+                f"当前样本共 {len(candles)} 根。"
             )
             continue
         try:
@@ -321,17 +381,20 @@ def _backtest_payload(
             return _empty_backtest_payload(params), params, str(exc)
         if is_overnight_preset:
             try:
+                series_started = perf_counter()
                 report = run_overnight_seasonality_backtest(
                     symbol=symbol,
                     interval=interval,
-                    candles=sample_candles,
+                    candles=candles,
                     execution_config=report_execution_config,
                 )
+                series_backtest_seconds += perf_counter() - series_started
             except ValueError as exc:
                 data_warnings.append(f"{symbol} {interval} 已跳过：{exc}")
                 continue
         else:
             try:
+                series_started = perf_counter()
                 report = run_backtest_for_series(
                     symbol=symbol,
                     interval=interval,
@@ -343,15 +406,18 @@ def _backtest_payload(
                     exit_config=exit_config,
                     execution_config=report_execution_config,
                     cooldown_bars=int(params["cooldown_bars"]) or None,
-                    sample_start_time=BACKTEST_SAMPLE_START_AT,
+                    sample_start_time=None,
+                    analysis_cache=analysis_cache,
                 )
+                series_backtest_seconds += perf_counter() - series_started
             except ValueError as exc:
                 data_warnings.append(f"{symbol} {interval} 已跳过：{exc}")
                 continue
         reports_by_interval.setdefault(interval, []).append(report)
         series_reports.append(format_backtest_report(report))
-        series_contexts.append((symbol, interval, candles, report_execution_config, BACKTEST_SAMPLE_START_AT))
+        series_contexts.append((symbol, interval, candles, report_execution_config, None, analysis_cache))
 
+    portfolio_started = perf_counter()
     portfolio_reports = []
     if int(params["portfolio_top_n"]) > 0:
         for _, interval_reports in sorted(reports_by_interval.items()):
@@ -363,6 +429,7 @@ def _backtest_payload(
             )
             if portfolio_report is not None:
                 portfolio_reports.append(format_portfolio_report(portfolio_report))
+    portfolio_seconds = perf_counter() - portfolio_started
 
     rebalance_reports = []
     if str(params["preset"]) == "crypto_rebalance_premium":
@@ -379,6 +446,7 @@ def _backtest_payload(
             if rebalance_report is not None:
                 rebalance_reports.append(format_rebalance_premium_report(rebalance_report))
 
+    stability_started = perf_counter()
     stability_checks = (
         _run_backtest_stability_checks(
             series_contexts=series_contexts,
@@ -390,20 +458,52 @@ def _backtest_payload(
         if bool(params["stability_checks"]) and str(params["preset"]) not in {"btc_overnight_seasonality", "crypto_rebalance_premium"}
         else []
     )
+    stability_seconds = perf_counter() - stability_started
+    parameter_sweep_started = perf_counter()
+    parameter_sweep = (
+        _run_backtest_parameter_sweep(
+            series_contexts=series_contexts,
+            params=params,
+            holding_periods=holding_periods,
+            entry_config=entry_config,
+            exit_config=exit_config,
+        )
+        if bool(params["parameter_sweep"])
+        and str(params["preset"]) not in {"btc_overnight_seasonality", "crypto_rebalance_premium"}
+        else []
+    )
+    parameter_sweep_seconds = perf_counter() - parameter_sweep_started
 
-    return {
+    payload = {
         "series_reports": series_reports,
         "portfolio_reports": portfolio_reports,
         "rebalance_reports": rebalance_reports,
+        "parameter_sweep": parameter_sweep,
+        "performance": {
+            "cache_hit": False,
+            "total_seconds": round(perf_counter() - request_started, 4),
+            "resolve_archives_seconds": round(resolve_archives_seconds, 4),
+            "load_data_seconds": round(load_data_seconds, 4),
+            "series_backtest_seconds": round(series_backtest_seconds, 4),
+            "portfolio_seconds": round(portfolio_seconds, 4),
+            "stability_seconds": round(stability_seconds, 4),
+            "parameter_sweep_seconds": round(parameter_sweep_seconds, 4),
+            "series_count": len(series_reports),
+            "candle_count": candle_count,
+        },
         "strategy_explanation": _build_backtest_strategy_explanation(
             params=params,
             series_reports=series_reports,
             portfolio_reports=portfolio_reports,
             rebalance_reports=rebalance_reports,
             stability_checks=stability_checks,
+            parameter_sweep=parameter_sweep,
             data_warnings=data_warnings,
         ),
-    }, params, None
+    }
+    if cache_key:
+        _store_backtest_payload(cache_key, payload)
+    return payload, params, None
 
 
 def _empty_backtest_payload(params: dict[str, object], *, data_warnings: list[str] | None = None) -> dict[str, object]:
@@ -411,12 +511,26 @@ def _empty_backtest_payload(params: dict[str, object], *, data_warnings: list[st
         "series_reports": [],
         "portfolio_reports": [],
         "rebalance_reports": [],
+        "parameter_sweep": [],
+        "performance": {
+            "cache_hit": False,
+            "total_seconds": 0.0,
+            "resolve_archives_seconds": 0.0,
+            "load_data_seconds": 0.0,
+            "series_backtest_seconds": 0.0,
+            "portfolio_seconds": 0.0,
+            "stability_seconds": 0.0,
+            "parameter_sweep_seconds": 0.0,
+            "series_count": 0,
+            "candle_count": 0,
+        },
         "strategy_explanation": _build_backtest_strategy_explanation(
             params=params,
             series_reports=[],
             portfolio_reports=[],
             rebalance_reports=[],
             stability_checks=[],
+            parameter_sweep=[],
             data_warnings=data_warnings or [],
         ),
     }
@@ -424,7 +538,7 @@ def _empty_backtest_payload(params: dict[str, object], *, data_warnings: list[st
 
 def _run_backtest_stability_checks(
     *,
-    series_contexts: list[tuple[str, str, list, ExecutionConfig, datetime | None]],
+    series_contexts: list[tuple[str, str, list, ExecutionConfig, datetime | None, dict]],
     params: dict[str, object],
     holding_periods: list[int],
     entry_config: EntryRuleConfig,
@@ -433,7 +547,7 @@ def _run_backtest_stability_checks(
     checks: list[dict[str, object]] = []
     base_score = float(params["score_threshold"])
     base_slippage = float(params["slippage_bps"])
-    for symbol, interval, candles, execution_config, sample_start_time in series_contexts[:2]:
+    for symbol, interval, candles, execution_config, sample_start_time, analysis_cache in series_contexts[:2]:
         variants = [
             ("score_minus_3", candles, replace(entry_config, min_score=max(0.0, base_score - 3.0)), execution_config),
             ("score_plus_3", candles, replace(entry_config, min_score=min(100.0, base_score + 3.0)), execution_config),
@@ -452,6 +566,7 @@ def _run_backtest_stability_checks(
                     exit_config=exit_config,
                     execution_config=variant_execution_config,
                     sample_start_time=sample_start_time,
+                    analysis_cache=analysis_cache,
                 )
             )
         walk_forward_windows = _walk_forward_validation_windows(
@@ -482,10 +597,61 @@ def _run_backtest_stability_checks(
                 exit_config=exit_config,
                 execution_config=execution_config,
                 sample_start_time=sample_start_time,
+                analysis_cache=None,
             )
             item.update(window)
             checks.append(item)
     return checks
+
+
+def _run_backtest_parameter_sweep(
+    *,
+    series_contexts: list[tuple[str, str, list, ExecutionConfig, datetime | None, dict]],
+    params: dict[str, object],
+    holding_periods: list[int],
+    entry_config: EntryRuleConfig,
+    exit_config: ExitRuleConfig,
+) -> list[dict[str, object]]:
+    """Run a bounded 3x3 sensitivity grid on the first valid full-history series."""
+    if not series_contexts:
+        return []
+    symbol, interval, candles, execution_config, sample_start_time, analysis_cache = series_contexts[0]
+    base_score = float(params["score_threshold"])
+    base_stop = float(params["stop_loss_pct"])
+    score_values = sorted({round(max(0.0, min(100.0, base_score + delta)), 2) for delta in (-4.0, 0.0, 4.0)})
+    stop_values = sorted({round(max(0.1, min(50.0, base_stop * factor)), 2) for factor in (0.75, 1.0, 1.25)})
+    results: list[dict[str, object]] = []
+    for stop_loss_pct in stop_values:
+        for score_threshold in score_values:
+            item = _run_single_stability_check(
+                symbol=symbol,
+                interval=interval,
+                check_name="parameter_sweep",
+                candles=candles,
+                params=params,
+                holding_periods=holding_periods,
+                entry_config=replace(entry_config, min_score=score_threshold),
+                exit_config=replace(exit_config, stop_loss_pct=stop_loss_pct),
+                execution_config=execution_config,
+                sample_start_time=sample_start_time,
+                analysis_cache=analysis_cache,
+            )
+            item.update(
+                {
+                    "score_threshold": score_threshold,
+                    "stop_loss_pct": stop_loss_pct,
+                    "base_cell": score_threshold == round(base_score, 2) and stop_loss_pct == round(base_stop, 2),
+                    "scope": "first_series_full_history",
+                }
+            )
+            if item.get("status") == "ok":
+                final_equity = float(item.get("final_equity", 1.0))
+                max_drawdown_pct = float(item.get("max_drawdown_pct", 0.0))
+                return_pct = (final_equity - 1.0) * 100.0
+                item["return_pct"] = round(return_pct, 4)
+                item["risk_adjusted_return"] = round(return_pct / max(abs(max_drawdown_pct), 1.0), 4)
+            results.append(item)
+    return results
 
 
 def _run_single_stability_check(
@@ -500,6 +666,7 @@ def _run_single_stability_check(
     exit_config: ExitRuleConfig,
     execution_config: ExecutionConfig,
     sample_start_time: datetime | None,
+    analysis_cache: dict | None = None,
 ) -> dict[str, object]:
     try:
         report = run_backtest_for_series(
@@ -514,6 +681,7 @@ def _run_single_stability_check(
             execution_config=execution_config,
             cooldown_bars=int(params["cooldown_bars"]) or None,
             sample_start_time=sample_start_time,
+            analysis_cache=analysis_cache,
         )
         return {
             "symbol": symbol,
@@ -583,6 +751,7 @@ def _build_backtest_strategy_explanation(
     portfolio_reports: list[dict[str, object]],
     rebalance_reports: list[dict[str, object]],
     stability_checks: list[dict[str, object]],
+    parameter_sweep: list[dict[str, object]],
     data_warnings: list[str] | None = None,
 ) -> dict[str, object]:
     preset = str(params.get("preset", "custom"))
@@ -615,12 +784,27 @@ def _build_backtest_strategy_explanation(
         stability_enabled=bool(params.get("stability_checks")),
         stability_checks=stability_checks,
     )
+    successful_sweep = [item for item in parameter_sweep if item.get("status") == "ok"]
+    best_sweep = max(
+        successful_sweep,
+        key=lambda item: (
+            float(item.get("risk_adjusted_return", -1_000_000.0)),
+            float(item.get("return_pct", -1_000_000.0)),
+            bool(item.get("base_cell")),
+        ),
+        default=None,
+    )
+    if bool(params.get("parameter_sweep")) and not parameter_sweep:
+        diagnostics.append("参数热力图未产生结果；当前预设不适用二维扫描，或没有有效单币种样本。")
+    elif successful_sweep:
+        positive_cells = sum(1 for item in successful_sweep if float(item.get("return_pct", 0.0)) > 0.0)
+        diagnostics.append(f"参数邻域扫描完成 {len(successful_sweep)} 个组合，其中 {positive_cells} 个组合取得正收益。")
     if data_warnings:
         diagnostics = [*data_warnings, *diagnostics]
     cost_notes = _backtest_cost_notes(params)
     notes = [
         strategy_summary,
-        f"数据窗口：仅统计 {params.get('sample_start_at', BACKTEST_SAMPLE_START_LABEL)} 及之后的 K 线；此前 K 线不计入交易、收益和资金曲线。",
+        "数据窗口：使用输入文件中的全部历史 K 线；不再按固定起点排除早期 K 线。",
         f"入场过滤：score >= {float(params.get('score_threshold', 0.0)):.1f}, volume_ratio >= {float(params.get('min_volume_ratio', 0.0)):.2f}, buy_pressure >= {float(params.get('min_buy_pressure', 0.0)):.2f}。",
         f"退出假设：止损 {float(params.get('stop_loss_pct', 0.0)):.1f}%，止盈 {float(params.get('take_profit_pct', 0.0)):.1f}%，最多持有 {int(params.get('max_holding_bars', 0))} 根 K 线。",
         *cost_notes,
@@ -658,6 +842,9 @@ def _build_backtest_strategy_explanation(
         "cost_notes": cost_notes,
         "stability_enabled": bool(params.get("stability_checks")),
         "stability_checks": stability_checks,
+        "parameter_sweep_enabled": bool(params.get("parameter_sweep")),
+        "parameter_sweep": parameter_sweep,
+        "best_parameter_cell": best_sweep,
         "notes": notes,
     }
 
@@ -666,6 +853,10 @@ def _backtest_strategy_type(preset: str) -> tuple[str, str]:
     mapping = {
         "breakout_aggressive": ("breakout", "区间突破 / 动量延续模板，强调高评分、强量能和较短持有周期。"),
         "portfolio_rotation": ("momentum_rotation", "动量轮动模板，先横截面筛选强势标的，再用组合层 top N 控制集中度。"),
+        "trend_pullback_conservative": ("trend_pullback", "趋势回踩模板，等待支撑、量价恢复和波动率回落后再入场。"),
+        "breakout_confirmed": ("confirmed_breakout", "确认突破模板，要求评分、量能、买压和波动率共同通过。"),
+        "mean_reversion_guarded": ("guarded_mean_reversion", "受控均值回归模板，使用短持仓、冷却期和反弹确认限制接飞刀风险。"),
+        "quality_rotation": ("quality_rotation", "高质量轮动模板，在主流高流动性标的中选择量价与评分前排。"),
         "balanced_swing": ("balanced_swing", "均衡波段模板，在趋势、动量、量能和买压之间取折中。"),
         "crypto_rebalance_premium": ("rebalance", "等权再平衡研究模板，用于比较定期再平衡和自然漂移组合。"),
         "btc_overnight_seasonality": ("seasonality", "BTC 时间窗口模板，研究 UTC 固定时段持有的季节性收益。"),
@@ -760,6 +951,29 @@ def _backtest_export_csv(payload: dict[str, object], params: dict[str, object], 
     for key, value in params.items():
         writer.writerow(["param", "backtest", "", key, value])
 
+    for item in payload.get("parameter_sweep", []):
+        if not isinstance(item, dict):
+            continue
+        name = f'score_{item.get("score_threshold", "")}_stop_{item.get("stop_loss_pct", "")}'
+        interval = item.get("interval", "")
+        writer.writerow(["sensitivity", name, interval, "status", item.get("status", "")])
+        for metric in (
+            "symbol",
+            "score_threshold",
+            "stop_loss_pct",
+            "final_equity",
+            "return_pct",
+            "max_drawdown_pct",
+            "profit_factor",
+            "signal_count",
+            "risk_adjusted_return",
+            "base_cell",
+        ):
+            if metric in item:
+                writer.writerow(["sensitivity", name, interval, metric, item.get(metric, "")])
+        if item.get("status") != "ok":
+            writer.writerow(["sensitivity", name, interval, "message", item.get("message", "")])
+
     for report in payload["series_reports"]:
         writer.writerow(["series", report["symbol"], report["interval"], "final_equity", report["final_equity"]])
         writer.writerow(["series", report["symbol"], report["interval"], "buy_hold_final_equity", report.get("buy_hold_final_equity", 1.0)])
@@ -792,6 +1006,99 @@ def _backtest_export_csv(payload: dict[str, object], params: dict[str, object], 
     return buffer.getvalue()
 
 
+def _backtest_export_html(payload: dict[str, object], params: dict[str, object], error: str | None) -> str:
+    series_reports = [item for item in payload.get("series_reports", []) if isinstance(item, dict)]
+    portfolio_reports = [item for item in payload.get("portfolio_reports", []) if isinstance(item, dict)]
+    sweep = [item for item in payload.get("parameter_sweep", []) if isinstance(item, dict) and item.get("status") == "ok"]
+    explanation = payload.get("strategy_explanation") if isinstance(payload.get("strategy_explanation"), dict) else {}
+    param_rows = "".join(
+        f"<tr><th>{escape(str(key))}</th><td>{escape(str(value))}</td></tr>"
+        for key, value in sorted(params.items())
+    )
+    result_rows: list[str] = []
+    for report in series_reports:
+        stat = report.get("trade_stat") if isinstance(report.get("trade_stat"), dict) else {}
+        result_rows.append(
+            "<tr>"
+            f"<td>{escape(str(report.get('symbol', '')))}</td>"
+            f"<td>{escape(str(report.get('interval', '')))}</td>"
+            f"<td>{float(report.get('final_equity', 1.0)):.4f}</td>"
+            f"<td>{float(report.get('max_drawdown_pct', 0.0)):+.2f}%</td>"
+            f"<td>{float(stat.get('win_rate_pct', 0.0)):.2f}%</td>"
+            f"<td>{float(stat.get('profit_factor', 0.0)):.3f}</td>"
+            f"<td>{int(report.get('signal_count', 0))}</td>"
+            "</tr>"
+        )
+    for report in portfolio_reports:
+        stat = report.get("trade_stat") if isinstance(report.get("trade_stat"), dict) else {}
+        result_rows.append(
+            "<tr>"
+            f"<td>Portfolio Top {int(report.get('top_n', 0))}</td>"
+            f"<td>{escape(str(report.get('interval', '')))}</td>"
+            f"<td>{float(report.get('final_equity', 1.0)):.4f}</td>"
+            f"<td>{float(report.get('max_drawdown_pct', 0.0)):+.2f}%</td>"
+            f"<td>{float(stat.get('win_rate_pct', 0.0)):.2f}%</td>"
+            f"<td>{float(stat.get('profit_factor', 0.0)):.3f}</td>"
+            f"<td>{int(report.get('batch_count', 0))}</td>"
+            "</tr>"
+        )
+    score_values = sorted({float(item.get("score_threshold", 0.0)) for item in sweep})
+    stop_values = sorted({float(item.get("stop_loss_pct", 0.0)) for item in sweep})
+    sweep_lookup = {
+        (float(item.get("stop_loss_pct", 0.0)), float(item.get("score_threshold", 0.0))): item
+        for item in sweep
+    }
+    heatmap_rows = []
+    for stop_loss_pct in stop_values:
+        cells = []
+        for score_threshold in score_values:
+            item = sweep_lookup.get((stop_loss_pct, score_threshold))
+            return_pct = float(item.get("return_pct", 0.0)) if item else 0.0
+            tone = "positive" if return_pct > 0 else "negative"
+            cells.append(
+                f'<td class="{tone}"><strong>{return_pct:+.2f}%</strong>'
+                f'<small>Eq {float(item.get("final_equity", 1.0)):.3f} / DD {float(item.get("max_drawdown_pct", 0.0)):+.2f}%</small></td>'
+                if item
+                else "<td>-</td>"
+            )
+        heatmap_rows.append(f"<tr><th>{stop_loss_pct:.2f}%</th>{''.join(cells)}</tr>")
+    heatmap_html = (
+        "<table><thead><tr><th>Stop \\ Score</th>"
+        + "".join(f"<th>{value:.1f}</th>" for value in score_values)
+        + f"</tr></thead><tbody>{''.join(heatmap_rows)}</tbody></table>"
+        if sweep
+        else "<p>Parameter sweep was not enabled or produced no valid result.</p>"
+    )
+    notes = explanation.get("notes") if isinstance(explanation.get("notes"), list) else []
+    notes_html = "".join(f"<li>{escape(str(note))}</li>" for note in notes)
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Trade Backtest Report</title>
+  <style>
+    :root {{ color-scheme: light; font-family: "Avenir Next", "PingFang SC", sans-serif; color: #172033; background: #eef4fb; }}
+    body {{ max-width: 1180px; margin: 0 auto; padding: 32px 20px 56px; }}
+    h1, h2 {{ margin: 0 0 12px; }} p, li {{ line-height: 1.6; color: #526079; }}
+    section {{ margin-top: 18px; padding: 20px; border: 1px solid #dce5f0; border-radius: 14px; background: #fff; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 13px; }} th, td {{ padding: 10px; border: 1px solid #e1e8f0; text-align: left; }}
+    th {{ background: #f5f8fc; }} td.positive {{ background: #e9fbf3; color: #087454; }} td.negative {{ background: #fff0f0; color: #b42332; }}
+    td small {{ display: block; margin-top: 4px; opacity: .8; }} .scroll {{ overflow-x: auto; }} .error {{ color: #b42332; }}
+  </style>
+</head>
+<body>
+  <h1>AI Trade 回测研究报告</h1>
+  <p>{escape(str(explanation.get("summary") or "基于当前参数生成的离线研究报告。"))}</p>
+  {f'<p class="error">{escape(error)}</p>' if error else ''}
+  <section><h2>结果摘要</h2><div class="scroll"><table><thead><tr><th>标的/组合</th><th>周期</th><th>最终权益</th><th>最大回撤</th><th>胜率</th><th>PF</th><th>样本数</th></tr></thead><tbody>{''.join(result_rows)}</tbody></table></div></section>
+  <section><h2>参数敏感度热力图</h2><p>行是止损比例，列是评分阈值；绿色为正收益，红色为非正收益。</p><div class="scroll">{heatmap_html}</div></section>
+  <section><h2>参数</h2><div class="scroll"><table><tbody>{param_rows}</tbody></table></div></section>
+  <section><h2>研究说明</h2><ul>{notes_html}</ul></section>
+</body>
+</html>"""
+
+
 __all__ = [
     '_path_with_lang',
     '_split_archives',
@@ -807,4 +1114,6 @@ __all__ = [
     '_backtest_cost_notes',
     '_backtest_diagnostics',
     '_backtest_export_csv',
+    '_backtest_export_html',
+    '_run_backtest_parameter_sweep',
 ]

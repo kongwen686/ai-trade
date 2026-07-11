@@ -12,7 +12,7 @@
 | 4 | Trading Systems and Methods / Perry Kaufman | 系统设计、参数测试、交易成本、稳健性 | 回测参数、滑点模型、手续费模型、预设模板 |
 | 5 | Systematic Trading / Robert Carver | 规则化、仓位管理、分散、避免过度拟合 | portfolio_top_n、max_exposure、max_concurrent_positions |
 | 6 | Quantitative Trading / Ernest Chan | 从想法到数据、回测、执行的闭环 | strategy_builder、backtest、paper autotrade |
-| 7 | Algorithmic Trading / Ernest Chan | 均值回归、动量、协整和实现细节 | mean_reversion、momentum、future pairs/stat-arb backlog |
+| 7 | Algorithmic Trading / Ernest Chan | 均值回归、动量、协整和实现细节 | mean_reversion、momentum、pair/stat-arb research backtest |
 | 8 | Trading and Exchanges / Larry Harris | 订单簿、市场微观结构、滑点和成交机制 | dynamic slippage、order/test、live readiness |
 | 9 | Advances in Financial Machine Learning / Marcos Lopez de Prado | 数据泄漏、多重检验、标签、样本外验证 | 后续扩展 walk-forward、purged CV、策略稳定性报告 |
 | 10 | Machine Learning for Trading / Stefan Jansen | 特征管线、模型验证、生产监控 | 后续扩展特征仓库、模型监控、信号漂移检查 |
@@ -37,11 +37,11 @@
 | 均值回归 | 已实现为 `mean_reversion` | RSI 低位反弹、冷却期、短持有 | 增加 z-score / Bollinger 版本 |
 | 等权再平衡 | 已实现研究预设 | 多币种组合回测 | 增加调仓事件导出 |
 | 时间季节性 | 已实现 BTC 隔夜研究预设 | BTC UTC 时间窗口回测 | 扩展到周内效应 |
-| Basis / 套利 | 已监控 | 现货/合约价差观察、风险阻断 | 双腿交易前先实现组合回测 |
-| 配对交易 / 统计套利 | 待实现 | 研究和回测；需要协整和做空语义 | 新增 pair spread 数据结构 |
-| Carry / 资金费率 | 待实现 | 资金费率监控和风险提示 | 接入 funding 数据源 |
-| 波动率策略 | 待实现 | 研究；现货系统不能直接表达期权 Vega | 先做波动率状态过滤器 |
-| 做市 | 不建议当前阶段实现 | 需要订单簿、低延迟、库存管理 | 仅保留学习记录 |
+| Basis / 套利 | 已接入 paper 双腿模拟 | 现货/合约价差观察、风险阻断、现货多腿 + 永续空腿模拟 | 累积不同市场状态的 paper 样本 |
+| 配对交易 / 统计套利 | 已接入研究回测 | 滚动对数价格 OLS、动态对冲比率、z-score、下一根开盘双腿撮合 | 增加协整检验、walk-forward 和样本外淘汰门槛 |
+| Carry / 资金费率 | 已接入 paper 双腿模拟 | 公开 funding/basis 数据、资金费率累计、基差收敛/止损/超时退出、双腿成本 | 增加历史 funding 序列回放和断线期间精确结算 |
+| 波动率状态过滤 | 已实现 | 扫描标注、回测入场过滤、自动交易前阻断 | 增加分市场/分周期阈值校准 |
+| 做市 | 仅保留研究状态 | 需要 L2 订单簿、队列成交、低延迟、库存管理和 kill switch | 完成仿真基础设施前不接报价或下单 |
 
 ## 趋势跟随策略规格
 
@@ -72,11 +72,12 @@
 - 增加高级稳定性检查基础版：score threshold 邻域、滑点上调、滚动 walk-forward 验证窗口
 - 待补充参数热力图和更完整的滚动窗口汇总
 
-### Batch 3
+### Batch 3: 已完成基础版
 
-- 实现 Bollinger / z-score 均值回归
-- 增加 pair spread 数据结构和配对交易研究回测
-- 增加 funding/carry 数据源占位与风控提示
+- 已实现波动率状态过滤基础版
+- 已增加 pair spread 数据结构和配对交易研究回测
+- 已增加 funding/carry 公开数据接入、SQLite 状态和双腿 paper 引擎
+- Bollinger 专用均值回归仍待补充
 
 ### Batch 4
 

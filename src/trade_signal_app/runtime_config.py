@@ -24,6 +24,9 @@ from .entry_filters import (
 RUNTIME_CONFIG_TEMPLATE_VERSION = 1
 RUNTIME_CONFIG_ENCRYPTED_KIND = "runtime_config_encrypted"
 RUNTIME_CONFIG_ENCRYPTED_VERSION = 1
+TRADINGVIEW_BARS_MIN = 100
+TRADINGVIEW_BARS_DEFAULT = 10000
+TRADINGVIEW_BARS_MAX = 100000
 AUTOTRADE_EXIT_PROFILES = {"balanced", "leveraged_conservative", "trend_following"}
 SECRET_FIELDS = (
     "binance_api_key",
@@ -145,12 +148,18 @@ class BacktestDefaults:
     min_rsi: float = 45.0
     max_rsi: float = 72.0
     no_kdj_confirmation: bool = False
+    volatility_filter_enabled: bool = True
+    block_extreme_volatility: bool = True
+    max_entry_volatility_percentile: float = 92.0
+    max_entry_volatility_ratio: float = 2.0
 
 
 @dataclass
 class AutoTradeDefaults:
     enabled: bool = False
     mode: str = "paper"
+    paper_enabled: bool = False
+    live_enabled: bool = False
     execution_exchange: str = "binance"
     quote_order_qty: float = 25.0
     leverage: float = 1.0
@@ -170,6 +179,10 @@ class AutoTradeDefaults:
     min_entry_support_strength: float = STRUCTURE_DEFAULT_MIN_SUPPORT_STRENGTH
     min_entry_risk_reward_ratio: float = STRUCTURE_DEFAULT_MIN_RISK_REWARD_RATIO
     min_entry_resistance_distance_pct: float = STRUCTURE_DEFAULT_MIN_RESISTANCE_DISTANCE_PCT
+    volatility_filter_enabled: bool = True
+    block_extreme_volatility: bool = True
+    max_entry_volatility_percentile: float = 92.0
+    max_entry_volatility_ratio: float = 2.0
     support_stop_buffer_pct: float = STRUCTURE_DEFAULT_SUPPORT_STOP_BUFFER_PCT
     resistance_take_profit_buffer_pct: float = STRUCTURE_DEFAULT_RESISTANCE_TAKE_PROFIT_BUFFER_PCT
     stop_loss_pct: float = 4.0
@@ -190,6 +203,56 @@ class AutoTradeDefaults:
     emergency_low_liquidity_min_score: float = 85.0
     cooldown_minutes: int = 240
     order_test_only: bool = True
+
+
+@dataclass
+class CarryPaperDefaults:
+    enabled: bool = False
+    notional_per_leg: float = 100.0
+    min_basis_bps: float = 25.0
+    min_funding_bps: float = 1.0
+    exit_basis_bps: float = 5.0
+    exit_funding_bps: float = 0.0
+    stop_basis_bps: float = 35.0
+    max_holding_hours: int = 168
+    max_positions: int = 3
+    fee_bps_per_leg: float = 10.0
+    slippage_bps_per_leg: float = 2.0
+
+
+def _payload_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "off", "no"}
+    return bool(value)
+
+
+def _autotrade_defaults_from_payload(defaults: "RuntimeConfig", payload: object) -> AutoTradeDefaults:
+    raw_payload = payload if isinstance(payload, dict) else {}
+    raw = {
+        **asdict(defaults.autotrade_defaults),
+        **raw_payload,
+    }
+    mode = str(raw.get("mode") or "paper").strip() or "paper"
+    enabled = _payload_bool(raw.get("enabled", False))
+
+    if "paper_enabled" in raw_payload:
+        paper_enabled = _payload_bool(raw.get("paper_enabled"))
+    else:
+        paper_enabled = enabled and mode == "paper"
+    if "live_enabled" in raw_payload:
+        live_enabled = _payload_bool(raw.get("live_enabled"))
+    else:
+        live_enabled = enabled and mode == "live"
+
+    raw["mode"] = mode
+    raw["enabled"] = enabled or paper_enabled or live_enabled
+    raw["paper_enabled"] = paper_enabled
+    raw["live_enabled"] = live_enabled
+    return AutoTradeDefaults(**raw)
 
 
 @dataclass
@@ -221,7 +284,7 @@ class RuntimeConfig:
     tradingview_exchange: str = "BINANCE"
     tradingview_symbols: list[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT"])
     tradingview_interval: str = "4h"
-    tradingview_bars: int = 5000
+    tradingview_bars: int = TRADINGVIEW_BARS_DEFAULT
     tradingview_cache_enabled: bool = True
     onchain_data_preset: str = "open_multichain_keyless"
     onchain_api_key: str = ""
@@ -252,6 +315,7 @@ class RuntimeConfig:
     scan_defaults: ScanDefaults = field(default_factory=ScanDefaults)
     backtest_defaults: BacktestDefaults = field(default_factory=BacktestDefaults)
     autotrade_defaults: AutoTradeDefaults = field(default_factory=AutoTradeDefaults)
+    carry_paper_defaults: CarryPaperDefaults = field(default_factory=CarryPaperDefaults)
     intelligence_defaults: IntelligenceDefaults = field(default_factory=IntelligenceDefaults)
 
     @classmethod
@@ -311,6 +375,7 @@ class RuntimeConfig:
         scan_payload = payload.get("scan_defaults")
         backtest_payload = payload.get("backtest_defaults")
         autotrade_payload = payload.get("autotrade_defaults")
+        carry_paper_payload = payload.get("carry_paper_defaults")
         intelligence_payload = payload.get("intelligence_defaults")
         intelligence_dict = intelligence_payload if isinstance(intelligence_payload, dict) else {}
         llm_provider = str(payload.get("llm_provider", intelligence_dict.get("llm_provider", defaults.llm_provider)))
@@ -387,10 +452,11 @@ class RuntimeConfig:
                     **(backtest_payload if isinstance(backtest_payload, dict) else {}),
                 }
             ),
-            autotrade_defaults=AutoTradeDefaults(
+            autotrade_defaults=_autotrade_defaults_from_payload(defaults, autotrade_payload),
+            carry_paper_defaults=CarryPaperDefaults(
                 **{
-                    **asdict(defaults.autotrade_defaults),
-                    **(autotrade_payload if isinstance(autotrade_payload, dict) else {}),
+                    **asdict(defaults.carry_paper_defaults),
+                    **(carry_paper_payload if isinstance(carry_paper_payload, dict) else {}),
                 }
             ),
             intelligence_defaults=IntelligenceDefaults(

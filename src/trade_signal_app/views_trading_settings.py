@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from html import escape
 
+from .runtime_config import TRADINGVIEW_BARS_DEFAULT, TRADINGVIEW_BARS_MAX, TRADINGVIEW_BARS_MIN
 from .views_common import _backtest_preset_options, _display_value, _hidden_lang_input, _layout, _module_tabs, _option, _option_with_label, _text, _url, normalize_language
-from .views_components import _trading_account_metric_cards, _trading_event_rows, _trading_position_rows
+from .views_components import _btc_trading_zone, _trading_account_metric_cards, _trading_event_rows, _trading_position_rows
 
 
 def _settings_description_map(lang: str) -> dict[str, str]:
@@ -154,6 +155,7 @@ def render_trading_page(
     account_metrics: dict[str, object] | None = None,
     event_summary: dict[str, object] | None = None,
     readiness: dict[str, object] | None = None,
+    btc_trading: dict[str, object] | None = None,
     lang: str = "zh",
     layout_context: dict[str, object] | None = None,
 ) -> str:
@@ -255,6 +257,7 @@ def render_trading_page(
     module_tabs = _module_tabs(
         [
             ("#trading-execution", t("执行", "Execution")),
+            ("#trading-btc", "BTC"),
             ("#trading-positions", t("持仓", "Positions")),
             ("#trading-events", t("事件", "Events")),
         ],
@@ -284,6 +287,10 @@ def render_trading_page(
           <div class="mini-stat"><span>{t("移动止损", "Trailing Stop")}</span><strong>{float(config.get("trailing_stop_pct", 0)):.1f}%</strong></div>
         </div>
         {_trading_account_metric_cards(account_metrics, active_lang)}
+      </section>
+
+      <section id="trading-btc" class="ant-section section-block">
+        {_btc_trading_zone(btc_trading, active_lang)}
       </section>
 
       <section id="trading-positions" class="ant-section section-block">
@@ -403,7 +410,7 @@ def render_settings_page(
       <div class="ant-statistic-card stat-card">
         <span>Auto Trade</span>
         <strong>{t("开启", "On") if status["autotrade_enabled"] else t("关闭", "Off")}</strong>
-        <small>{escape(_display_value(status["autotrade_mode"], active_lang))} {t("执行", "execution")}</small>
+        <small>{t("模拟", "paper") if status.get("autotrade_paper_enabled") else ""}{"/" if status.get("autotrade_paper_enabled") and status.get("autotrade_live_enabled") else ""}{t("实盘", "live") if status.get("autotrade_live_enabled") else ""} {t("执行", "execution")}</small>
       </div>
       <div class="ant-statistic-card stat-card">
         <span>Intelligence</span>
@@ -459,7 +466,7 @@ def render_settings_page(
           <label><span>TradingView Password</span><input type="password" name="tradingview_password" value="" placeholder="留空保持当前" autocomplete="new-password" /></label>
           <label><span>TradingView Exchange</span><input type="text" name="tradingview_exchange" value="{escape(str(params.get('tradingview_exchange', 'BINANCE')))}" /></label>
           <label><span>TradingView Interval</span><select name="tradingview_interval">{''.join(_option(item, str(params.get('tradingview_interval', '4h'))) for item in ['1m', '3m', '5m', '15m', '30m', '45m', '1h', '2h', '3h', '4h', '1d', '1w', '1M'])}</select></label>
-          <label><span>TradingView Bars</span><input type="number" min="100" max="50000" step="100" name="tradingview_bars" value="{int(params.get('tradingview_bars', 5000) or 5000)}" /></label>
+          <label><span>TradingView Bars</span><input type="number" min="{TRADINGVIEW_BARS_MIN}" max="{TRADINGVIEW_BARS_MAX}" step="100" name="tradingview_bars" value="{int(params.get('tradingview_bars', TRADINGVIEW_BARS_DEFAULT) or TRADINGVIEW_BARS_DEFAULT)}" /></label>
           <label class="inline-check"><input type="hidden" name="tradingview_cache_enabled" value="0" /><input type="checkbox" name="tradingview_cache_enabled" value="1" {"checked" if params.get("tradingview_cache_enabled") else ""} /><span>TradingView cache</span></label>
           <label class="full-span"><span>TradingView Symbols</span><textarea name="tradingview_symbols" rows="3" placeholder="BTCUSDT&#10;ETHUSDT&#10;SOLUSDT">{escape(tradingview_symbols)}</textarea></label>
           <label class="inline-check"><input type="checkbox" name="clear_tradingview_auth" /><span>Clear TradingView auth</span></label>
@@ -513,6 +520,22 @@ def render_settings_page(
           <label><span>Min Intel Severity</span><input type="number" step="0.1" min="0" max="100" name="intelligence_min_intel_severity" value="{float(params['intelligence_min_intel_severity']):.1f}" /></label>
           <label><span>Min Spread bps</span><input type="number" step="0.1" min="0" name="intelligence_min_spread_bps" value="{float(params['intelligence_min_spread_bps']):.1f}" /></label>
           <label><span>Whale Threshold USD</span><input type="number" step="100000" min="0" name="intelligence_whale_transfer_threshold_usd" value="{float(params['intelligence_whale_transfer_threshold_usd']):.0f}" /></label>
+          </div>
+          </div>
+          <div class="settings-group">
+          <div class="settings-group-head"><h3>Carry 双腿模拟</h3><p>只模拟现货做多与永续做空，不复用真实订单链路；已有模拟仓位在关闭新开仓后仍会继续按退出规则管理。</p></div>
+          <div class="settings-grid">
+          <label class="inline-check"><input type="hidden" name="carry_paper_enabled" value="0" /><input type="checkbox" name="carry_paper_enabled" value="1" {"checked" if params.get("carry_paper_enabled") else ""} /><span>Enable carry paper entries</span></label>
+          <label><span>Notional Per Leg</span><input type="number" step="1" min="1" name="carry_notional_per_leg" value="{float(params.get('carry_notional_per_leg', 100.0)):.2f}" /></label>
+          <label><span>Min Basis bps</span><input type="number" step="0.1" min="0" name="carry_min_basis_bps" value="{float(params.get('carry_min_basis_bps', 25.0)):.1f}" /></label>
+          <label><span>Min Funding bps / 8h</span><input type="number" step="0.1" name="carry_min_funding_bps" value="{float(params.get('carry_min_funding_bps', 1.0)):.1f}" /></label>
+          <label><span>Exit Basis bps</span><input type="number" step="0.1" name="carry_exit_basis_bps" value="{float(params.get('carry_exit_basis_bps', 5.0)):.1f}" /></label>
+          <label><span>Exit Funding bps / 8h</span><input type="number" step="0.1" name="carry_exit_funding_bps" value="{float(params.get('carry_exit_funding_bps', 0.0)):.1f}" /></label>
+          <label><span>Adverse Basis Stop bps</span><input type="number" step="0.1" min="0.1" name="carry_stop_basis_bps" value="{float(params.get('carry_stop_basis_bps', 35.0)):.1f}" /></label>
+          <label><span>Max Holding Hours</span><input type="number" min="1" max="8760" name="carry_max_holding_hours" value="{int(params.get('carry_max_holding_hours', 168))}" /></label>
+          <label><span>Max Positions</span><input type="number" min="1" max="20" name="carry_max_positions" value="{int(params.get('carry_max_positions', 3))}" /></label>
+          <label><span>Fee bps Per Leg</span><input type="number" step="0.1" min="0" max="100" name="carry_fee_bps_per_leg" value="{float(params.get('carry_fee_bps_per_leg', 10.0)):.1f}" /></label>
+          <label><span>Slippage bps Per Leg</span><input type="number" step="0.1" min="0" max="100" name="carry_slippage_bps_per_leg" value="{float(params.get('carry_slippage_bps_per_leg', 2.0)):.1f}" /></label>
           </div>
           </div>
           <div class="settings-submit-bar">
@@ -585,13 +608,15 @@ def render_settings_page(
           <input type="hidden" name="settings_section" value="autotrade" />
           <div class="settings-heading full-span">
             <h2>Auto Trade Defaults</h2>
-            <p>自动交易会根据实时扫描分数生成市价单。默认 paper 模式只记录模拟持仓；live 模式还需要服务端环境变量确认才会提交真实订单。</p>
+            <p>自动交易会根据实时扫描分数生成市价单。模拟交易与真实交易可以同时开启做稳定性测试；真实交易仍需要服务端环境变量和交易所凭据确认。</p>
           </div>
           <div class="settings-group">
-          <div class="settings-group-head"><h3>执行与仓位上限</h3><p>控制自动执行开关、模式、单笔金额和组合敞口。</p></div>
+          <div class="settings-group-head"><h3>执行与仓位上限</h3><p>控制自动执行总开关、模拟/真实交易开关、单笔金额和组合敞口。</p></div>
           <div class="settings-grid">
           <label class="inline-check"><input type="hidden" name="autotrade_enabled" value="0" /><input type="checkbox" name="autotrade_enabled" value="1" {"checked" if params["autotrade_enabled"] else ""} /><span>Enable auto trade</span></label>
-          <label><span>Execution Mode</span><select name="autotrade_mode">{''.join(_option(item, str(params['autotrade_mode'])) for item in ['paper', 'live'])}</select></label>
+          <label class="inline-check"><input type="hidden" name="autotrade_paper_enabled" value="0" /><input type="checkbox" name="autotrade_paper_enabled" value="1" {"checked" if params.get("autotrade_paper_enabled") else ""} /><span>Enable paper trading</span></label>
+          <label class="inline-check"><input type="hidden" name="autotrade_live_enabled" value="0" /><input type="checkbox" name="autotrade_live_enabled" value="1" {"checked" if params.get("autotrade_live_enabled") else ""} /><span>Enable live trading</span></label>
+          <label><span>Primary Mode</span><select name="autotrade_mode">{''.join(_option(item, str(params['autotrade_mode'])) for item in ['paper', 'live'])}</select></label>
           <label><span>Execution Exchange</span><select name="autotrade_execution_exchange">{''.join(_option(item, str(params.get('autotrade_execution_exchange', 'binance'))) for item in ['binance', 'okx'])}</select></label>
           <label><span>Quote Order Qty</span><input type="number" step="0.01" min="0.01" name="autotrade_quote_order_qty" value="{float(params['autotrade_quote_order_qty']):.2f}" /></label>
           <label><span>Leverage</span><input type="number" step="0.1" min="1" max="20" name="autotrade_leverage" value="{float(params.get('autotrade_leverage', 1.0)):.1f}" /></label>
@@ -616,6 +641,10 @@ def render_settings_page(
           <label><span>Min Support Strength</span><input type="number" step="0.1" min="0" name="autotrade_min_entry_support_strength" value="{float(params.get('autotrade_min_entry_support_strength', 2.0)):.1f}" /></label>
           <label><span>Min Structure R/R</span><input type="number" step="0.1" min="0" name="autotrade_min_entry_risk_reward_ratio" value="{float(params.get('autotrade_min_entry_risk_reward_ratio', 1.4)):.1f}" /></label>
           <label><span>Min Resistance Room %</span><input type="number" step="0.1" min="0" name="autotrade_min_entry_resistance_distance_pct" value="{float(params.get('autotrade_min_entry_resistance_distance_pct', 2.0)):.1f}" /></label>
+          <label class="inline-check"><input type="hidden" name="autotrade_volatility_filter_enabled" value="0" /><input type="checkbox" name="autotrade_volatility_filter_enabled" value="1" {"checked" if params.get("autotrade_volatility_filter_enabled") else ""} /><span>Enable volatility regime filter</span></label>
+          <label class="inline-check"><input type="hidden" name="autotrade_block_extreme_volatility" value="0" /><input type="checkbox" name="autotrade_block_extreme_volatility" value="1" {"checked" if params.get("autotrade_block_extreme_volatility") else ""} /><span>Block extreme volatility</span></label>
+          <label><span>Max Volatility Percentile</span><input type="number" step="1" min="50" max="100" name="autotrade_max_entry_volatility_percentile" value="{float(params.get('autotrade_max_entry_volatility_percentile', 92.0)):.0f}" /></label>
+          <label><span>Max Volatility Ratio</span><input type="number" step="0.1" min="1" max="10" name="autotrade_max_entry_volatility_ratio" value="{float(params.get('autotrade_max_entry_volatility_ratio', 2.0)):.1f}" /></label>
           <label><span>Support Stop Buffer %</span><input type="number" step="0.1" min="0" name="autotrade_support_stop_buffer_pct" value="{float(params.get('autotrade_support_stop_buffer_pct', 0.6)):.1f}" /></label>
           <label><span>Resistance TP Buffer %</span><input type="number" step="0.1" min="0" name="autotrade_resistance_take_profit_buffer_pct" value="{float(params.get('autotrade_resistance_take_profit_buffer_pct', 0.4)):.1f}" /></label>
           <label><span>Stop Loss %</span><input type="number" step="0.1" min="0.1" name="autotrade_stop_loss_pct" value="{float(params['autotrade_stop_loss_pct']):.1f}" /></label>
@@ -704,6 +733,10 @@ def render_settings_page(
           <label><span>Min RSI</span><input type="number" step="0.1" name="backtest_min_rsi" value="{float(params['backtest_min_rsi']):.1f}" /></label>
           <label><span>Max RSI</span><input type="number" step="0.1" name="backtest_max_rsi" value="{float(params['backtest_max_rsi']):.1f}" /></label>
           <label class="inline-check"><input type="hidden" name="backtest_no_kdj_confirmation" value="0" /><input type="checkbox" name="backtest_no_kdj_confirmation" value="1" {"checked" if params["backtest_no_kdj_confirmation"] else ""} /><span>Disable KDJ confirmation</span></label>
+          <label class="inline-check"><input type="hidden" name="backtest_volatility_filter_enabled" value="0" /><input type="checkbox" name="backtest_volatility_filter_enabled" value="1" {"checked" if params.get("backtest_volatility_filter_enabled") else ""} /><span>Enable volatility regime filter</span></label>
+          <label class="inline-check"><input type="hidden" name="backtest_block_extreme_volatility" value="0" /><input type="checkbox" name="backtest_block_extreme_volatility" value="1" {"checked" if params.get("backtest_block_extreme_volatility") else ""} /><span>Block extreme volatility</span></label>
+          <label><span>Max Volatility Percentile</span><input type="number" step="1" min="50" max="100" name="backtest_max_entry_volatility_percentile" value="{float(params.get('backtest_max_entry_volatility_percentile', 92.0)):.0f}" /></label>
+          <label><span>Max Volatility Ratio</span><input type="number" step="0.1" min="1" max="10" name="backtest_max_entry_volatility_ratio" value="{float(params.get('backtest_max_entry_volatility_ratio', 2.0)):.1f}" /></label>
           </div>
           </div>
           <div class="settings-submit-bar">

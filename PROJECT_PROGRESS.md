@@ -1,6 +1,6 @@
 # 项目进度文档
 
-更新日期：2026-05-04
+更新日期：2026-07-11
 
 ## 1. 项目目标
 
@@ -19,6 +19,10 @@
 ### 2.1 实时扫描
 
 - 支持 Binance Spot 实时扫描
+- 扫描页接入 Binance 公开 `miniTicker` WebSocket，可见标的价格与 24h 涨跌约每秒更新
+- WebSocket 支持 9443 / 443 / market-data-only 三档公开端点、断线重连和 24 小时连接生命周期重建
+- WebSocket 不可用时自动降级到 `GET /api/market/realtime`，该接口只读取公开 ticker
+- 实时覆盖仅更新价格与 24h 涨跌；评分、支撑阻力和波动率状态继续使用最近一次完整扫描，避免未收盘 K 线导致评分漂移
 - 支持按计价币、周期、候选池、成交额、成交笔数过滤
 - 计算并展示：
   - RSI(14)
@@ -33,6 +37,13 @@
 
 - Web：`/`
 - API：`/api/scan`
+- 只读价格 API：`/api/market/realtime?symbols=BTCUSDT,ETHUSDT`
+
+核心文件：
+
+- `static/scan_live.js`
+- `src/trade_signal_app/main_scan.py`
+- `src/trade_signal_app/views_scan.py`
 
 ## 2.2 社区热度与 Twitter 情报
 
@@ -239,6 +250,18 @@
 
 最近新增和收口内容：
 
+- 完成 README 路线图第三项：回测页新增风险收益散点图和评分阈值 × 止损比例 3×3 参数热力图
+- 参数扫描默认关闭，只在首个有效序列上按需运行 9 个完整历史组合，并输出权益、回撤、PF、交易数和风险调整收益
+- CSV 导出新增参数敏感度明细，JSON 导出补齐扫描结果，新增可独立保存的 HTML 研究报告
+- JSON / CSV / HTML 导出响应增加附件文件名，页面新增统一导出入口
+- 完成 README 路线图第二项：新增 4 组完整参数预设和 8 个可复用策略模板
+- 回测预设统一补充风险等级、验证阶段、建议周期、市场状态和 paper-only 元数据
+- 新增策略模板目录与确定性安全编译 API；编译结果强制关闭模拟轮询和实盘开关
+- 策略库新增模板选择、回测入口和安全参数生成操作，回测页同步显示预设适用信息
+- 完成 README 路线图第一项：扫描页 Binance 公开 `miniTicker` WebSocket 实时价格覆盖
+- 新增 WebSocket 断线重连、端点轮换、页面隐藏恢复和 REST 15 秒降级轮询
+- 新增只读实时价格 API `/api/market/realtime`，并验证不会调用买入/卖出接口
+- 完成桌面与 390px 移动端页面验证，无横向溢出或浏览器控制台错误
 - 新增智能总控台 `/terminal` 与 7 个模块页
 - 新增平台能力、账户、策略、风控、日志 API
 - 新增自动交易页 `/trading`、自动交易 API 与自动交易 CLI
@@ -276,7 +299,7 @@
 - 新增配置模板导出接口：`/api/settings/export`
 - 新增设置页模板导入能力：`POST /settings/import`
 - 回测页新增结果导出入口
-- 新增回测导出接口：`/api/backtest/export?format=csv|json`
+- 新增回测导出接口：`/api/backtest/export?format=csv|json|html`
 - 回测页新增单币种 / 组合权益排名总览
 - 新增本地新闻情报 CSV provider，可与 X / CSV 社区评分混合
 - 新增 Reddit provider 与运行配置项，可显式加入社区评分混合
@@ -303,6 +326,23 @@
 - 版本号改为以 `src/trade_signal_app/__init__.py` 为单一来源
 
 ## 4. 验证记录
+
+2026-07-11 已执行：
+
+```bash
+PYTHONPATH=src python3 -m pytest -q
+python3 -m compileall -q src tests
+node --check static/scan_live.js
+```
+
+结果：
+
+- 255 个测试通过
+- Python 与 JavaScript 语法检查通过
+- `GET /api/market/realtime?symbols=BTCUSDT,ETHUSDT` 返回 Binance 实时公开价格
+- 临时测试端口上的 WebSocket 状态进入 `live`，BTC 可见价格持续更新
+- 桌面与 390px 移动端无横向溢出，浏览器控制台无错误
+- 未重启或修改 8000 端口现有 `paper+live` 自动轮询
 
 2026-05-04 已执行：
 
@@ -340,6 +380,7 @@ python3 -m compileall src run.py run_backtest.py tests
 - Twitter/X 数据依赖 Bearer Token 和接口配额
 - Binance 账户手续费依赖 API Key、权限与 IP 白名单
 - 当前 BTC 模板验证仅覆盖 `BTCUSDT 4h / 2024-01 ~ 2025-12` 这一组样本，尚未扩展到更多年份与多交易对
+- WebSocket 只负责展示层实时价格，不会在每秒行情上重算评分；完整策略评分仍由扫描周期和 K 线收盘数据驱动
 
 ## 7. 发布状态
 

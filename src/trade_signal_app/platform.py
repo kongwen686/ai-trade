@@ -162,6 +162,14 @@ def build_components(config: RuntimeConfig) -> list[PlatformComponent]:
         ),
         PlatformComponent(
             "接入层",
+            "Binance Market Stream",
+            "ready_public",
+            "公开 miniTicker WebSocket 实时价格覆盖；断线降级只读 REST",
+            "/api/market/realtime",
+            True,
+        ),
+        PlatformComponent(
+            "接入层",
             "OKX API",
             str(okx_state["status"]),
             str(okx_state["message"]),
@@ -176,11 +184,12 @@ def build_components(config: RuntimeConfig) -> list[PlatformComponent]:
         PlatformComponent("策略层", "Basis Monitor", "ready", "现货/合约价差和跨市场 basis", "/api/terminal/snapshot", True),
         PlatformComponent("策略层", "Strategy Hits", "ready", "自动交易候选和策略命中", "/api/terminal/snapshot", True),
         PlatformComponent("执行层", "Paper Trading", "ready", "本地模拟交易和持仓状态", "/api/trading/run", True),
+        PlatformComponent("执行层", "Carry Paper Engine", "ready", "现货多腿 + 永续空腿的本地双腿模拟，不调用交易所下单接口", "/api/research/carry/paper/status", True),
         PlatformComponent("执行层", "Live Guard", "guarded", "实盘环境变量、order/test 和密钥保护", "/trading", config.autotrade_defaults.mode == "live"),
         PlatformComponent("执行层", "Order Manager", "ready", "市价买入、卖出、客户端订单号", "/api/trading/run", True),
         PlatformComponent("执行层", "Position Manager", "ready", "持仓、止损、止盈和冷却", "/api/trading/status", True),
         PlatformComponent("数据层", "Runtime Config", "ready", "本地配置、模板导入导出、可选加密", "/settings", True),
-        PlatformComponent("数据层", "SQLite Analytics Store", "ready", "交易事件、持仓快照、回测运行和统计快照持久化", "/api/storage/status", True),
+        PlatformComponent("数据层", "SQLite Analytics Store", "ready", "交易事件、持仓快照、Carry 模拟和研究回测持久化", "/api/storage/status", True),
         PlatformComponent("数据层", "Trading State", "ready", "JSON 快照兼容层，SQLite 作为长期事实库", "/api/trading/status", True),
         PlatformComponent("风控层", "Execution Risk Gate", "ready", "链上、价差、策略命中执行前阻断", "/api/terminal/snapshot", True),
     ]
@@ -222,6 +231,17 @@ def build_strategy_catalog(config: RuntimeConfig) -> list[StrategyDefinition]:
             ["false_breakout_exit", "cooldown", "risk_gate"],
         ),
         StrategyDefinition(
+            "volatility_regime_filter",
+            "波动率状态过滤",
+            "guarding" if config.autotrade_defaults.volatility_filter_enabled else "disabled",
+            (
+                f"block extreme, percentile >= {config.autotrade_defaults.max_entry_volatility_percentile:.0f}, "
+                f"ratio >= {config.autotrade_defaults.max_entry_volatility_ratio:.1f}x"
+            ),
+            "扫描标注 / 回测过滤 / 自动入场阻断",
+            ["realized_volatility", "atr", "historical_percentile", "entry_gate"],
+        ),
+        StrategyDefinition(
             "momentum_rotation",
             "动量轮动策略",
             "research",
@@ -232,10 +252,21 @@ def build_strategy_catalog(config: RuntimeConfig) -> list[StrategyDefinition]:
         StrategyDefinition(
             "spot_futures_basis",
             "现货/合约价差策略",
-            "monitoring",
-            f"abs(spread_bps) >= {config.intelligence_defaults.min_spread_bps:.1f}",
-            "套利/对冲观察",
-            ["basis_extreme_block", "manual_review"],
+            "paper_enabled" if config.carry_paper_defaults.enabled else "paper_ready",
+            (
+                f"basis >= {config.carry_paper_defaults.min_basis_bps:.1f}bps, "
+                f"funding >= {config.carry_paper_defaults.min_funding_bps:.1f}bps/8h"
+            ),
+            "模拟现货做多 + 永续做空",
+            ["two_leg_cost", "funding_accrual", "basis_stop", "paper_only"],
+        ),
+        StrategyDefinition(
+            "pair_stat_arb",
+            "配对 / 统计套利",
+            "backtest_ready",
+            "rolling log-price OLS + z-score mean reversion",
+            "本地双腿历史回测；下一根开盘撮合",
+            ["correlation_gate", "hedge_ratio", "z_stop", "two_leg_cost", "research_only"],
         ),
         StrategyDefinition(
             "low_float_momentum_long",
@@ -285,6 +316,14 @@ def build_strategy_catalog(config: RuntimeConfig) -> list[StrategyDefinition]:
             "阻断或降级自动开仓",
             ["exchange_inflow_block", "risk_score"],
         ),
+        StrategyDefinition(
+            "market_making",
+            "做市策略",
+            "research",
+            "requires L2 order book, queue model, inventory skew, and cancel/replace controls",
+            "尚未接入报价或下单；完成仿真验收后再评估",
+            ["inventory_limit", "adverse_selection", "latency", "kill_switch", "paper_first"],
+        ),
     ]
 
 
@@ -305,6 +344,16 @@ def build_risk_rules(config: RuntimeConfig) -> list[RiskRule]:
             "active" if config.autotrade_defaults.structure_filter_enabled else "disabled",
             f"支撑距离 <= {config.autotrade_defaults.max_entry_support_distance_pct:.1f}%, 支撑强度 >= {config.autotrade_defaults.min_entry_support_strength:.1f}, R/R >= {config.autotrade_defaults.min_entry_risk_reward_ratio:.1f}",
             "等待支撑确认",
+        ),
+        RiskRule(
+            "volatility_regime_filter",
+            "波动率状态过滤",
+            "active" if config.autotrade_defaults.volatility_filter_enabled else "disabled",
+            (
+                f"extreme / P{config.autotrade_defaults.max_entry_volatility_percentile:.0f} / "
+                f"{config.autotrade_defaults.max_entry_volatility_ratio:.1f}x"
+            ),
+            "等待波动回落",
         ),
         RiskRule("stop_loss", "单仓止损", "active", f"{config.autotrade_defaults.stop_loss_pct:.1f}%", "触发平仓"),
         RiskRule("take_profit", "单仓止盈", "active", f"{config.autotrade_defaults.take_profit_pct:.1f}%", "触发平仓"),

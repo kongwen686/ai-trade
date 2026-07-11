@@ -19,8 +19,10 @@ from trade_signal_app import __version__
 from trade_signal_app.main import (
     _backtest_payload,
     _backtest_export_csv,
+    _backtest_export_html,
     _build_runtime_config,
     _compile_strategy_payload,
+    _compile_strategy_template_payload,
     _export_runtime_config_template,
     _fast_market_module_payload,
     _health_payload,
@@ -44,23 +46,28 @@ from trade_signal_app.intelligence import FundingRateSnapshot
 from trade_signal_app.onchain import OnchainMonitorEvent
 from trade_signal_app.presets import list_backtest_presets
 from trade_signal_app.runtime_config import RuntimeConfig
+from trade_signal_app.storage import LocalDataStore
 from trade_signal_app.trading import TradingEvent, TradingPosition, TradingRunReport, TradingStateStore
 from trade_signal_app.views import (
     _benchmark_workbench,
+    _parameter_heatmap,
     _portfolio_card,
     _rebalance_empty_card,
+    _risk_return_scatter,
     render_backtest_page,
+    render_btc_signal_page,
     render_index_page,
     render_settings_page,
     render_terminal_module_page,
     render_terminal_page,
     render_trading_page,
 )
+from trade_signal_app.views_backtest import BACKTEST_ADVANCED_HELP
 
 
 def _build_archive(path: Path, *, start: datetime | None = None, bars: int = 180) -> None:
     rows: list[str] = []
-    start = start or main_backtest.BACKTEST_SAMPLE_START_AT.astimezone(timezone.utc)
+    start = start or datetime(2026, 7, 6, 0, 0, tzinfo=timezone.utc)
     price = 100.0
     for index in range(bars):
         if index < 50:
@@ -99,6 +106,52 @@ def _build_archive(path: Path, *, start: datetime | None = None, bars: int = 180
 
 
 class MainTests(unittest.TestCase):
+    def _btc_trading_fixture(self) -> dict[str, object]:
+        return {
+            "symbol": "BTCUSDT",
+            "metrics": {
+                "open_positions": 1,
+                "quote_exposure": 120.0,
+                "total_trades": 6,
+                "buy_trades": 3,
+                "sell_trades": 3,
+                "closed_trades": 3,
+                "winning_trades": 2,
+                "losing_trades": 1,
+                "win_rate_pct": 66.67,
+                "profit_loss_ratio": 2.4,
+                "realized_pnl": 18.0,
+                "unrealized_pnl": 3.5,
+                "total_pnl": 21.5,
+            },
+            "signal": {
+                "symbol": "BTCUSDT",
+                "action": "BUY",
+                "action_label": "买入",
+                "signal": "btc_regime_trend_pullback_buy",
+                "score": 82.35,
+                "grade": "A",
+                "confidence": "高",
+                "price": 118000.0,
+                "advice": "分批试多，止损放在结构支撑下方。",
+                "regime": {"label": "多头趋势"},
+                "trade_levels": {
+                    "stop_price": 114900.0,
+                    "take_profit_price": 125496.0,
+                    "risk_reward_ratio": 2.42,
+                    "support_distance_pct": 2.1,
+                    "leveraged_stop_roi_pct": -13.14,
+                    "leveraged_take_profit_roi_pct": 31.76,
+                },
+                "statistics": {"return_365d_pct": 48.2, "max_drawdown_pct": -76.2},
+                "reasons": ["1d 收盘价位于 EMA200 上方"],
+                "warnings": ["1h RSI 偏热时不追价"],
+            },
+            "open_positions": [],
+            "recent_events": [],
+            "signal_error": "",
+        }
+
     def test_parse_args_supports_host_and_port(self) -> None:
         args = parse_args(["--host", "0.0.0.0", "--port", "9000"])
 
@@ -115,13 +168,19 @@ class MainTests(unittest.TestCase):
 
     def test_main_runs_server_with_cli_arguments(self) -> None:
         server = Mock()
-        with patch("trade_signal_app.main.ThreadingHTTPServer", return_value=server) as server_factory:
+        with (
+            patch("trade_signal_app.main.ThreadingHTTPServer", return_value=server) as server_factory,
+            patch("trade_signal_app.main._start_feishu_daily_report_scheduler") as scheduler_start,
+            patch("trade_signal_app.main._stop_feishu_daily_report_scheduler") as scheduler_stop,
+        ):
             main(["--host", "0.0.0.0", "--port", "9000"])
 
         server_factory.assert_called_once()
         self.assertEqual(server_factory.call_args.args[0], ("0.0.0.0", 9000))
         self.assertEqual(server_factory.call_args.args[1].__name__, "RequestHandler")
         server.serve_forever.assert_called_once_with()
+        scheduler_start.assert_called_once_with()
+        scheduler_stop.assert_called_once_with()
 
     def test_tradingview_fetch_result_uses_injected_cache_dir(self) -> None:
         cache_dir = Path("/tmp/custom-tradingview-cache")
@@ -151,6 +210,63 @@ class MainTests(unittest.TestCase):
         self.assertEqual(fetch_history.call_args.kwargs["cache_root"], cache_dir)
         self.assertEqual(fetch_history.call_args.kwargs["symbol"], "ETHUSDT")
         self.assertEqual(result["cache_path"], str(cache_path))
+
+    def test_tradingview_fetch_result_defaults_to_ten_thousand_bars(self) -> None:
+        cache_dir = Path("/tmp/custom-tradingview-cache")
+        cache_path = cache_dir / "BINANCE_BTCUSDT_4h.csv"
+        with patch(
+            "trade_signal_app.main_backtest.fetch_tradingview_history",
+            return_value=SimpleNamespace(
+                exchange="BINANCE",
+                symbol="BTCUSDT",
+                interval="4h",
+                candle_count=10000,
+                source="cache",
+                cache_path=cache_path,
+            ),
+        ) as fetch_history:
+            result = main_backtest._tradingview_fetch_result(
+                {},
+                runtime_config=RuntimeConfig(),
+                tradingview_cache_dir=cache_dir,
+            )
+
+        self.assertEqual(fetch_history.call_args.kwargs["bars"], 10000)
+        self.assertEqual(result["bars"], 10000)
+
+    def test_tradingview_fetch_result_accepts_one_hundred_thousand_bars(self) -> None:
+        cache_dir = Path("/tmp/custom-tradingview-cache")
+        cache_path = cache_dir / "BINANCE_BTCUSDT_4h.csv"
+        with patch(
+            "trade_signal_app.main_backtest.fetch_tradingview_history",
+            return_value=SimpleNamespace(
+                exchange="BINANCE",
+                symbol="BTCUSDT",
+                interval="4h",
+                candle_count=100000,
+                source="cache",
+                cache_path=cache_path,
+            ),
+        ) as fetch_history:
+            result = main_backtest._tradingview_fetch_result(
+                {"tradingview_bars": ["100000"]},
+                runtime_config=RuntimeConfig(),
+                tradingview_cache_dir=cache_dir,
+            )
+
+        self.assertEqual(fetch_history.call_args.kwargs["bars"], 100000)
+        self.assertEqual(result["bars"], 100000)
+
+    def test_tradingview_fetch_result_rejects_more_than_one_hundred_thousand_bars(self) -> None:
+        with patch("trade_signal_app.main_backtest.fetch_tradingview_history") as fetch_history:
+            with self.assertRaises(ValueError):
+                main_backtest._tradingview_fetch_result(
+                    {"tradingview_bars": ["100001"]},
+                    runtime_config=RuntimeConfig(),
+                    tradingview_cache_dir=Path("/tmp/custom-tradingview-cache"),
+                )
+
+        fetch_history.assert_not_called()
 
     def test_tradingview_backtest_redirect_uses_injected_runtime_config(self) -> None:
         runtime_config = RuntimeConfig()
@@ -186,11 +302,199 @@ class MainTests(unittest.TestCase):
 
     def test_run_uses_explicit_host_and_port_over_defaults(self) -> None:
         server = Mock()
-        with patch("trade_signal_app.main.ThreadingHTTPServer", return_value=server) as server_factory:
+        with (
+            patch("trade_signal_app.main.ThreadingHTTPServer", return_value=server) as server_factory,
+            patch("trade_signal_app.main._start_feishu_daily_report_scheduler"),
+            patch("trade_signal_app.main._stop_feishu_daily_report_scheduler"),
+        ):
             run(host="127.0.0.2", port=8100)
 
         self.assertEqual(server_factory.call_args.args[0], ("127.0.0.2", 8100))
         server.serve_forever.assert_called_once_with()
+
+    def test_next_feishu_daily_report_uses_ten_pm_app_timezone(self) -> None:
+        before = datetime(2026, 7, 10, 21, 59, tzinfo=app_main.APP_TIMEZONE)
+        exact = datetime(2026, 7, 10, 22, 0, tzinfo=app_main.APP_TIMEZONE)
+        after = datetime(2026, 7, 10, 22, 1, tzinfo=app_main.APP_TIMEZONE)
+
+        self.assertEqual(app_main._next_feishu_daily_report_at(before), exact)
+        self.assertEqual(app_main._next_feishu_daily_report_at(exact), exact)
+        self.assertEqual(app_main._next_feishu_daily_report_at(after), exact + timedelta(days=1))
+
+    def test_pending_feishu_daily_report_catches_up_previous_day_until_ten_am(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LocalDataStore(Path(temp_dir) / "ai_trade.sqlite3")
+            with patch("trade_signal_app.main._local_data_store", return_value=store):
+                before_cutoff = datetime(2026, 7, 11, 9, 59, tzinfo=app_main.APP_TIMEZONE)
+                after_cutoff = datetime(2026, 7, 11, 10, 1, tzinfo=app_main.APP_TIMEZONE)
+
+                self.assertEqual(
+                    app_main._pending_feishu_daily_report_at(before_cutoff),
+                    datetime(2026, 7, 10, 22, 0, tzinfo=app_main.APP_TIMEZONE),
+                )
+                self.assertEqual(
+                    app_main._pending_feishu_daily_report_at(after_cutoff),
+                    datetime(2026, 7, 11, 22, 0, tzinfo=app_main.APP_TIMEZONE),
+                )
+
+    def test_build_feishu_daily_summary_combines_daily_metrics(self) -> None:
+        now = datetime(2026, 7, 10, 22, 0, tzinfo=app_main.APP_TIMEZONE)
+        position = TradingPosition(
+            symbol="BTCUSDT",
+            quantity=1.0,
+            entry_price=100.0,
+            quote_notional=100.0,
+            score=80.0,
+            grade="A",
+            opened_at=now - timedelta(hours=3),
+            stop_price=96.0,
+            take_profit_price=110.0,
+            mode="paper",
+        )
+        events = [
+            TradingEvent(action="BUY", symbol="BTCUSDT", mode="paper", status="paper_filled", message="buy", created_at=now - timedelta(hours=2)),
+            TradingEvent(
+                action="SELL",
+                symbol="BTCUSDT",
+                mode="paper",
+                status="paper_filled",
+                message="sell",
+                realized_pnl=5.0,
+                realized_pnl_pct=5.0,
+                created_at=now - timedelta(hours=1),
+            ),
+            TradingEvent(action="SKIP", symbol="*", mode="paper", status="no_signal", message="skip", created_at=now - timedelta(minutes=30)),
+        ]
+        store = SimpleNamespace(load=Mock(return_value=[position]), load_events=Mock(return_value=events))
+        config = RuntimeConfig()
+        scanner = SimpleNamespace(gateway=SimpleNamespace())
+
+        with (
+            patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, scanner)),
+            patch(
+                "trade_signal_app.main.scan_handlers._scan_payload",
+                return_value=(
+                    {
+                        "summary": {"scanned_symbols": 30, "returned_signals": 2},
+                        "signals": [{"symbol": "BTCUSDT"}, {"symbol": "ETHUSDT"}],
+                    },
+                    {},
+                ),
+            ),
+            patch("trade_signal_app.main._trading_store", return_value=store),
+            patch("trade_signal_app.main._latest_prices_for_open_positions", return_value={"BTCUSDT": 110.0}),
+            patch(
+                "trade_signal_app.main._fast_terminal_payload",
+                return_value={
+                    "llm_insight": {"metrics": {"intel_items": 4, "onchain_events": 2, "strategy_hits": 3, "spreads": 1, "funding_rates": 1}},
+                    "execution_risk": {"status": "caution", "risk_score": 66.5, "allowed_symbols": ["BTCUSDT"], "blocked_symbols": {"ETHUSDT": "risk"}},
+                },
+            ),
+        ):
+            summary = app_main._build_feishu_daily_summary(now=now)
+
+        self.assertEqual(summary["date"], "2026-07-10")
+        self.assertEqual(summary["scan"]["returned_signals"], 2)
+        self.assertEqual(summary["scan"]["top_symbols"], ["BTCUSDT", "ETHUSDT"])
+        self.assertEqual(summary["trading"]["today_trades"], 2)
+        self.assertEqual(summary["trading"]["total_trades"], 2)
+        self.assertEqual(summary["trading"]["win_rate_pct"], 100.0)
+        self.assertEqual(summary["trading"]["total_pnl"], 15.0)
+        self.assertEqual(summary["intelligence"]["intel_items"], 4)
+        self.assertEqual(summary["intelligence"]["onchain_events"], 2)
+        self.assertEqual(summary["risk"]["risk_score"], 66.5)
+        self.assertEqual(summary["risk"]["blocked"], 1)
+
+    def test_run_feishu_daily_report_once_sends_only_once_per_day(self) -> None:
+        now = datetime(2026, 7, 10, 22, 0, tzinfo=app_main.APP_TIMEZONE)
+        config = RuntimeConfig()
+        config.feishu_webhook_url = "https://open.feishu.cn/test-webhook"
+        notifier = Mock()
+        notifier.notify_daily_summary.return_value = True
+        notifier.notify_btc_signal.return_value = True
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LocalDataStore(Path(temp_dir) / "ai_trade.sqlite3")
+            with (
+                patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, None)),
+                patch("trade_signal_app.main._feishu_trade_notifier", return_value=notifier),
+                patch("trade_signal_app.main._build_feishu_daily_summary", return_value={"date": "2026-07-10"}),
+                patch("trade_signal_app.main._build_btc_signal_summary", return_value={"symbol": "BTCUSDT", "action": "HOLD"}),
+                patch("trade_signal_app.main._local_data_store", return_value=store),
+            ):
+                first = app_main._run_feishu_daily_report_once(now=now)
+                second = app_main._run_feishu_daily_report_once(now=now + timedelta(minutes=5))
+
+        self.assertTrue(first["sent"])
+        self.assertTrue(first["complete"])
+        self.assertFalse(second["sent"])
+        self.assertEqual(second["reason"], "already_sent")
+        notifier.notify_daily_summary.assert_called_once_with(summary={"date": "2026-07-10"})
+        notifier.notify_btc_signal.assert_called_once_with(summary={"symbol": "BTCUSDT", "action": "HOLD"})
+
+    def test_run_feishu_daily_report_retries_only_failed_component(self) -> None:
+        now = datetime(2026, 7, 11, 22, 0, tzinfo=app_main.APP_TIMEZONE)
+        config = RuntimeConfig()
+        config.feishu_webhook_url = "https://open.feishu.cn/test-webhook"
+        notifier = Mock()
+        notifier.notify_daily_summary.return_value = True
+        notifier.notify_btc_signal.side_effect = [app_main.FeishuNotificationError("temporary failure"), True]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LocalDataStore(Path(temp_dir) / "ai_trade.sqlite3")
+            with (
+                patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, None)),
+                patch("trade_signal_app.main._feishu_trade_notifier", return_value=notifier),
+                patch("trade_signal_app.main._build_feishu_daily_summary", return_value={"date": "2026-07-11"}),
+                patch("trade_signal_app.main._build_btc_signal_summary", return_value={"symbol": "BTCUSDT", "action": "HOLD"}),
+                patch("trade_signal_app.main._local_data_store", return_value=store),
+            ):
+                first = app_main._run_feishu_daily_report_once(now=now)
+                second = app_main._run_feishu_daily_report_once(now=now + timedelta(minutes=5))
+
+        self.assertTrue(first["daily_sent"])
+        self.assertFalse(first["complete"])
+        self.assertFalse(second["daily_sent"])
+        self.assertTrue(second["btc_sent"])
+        self.assertTrue(second["complete"])
+        notifier.notify_daily_summary.assert_called_once_with(summary={"date": "2026-07-11"})
+        self.assertEqual(notifier.notify_btc_signal.call_count, 2)
+
+    def test_btc_signal_payload_uses_runtime_exchange_and_fast_flag(self) -> None:
+        config = RuntimeConfig()
+        config.tradingview_exchange = "BINANCE"
+        with (
+            patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, None)),
+            patch("trade_signal_app.main.build_btc_signal_summary", return_value={"symbol": "BTCUSDT", "action": "HOLD"}) as builder,
+        ):
+            payload = app_main._btc_signal_payload({"fast": ["1"]})
+
+        self.assertEqual(payload["summary"]["symbol"], "BTCUSDT")
+        builder.assert_called_once_with(
+            cache_root=app_main.TRADINGVIEW_CACHE_DIR,
+            exchange="BINANCE",
+            generated_at=None,
+            include_backtests=False,
+            market_price=0.0,
+        )
+
+    def test_latest_prices_for_positions_prefers_live_ticker_price_over_signal_price(self) -> None:
+        position = TradingPosition(
+            symbol="BTCUSDT",
+            quantity=0.01,
+            entry_price=100.0,
+            quote_notional=1.0,
+            score=82.0,
+            grade="A",
+            opened_at=datetime(2026, 7, 10, tzinfo=timezone.utc),
+            stop_price=96.0,
+            take_profit_price=108.0,
+        )
+        gateway = SimpleNamespace(ticker_price=Mock(return_value=123.45))
+        scanner = SimpleNamespace(gateway=gateway)
+
+        prices = app_main._latest_prices_for_open_positions([position], scanner, {"BTCUSDT": 100.0})
+
+        self.assertEqual(prices["BTCUSDT"], 123.45)
+        gateway.ticker_price.assert_called_once_with("BTCUSDT")
 
     def test_terminal_module_api_accepts_legacy_and_direct_paths(self) -> None:
         self.assertEqual(_terminal_api_module_from_path("/api/terminal/modules/community"), "community")
@@ -206,6 +510,7 @@ class MainTests(unittest.TestCase):
     def test_health_payload_is_local_and_reports_live_blockers(self) -> None:
         config = RuntimeConfig()
         config.autotrade_defaults.mode = "live"
+        config.autotrade_defaults.live_enabled = True
         config.autotrade_defaults.order_test_only = False
         with (
             patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, object())),
@@ -474,6 +779,68 @@ class MainTests(unittest.TestCase):
         self.assertIn("PAGE_SIZE = 15", html)
         self.assertIn('document.querySelectorAll("table.data-table")', html)
         self.assertIn('document.querySelectorAll(".signal-grid")', html)
+        self.assertIn("data-live-market", html)
+        self.assertIn('data-live-symbol="BTCUSDT"', html)
+        self.assertIn("data-live-price", html)
+        self.assertIn("data-live-change", html)
+        self.assertIn('/static/scan_live.js', html)
+        self.assertIn("评分、支撑阻力和波动状态来自最近一次完整扫描", html)
+
+    def test_realtime_market_payload_uses_public_tickers_only(self) -> None:
+        gateway = Mock()
+        gateway.ticker_prices.return_value = {"BTCUSDT": 63251.1, "ETHUSDT": 3210.5}
+        gateway.ticker24hr_symbols.return_value = [
+            {
+                "symbol": "BTCUSDT",
+                "lastPrice": "63251.10",
+                "priceChangePercent": "1.25",
+                "quoteVolume": "1200000000",
+                "volume": "19000",
+                "count": 100000,
+            },
+            {
+                "symbol": "ETHUSDT",
+                "lastPrice": "3210.50",
+                "priceChangePercent": "-0.75",
+                "quoteVolume": "800000000",
+                "volume": "250000",
+                "count": 80000,
+            },
+        ]
+        scanner = SimpleNamespace(gateway=gateway)
+
+        with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(RuntimeConfig(), scanner)):
+            payload = app_main._realtime_market_payload({"symbols": ["btcusdt,ETHUSDT,btcusdt"]})
+
+        self.assertTrue(payload["read_only"])
+        self.assertEqual(payload["source"], "binance_spot_rest")
+        self.assertEqual(payload["requested_symbols"], 2)
+        self.assertEqual(payload["returned_symbols"], 2)
+        self.assertEqual(payload["items"][0]["price"], 63251.1)
+        self.assertEqual(payload["items"][0]["change_pct"], 1.25)
+        gateway.order_market_buy.assert_not_called()
+        gateway.order_market_sell.assert_not_called()
+
+    def test_realtime_market_symbols_validate_input_and_limit(self) -> None:
+        self.assertEqual(
+            app_main._realtime_market_symbols({"symbols": ["btcusdt, ETHUSDT", "BTCUSDT"]}),
+            ["BTCUSDT", "ETHUSDT"],
+        )
+        with self.assertRaisesRegex(ValueError, "无效实时行情标的"):
+            app_main._realtime_market_symbols({"symbols": ["BTC/USDT"]})
+        with self.assertRaisesRegex(ValueError, "最多查询"):
+            app_main._realtime_market_symbols(
+                {"symbols": [",".join(f"ASSET{index}USDT" for index in range(41))]}
+            )
+
+    def test_scan_live_script_has_websocket_reconnect_and_rest_fallback(self) -> None:
+        script = (Path(__file__).resolve().parents[1] / "static" / "scan_live.js").read_text(encoding="utf-8")
+
+        self.assertIn("wss://stream.binance.com:9443", script)
+        self.assertIn("@miniTicker", script)
+        self.assertIn("/api/market/realtime", script)
+        self.assertIn("scheduleReconnect", script)
+        self.assertNotIn("order_market_buy", script)
 
     def test_render_index_page_orders_cards_and_table_by_score(self) -> None:
         def signal(symbol: str, score: float) -> dict[str, object]:
@@ -883,14 +1250,43 @@ class MainTests(unittest.TestCase):
         self.assertGreater(payload["series_reports"][0]["buy_hold_final_equity"], 1.0)
         self.assertEqual(payload["portfolio_reports"][0]["top_n"], 1)
 
-    def test_backtest_payload_uses_local_cache_pattern_for_submitted_empty_archives(self) -> None:
+    def test_backtest_payload_runs_bounded_parameter_sweep(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive = Path(temp_dir) / "BTCUSDT-4h-2025-01.zip"
+            _build_archive(archive)
+            payload, params, error = _backtest_payload(
+                {
+                    "archives": [str(archive)],
+                    "score_threshold": ["60"],
+                    "stop_loss_pct": ["4"],
+                    "portfolio_top_n": ["0"],
+                    "min_volume_ratio": ["1.0"],
+                    "min_buy_pressure": ["0.5"],
+                    "max_rsi": ["99"],
+                    "no_kdj_confirmation": ["1"],
+                    "parameter_sweep": ["on"],
+                }
+            )
+
+        self.assertIsNone(error)
+        self.assertTrue(params["parameter_sweep"])
+        self.assertEqual(len(payload["parameter_sweep"]), 9)
+        self.assertEqual({item["score_threshold"] for item in payload["parameter_sweep"]}, {56.0, 60.0, 64.0})
+        self.assertEqual({item["stop_loss_pct"] for item in payload["parameter_sweep"]}, {3.0, 4.0, 5.0})
+        self.assertEqual(sum(1 for item in payload["parameter_sweep"] if item["base_cell"]), 1)
+        self.assertTrue(all(item["scope"] == "first_series_full_history" for item in payload["parameter_sweep"]))
+        self.assertTrue(payload["strategy_explanation"]["parameter_sweep_enabled"])
+        self.assertIsNotNone(payload["strategy_explanation"]["best_parameter_cell"])
+
+    def test_backtest_payload_uses_selected_local_cache_for_submitted_empty_archives(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             archive = Path(temp_dir) / "BTCUSDT-4h-2025-01.zip"
             _build_archive(archive)
             archive_path = archive.resolve()
+            selected_cache = "data/tradingview_klines/BINANCE/BTCUSDT/4h.csv"
 
             def fake_resolve(inputs: list[str]) -> list[Path]:
-                if inputs == [main_backtest.LOCAL_TRADINGVIEW_ARCHIVE_PATTERN]:
+                if inputs == [selected_cache]:
                     return [archive_path]
                 return [archive_path] if str(archive_path) in inputs else []
 
@@ -907,8 +1303,87 @@ class MainTests(unittest.TestCase):
                 )
 
         self.assertIsNone(error)
-        self.assertEqual(params["archives"], main_backtest.LOCAL_TRADINGVIEW_ARCHIVE_PATTERN)
+        self.assertEqual(params["archives"], selected_cache)
         self.assertEqual(len(payload["series_reports"]), 1)
+
+    def test_backtest_background_job_returns_status_and_reuses_completed_result(self) -> None:
+        payload = {
+            "series_reports": [],
+            "portfolio_reports": [],
+            "rebalance_reports": [],
+            "parameter_sweep": [],
+            "performance": {"total_seconds": 0.25, "candle_count": 180},
+            "strategy_explanation": {},
+        }
+        params = {"archives": "sample.csv", "preset": "balanced_swing"}
+        with app_main._BACKTEST_JOB_LOCK:
+            app_main._BACKTEST_JOBS.clear()
+            app_main._BACKTEST_JOB_RESULTS.clear()
+
+        try:
+            with (
+                patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(RuntimeConfig(), SimpleNamespace(gateway=object()))),
+                patch("trade_signal_app.main.backtest_handlers._backtest_payload", return_value=(payload, params, None)),
+                patch("trade_signal_app.main._record_backtest_run") as record_run,
+            ):
+                submitted = app_main._start_backtest_job({"archives": ["sample.csv"]})
+                deadline = time.monotonic() + 2.0
+                status = submitted
+                while status["status"] in {"queued", "running"} and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                    status = app_main._backtest_job_status(str(submitted["job_id"])) or {}
+
+                result = _backtest_payload({"job_id": [str(submitted["job_id"])]})
+
+            self.assertEqual(status["status"], "completed")
+            self.assertTrue(status["result_available"])
+            self.assertEqual(status["performance"]["candle_count"], 180)
+            self.assertIn(f"job_id={submitted['job_id']}", status["redirect_url"])
+            self.assertEqual(result, (payload, params, None))
+            record_run.assert_called_once_with(params, payload, None)
+        finally:
+            with app_main._BACKTEST_JOB_LOCK:
+                app_main._BACKTEST_JOBS.clear()
+                app_main._BACKTEST_JOB_RESULTS.clear()
+
+    def test_backtest_background_job_rejects_an_unbounded_active_queue(self) -> None:
+        with app_main._BACKTEST_JOB_LOCK:
+            app_main._BACKTEST_JOBS.clear()
+            app_main._BACKTEST_JOB_RESULTS.clear()
+            for index in range(app_main.BACKTEST_JOB_ACTIVE_LIMIT):
+                app_main._BACKTEST_JOBS[str(index)] = {"status": "queued", "_query_key": str(index)}
+
+        try:
+            with self.assertRaisesRegex(ValueError, "回测任务正在执行或排队"):
+                app_main._start_backtest_job({"archives": ["new.csv"]})
+        finally:
+            with app_main._BACKTEST_JOB_LOCK:
+                app_main._BACKTEST_JOBS.clear()
+                app_main._BACKTEST_JOB_RESULTS.clear()
+
+    def test_backtest_payload_reports_timing_and_reuses_manual_fee_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive = Path(temp_dir) / "BTCUSDT-4h-2025-01.zip"
+            _build_archive(archive)
+            query = {
+                "archives": [str(archive)],
+                "lookback_bars": ["120"],
+                "score_threshold": ["60"],
+                "portfolio_top_n": ["0"],
+            }
+            with main_backtest._BACKTEST_RESULT_CACHE_LOCK:
+                main_backtest._BACKTEST_RESULT_CACHE.clear()
+
+            first, _, first_error = _backtest_payload(query)
+            second, _, second_error = _backtest_payload(query)
+
+        self.assertIsNone(first_error)
+        self.assertIsNone(second_error)
+        self.assertFalse(first["performance"]["cache_hit"])
+        self.assertTrue(second["performance"]["cache_hit"])
+        self.assertEqual(first["performance"]["candle_count"], 180)
+        self.assertGreaterEqual(first["performance"]["series_backtest_seconds"], 0.0)
+        self.assertLess(second["performance"]["total_seconds"], first["performance"]["total_seconds"])
 
     def test_backtest_payload_diagnoses_history_shorter_than_lookback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -929,10 +1404,10 @@ class MainTests(unittest.TestCase):
         self.assertIn("只有 180 根 K 线", diagnostics)
         self.assertIn("低于当前 lookback 240", diagnostics)
 
-    def test_backtest_payload_excludes_candles_before_sample_start(self) -> None:
+    def test_backtest_payload_keeps_candles_before_sample_start(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             archive = Path(temp_dir) / "BTCUSDT-4h-2026-07.zip"
-            sample_start_utc = main_backtest.BACKTEST_SAMPLE_START_AT.astimezone(timezone.utc)
+            sample_start_utc = datetime(2026, 7, 6, 0, 0, tzinfo=timezone.utc)
             _build_archive(archive, start=sample_start_utc - timedelta(hours=16))
             payload, _, error = _backtest_payload(
                 {
@@ -950,13 +1425,11 @@ class MainTests(unittest.TestCase):
 
         self.assertIsNone(error)
         report = payload["series_reports"][0]
-        self.assertEqual(report["candle_count"], 176)
+        self.assertEqual(report["candle_count"], 180)
         diagnostics = " ".join(payload["strategy_explanation"]["diagnostics"])
-        self.assertIn("已排除 4 根", diagnostics)
+        self.assertNotIn("已排除", diagnostics)
         notes = " ".join(payload["strategy_explanation"]["notes"])
-        self.assertIn(main_backtest.BACKTEST_SAMPLE_START_LABEL, notes)
-        for event in report["events"]:
-            self.assertGreaterEqual(datetime.fromisoformat(str(event["entry_time"])), sample_start_utc)
+        self.assertIn("全部历史 K 线", notes)
 
     def test_render_backtest_page_includes_extended_controls(self) -> None:
         params = {
@@ -1032,12 +1505,22 @@ class MainTests(unittest.TestCase):
         self.assertIn("稳定性检查", html)
         self.assertIn("均衡波段模板", html)
         self.assertIn("Stability Checks", html)
+        self.assertIn("Parameter Sweep", html)
+        self.assertIn('id="backtest-sensitivity"', html)
+        self.assertIn("风险收益地图", html)
+        self.assertIn("参数热力图尚未运行", html)
         self.assertIn("/api/backtest/export?format=csv", html)
+        self.assertIn("/api/backtest/export?format=html", html)
         self.assertIn("Balanced Swing", html)
         self.assertIn("/api/backtest/presets", html)
+        self.assertIn("data-backtest-job-status", html)
+        self.assertIn('src="/static/backtest.js"', html)
         self.assertIn("等待单币种回测结果", html)
         self.assertIn("切换到再平衡模板后显示", html)
         self.assertIn("切换到加密资产等权再平衡", html)
+        self.assertIn('max="100000" step="100" name="tradingview_bars" value="10000"', html)
+        for description in BACKTEST_ADVANCED_HELP.values():
+            self.assertIn(description, html)
 
     def test_backtest_empty_portfolio_and_rebalance_cards_explain_next_steps(self) -> None:
         portfolio_html = _portfolio_card(
@@ -1102,6 +1585,48 @@ class MainTests(unittest.TestCase):
         self.assertIn("benchmark-line hold", html)
         self.assertNotIn("基准测试曲线不足", html)
 
+    def test_parameter_heatmap_and_risk_scatter_use_real_results(self) -> None:
+        sweep = []
+        for stop in (3.0, 4.0, 5.0):
+            for score in (66.0, 70.0, 74.0):
+                sweep.append(
+                    {
+                        "symbol": "BTCUSDT",
+                        "interval": "4h",
+                        "status": "ok",
+                        "score_threshold": score,
+                        "stop_loss_pct": stop,
+                        "base_cell": score == 70.0 and stop == 4.0,
+                        "final_equity": 1.0 + ((74.0 - score + stop) / 100),
+                        "return_pct": 74.0 - score + stop,
+                        "max_drawdown_pct": -stop,
+                        "profit_factor": 1.4,
+                        "signal_count": 12,
+                        "risk_adjusted_return": (74.0 - score + stop) / stop,
+                    }
+                )
+
+        heatmap = _parameter_heatmap({"parameter_sweep": True}, sweep)
+        scatter = _risk_return_scatter(
+            [
+                {
+                    "symbol": "BTCUSDT",
+                    "interval": "4h",
+                    "final_equity": 1.12,
+                    "max_drawdown_pct": -4.0,
+                    "signal_count": 12,
+                    "trade_stat": {"trade_count": 12, "win_rate_pct": 58.0, "profit_factor": 1.4},
+                }
+            ],
+            [],
+        )
+
+        self.assertIn("parameter-heatmap", heatmap)
+        self.assertIn("base-cell", heatmap)
+        self.assertIn("+11.00%", heatmap)
+        self.assertIn("risk-return-chart", scatter)
+        self.assertIn("Return +12.00%", scatter)
+
     def test_render_settings_page_includes_runtime_controls(self) -> None:
         html = render_settings_page(
             params={
@@ -1142,6 +1667,8 @@ class MainTests(unittest.TestCase):
                 "scan_min_trade_count": 3000,
                 "autotrade_enabled": False,
                 "autotrade_mode": "paper",
+                "autotrade_paper_enabled": False,
+                "autotrade_live_enabled": False,
                 "autotrade_execution_exchange": "binance",
                 "autotrade_quote_order_qty": 25.0,
                 "autotrade_max_open_positions": 3,
@@ -1223,6 +1750,8 @@ class MainTests(unittest.TestCase):
                 "storage_mode": "Encrypted",
                 "autotrade_enabled": False,
                 "autotrade_mode": "paper",
+                "autotrade_paper_enabled": False,
+                "autotrade_live_enabled": False,
                 "feishu_webhook_configured": True,
                 "intelligence_enabled": True,
                 "llm_enabled": False,
@@ -1256,7 +1785,10 @@ class MainTests(unittest.TestCase):
         self.assertIn("Market Data Preset", html)
         self.assertIn("TradingView Username", html)
         self.assertIn("TradingView Symbols", html)
+        self.assertIn('max="100000" step="100" name="tradingview_bars" value="5000"', html)
         self.assertIn("Enable anti-chase filter", html)
+        self.assertIn("Enable paper trading", html)
+        self.assertIn("Enable live trading", html)
         self.assertIn("Max EMA20 Deviation %", html)
         self.assertIn("Enable structure filter", html)
         self.assertIn("Min Structure R/R", html)
@@ -1372,6 +1904,7 @@ class MainTests(unittest.TestCase):
                     ],
                     "summary": "执行前风控：允许 1 个候选。",
                 },
+                "btc_trading": self._btc_trading_fixture(),
                 "platform": {
                     "generated_at": "2026-04-28T00:00:00+00:00",
                     "components": [
@@ -1432,6 +1965,9 @@ class MainTests(unittest.TestCase):
         self.assertIn("数据源状态", html)
         self.assertIn("异动明细", html)
         self.assertIn("现货 / 合约价差", html)
+        self.assertIn("BTC交易专区", html)
+        self.assertIn("BTC累计成交", html)
+        self.assertIn("btc_regime_trend_pullback_buy", html)
         self.assertIn("策略命中", html)
         self.assertIn("大模型分析", html)
         self.assertIn("机会判断", html)
@@ -1752,6 +2288,7 @@ class MainTests(unittest.TestCase):
                     "unrealized_pnl": 3.0,
                     "total_pnl": 19.0,
                 },
+                "btc_trading": self._btc_trading_fixture(),
             },
             message="模拟量化交易已执行",
             paper_auto_status={
@@ -1767,6 +2304,9 @@ class MainTests(unittest.TestCase):
         self.assertIn('action="/terminal/trading/run"', html)
         self.assertIn("运行模拟量化交易", html)
         self.assertIn("策略信号自动交易", html)
+        self.assertIn("BTC交易专区", html)
+        self.assertIn("BTC累计成交", html)
+        self.assertIn("btc_regime_trend_pullback_buy", html)
         self.assertIn('action="/terminal/trading/auto/start"', html)
         self.assertIn('action="/terminal/trading/auto/stop"', html)
         self.assertIn("启动自动策略交易", html)
@@ -1801,6 +2341,39 @@ class MainTests(unittest.TestCase):
         self.assertIn("/settings#settings-twitter", html)
         self.assertIn("/api/terminal/community", html)
 
+    def test_render_terminal_basis_module_reads_carry_paper_snapshot(self) -> None:
+        html = render_terminal_module_page(
+            snapshot={
+                "scanned_symbols": 0,
+                "intel_items": [],
+                "twitter_accounts": [],
+                "onchain_events": [],
+                "spreads": [],
+                "funding_rates": [],
+                "strategy_hits": [],
+                "execution_risk": {
+                    "status": "clear",
+                    "risk_score": 0.0,
+                    "allowed_symbols": [],
+                    "blocked_symbols": {},
+                    "summary": "执行前风控正常。",
+                },
+                "platform": {"accounts": [], "strategies": [], "risk_rules": [], "recent_events": []},
+                "carry_paper": {
+                    "enabled": False,
+                    "config": {"min_basis_bps": 25.0, "min_funding_bps": 1.0},
+                    "metrics": {"open_positions": 0, "gross_exposure": 0.0, "realized_pnl": 0.0},
+                    "open_positions": [],
+                    "recent_events": [],
+                },
+            },
+            module="basis",
+        )
+
+        self.assertIn("Carry 双腿模拟", html)
+        self.assertIn("已关闭", html)
+        self.assertIn("25.0 bps", html)
+
     def test_paper_auto_trading_loop_runs_forced_paper_strategy_signals(self) -> None:
         _stop_paper_auto_trading()
         before = int(_paper_auto_status_payload().get("run_count") or 0)
@@ -1826,9 +2399,35 @@ class MainTests(unittest.TestCase):
                     time.sleep(0.02)
                 self.assertTrue(runner.called)
                 runner.assert_called_with(force_paper=True)
+                self.assertTrue(status["force_paper"])
+                self.assertEqual(status["mode_label"], "paper_only")
                 self.assertTrue(status["running"])
                 self.assertGreaterEqual(int(status["run_count"] or 0), before + 1)
                 self.assertEqual(status["last_result"]["mode"], "paper")
+            finally:
+                stopped = _stop_paper_auto_trading()
+        self.assertFalse(stopped["running"])
+
+    def test_strategy_auto_trading_loop_runs_configured_paper_live_modes(self) -> None:
+        _stop_paper_auto_trading()
+        before = int(_paper_auto_status_payload().get("run_count") or 0)
+        result = {
+            "enabled": True,
+            "mode": "paper+live",
+            "scanned_symbols": 20,
+            "returned_signals": 2,
+            "open_positions": [],
+            "events": [{"status": "paper_filled", "symbol": "BTCUSDT"}, {"status": "filled", "symbol": "BTCUSDT"}],
+        }
+        with patch("trade_signal_app.main._run_trading_once", return_value=result) as runner:
+            try:
+                status = _start_paper_auto_trading(30, force_paper=False)
+                self.assertTrue(status["running"])
+                self.assertGreaterEqual(int(status["run_count"] or 0), before + 1)
+                self.assertEqual(status["last_result"]["mode"], "paper+live")
+                runner.assert_called_with(force_paper=False)
+                self.assertFalse(status["force_paper"])
+                self.assertEqual(status["mode_label"], "configured_paper_live")
             finally:
                 stopped = _stop_paper_auto_trading()
         self.assertFalse(stopped["running"])
@@ -1937,6 +2536,13 @@ class MainTests(unittest.TestCase):
         self.assertEqual(metrics["profit_loss_ratio"], 2.5)
         self.assertEqual(metrics["profit_factor"], 2.5)
         self.assertEqual(metrics["realized_pnl"], 6.0)
+        btc_metrics = payload["btc_trading"]["metrics"]
+        self.assertEqual(btc_metrics["symbol"], "BTCUSDT")
+        self.assertEqual(btc_metrics["total_trades"], 2)
+        self.assertEqual(btc_metrics["closed_trades"], 1)
+        self.assertEqual(btc_metrics["winning_trades"], 1)
+        self.assertEqual(btc_metrics["losing_trades"], 0)
+        self.assertEqual(btc_metrics["realized_pnl"], 10.0)
 
     def test_trading_status_payload_returns_retained_trade_history_beyond_thirty_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2025,6 +2631,18 @@ class MainTests(unittest.TestCase):
         self.assertIn("/backtest?", payload["run_urls"]["backtest"])
         self.assertEqual(payload["run_urls"]["paper_trading"], "/terminal/trading")
 
+    def test_compile_strategy_template_payload_preserves_live_safety_boundary(self) -> None:
+        with patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(RuntimeConfig(), object())):
+            payload = _compile_strategy_template_payload("quality_trend_pullback")
+
+        self.assertEqual(payload["template"]["preset_id"], "trend_pullback_conservative")
+        self.assertTrue(payload["template"]["paper_only"])
+        self.assertFalse(payload["autotrade_defaults"]["enabled"])
+        self.assertFalse(payload["autotrade_defaults"]["live_enabled"])
+        self.assertTrue(payload["autotrade_defaults"]["order_test_only"])
+        query = parse_qs(urlparse(payload["run_urls"]["backtest"]).query)
+        self.assertEqual(query["max_entry_volatility_ratio"], ["1.55"])
+
     def test_render_strategy_module_includes_natural_language_compiler(self) -> None:
         html = render_terminal_module_page(
             snapshot={
@@ -2036,6 +2654,19 @@ class MainTests(unittest.TestCase):
                 "onchain_events": [],
                 "spreads": [],
                 "strategy_hits": [{"symbol": "BTCUSDT", "strategy": "auto_score_breakout", "score": 82.0, "grade": "A", "action": "watch", "reasons": ["趋势结构改善"]}],
+                "strategy_templates": [
+                    {
+                        "template_id": "quality_trend_pullback",
+                        "label": "趋势回踩确认",
+                        "description": "等待趋势回踩后确认。",
+                        "style": "trend_following",
+                        "preset_id": "trend_pullback_conservative",
+                        "risk_level": "low",
+                        "validation_status": "paper_candidate",
+                        "recommended_intervals": ["1h", "4h"],
+                        "market_regimes": ["trend_pullback"],
+                    }
+                ],
                 "llm_insight": {"provider": "local", "model": "rules", "status": "ok", "summary": "综合监控正常。"},
                 "execution_risk": {
                     "status": "clear",
@@ -2076,6 +2707,9 @@ class MainTests(unittest.TestCase):
         )
 
         self.assertIn("自然语言策略编译器", html)
+        self.assertIn("参数预设与策略模板", html)
+        self.assertIn("趋势回踩确认", html)
+        self.assertIn('action="/terminal/strategies/templates/compile"', html)
         self.assertIn('action="/terminal/strategies/compile"', html)
         self.assertIn("BTCUSDT", html)
         self.assertIn("打开回测", html)
@@ -2113,10 +2747,17 @@ class MainTests(unittest.TestCase):
                 "unrealized_pnl": 3.0,
                 "total_pnl": 21.0,
             },
+            btc_trading=self._btc_trading_fixture(),
         )
 
         self.assertIn("AI Trade Auto Execution", html)
         self.assertIn("运行一次自动交易", html)
+        self.assertIn("BTC交易专区", html)
+        self.assertIn("BTC累计成交", html)
+        self.assertIn("btc_regime_trend_pullback_buy", html)
+        self.assertIn("完整 BTC 图表视图", html)
+        self.assertIn('href="/btc/signal"', html)
+        self.assertIn('href="/btc/signal?fast=1"', html)
         self.assertIn("累计成交次数", html)
         self.assertIn("盈亏比", html)
         self.assertIn("60.0%", html)
@@ -2124,6 +2765,42 @@ class MainTests(unittest.TestCase):
         self.assertIn("执行事件", html)
         self.assertIn('href="#trading-positions"', html)
         self.assertIn('id="trading-events"', html)
+
+    def test_render_btc_signal_page_shows_visual_chart_and_tables(self) -> None:
+        summary = dict(self._btc_trading_fixture()["signal"])
+        summary["price"] = 119250.0
+        summary["analysis_price"] = 118000.0
+        summary["price_source"] = "live_market"
+        summary["technical"] = {"indicator_snapshot": {"closes": [112000.0, 113500.0, 114200.0, 118000.0]}}
+        summary["preset_backtests"] = [
+            {
+                "label": "BTC Core Trading",
+                "signal_count": 18,
+                "win_rate_pct": 61.1,
+                "profit_factor": 1.8,
+                "max_drawdown_pct": -8.5,
+                "quality_score": 74.2,
+            }
+        ]
+        summary["selected_preset"] = {"label": "BTC Core Trading", "win_rate_pct": 61.1}
+
+        html = render_btc_signal_page(summary=summary, fast=False)
+
+        self.assertIn("BTC 专属信号可视化", html)
+        self.assertIn("BTC信号走势图", html)
+        self.assertIn("btc-visual-chart", html)
+        self.assertIn("btc-chart-area", html)
+        self.assertIn("btc-chart-level-label", html)
+        self.assertIn("btc-chart-connector", html)
+        self.assertIn("最近48根K线 + 实时价", html)
+        self.assertIn("当前价 119,250.00", html)
+        self.assertIn("K线收盘 118,000.00", html)
+        self.assertIn("关键价位", html)
+        self.assertIn("信号与统计", html)
+        self.assertIn("BTC预设回测", html)
+        self.assertIn("BTC Core Trading", html)
+        self.assertIn('href="/api/btc/signal"', html)
+        self.assertIn('href="/btc/signal?fast=1"', html)
 
     def test_render_trading_page_supports_english_labels(self) -> None:
         html = render_trading_page(
@@ -2256,6 +2933,180 @@ class MainTests(unittest.TestCase):
         self.assertEqual(payload["events"][0]["status"], "paper_filled")
         self.assertEqual(payload["open_positions"][0]["symbol"], "BTCUSDT")
         notifier.notify_trade.assert_called_once()
+
+    def test_run_trading_once_dispatches_paper_and_live_when_both_switches_enabled(self) -> None:
+        config = RuntimeConfig()
+        config.autotrade_defaults.enabled = True
+        config.autotrade_defaults.paper_enabled = True
+        config.autotrade_defaults.live_enabled = True
+        config.autotrade_defaults.order_test_only = True
+        scanner = SimpleNamespace(gateway=object())
+        calls: list[tuple[str, bool]] = []
+        isolate_flags: list[bool] = []
+
+        class FakeAutoTrader:
+            def __init__(self, **kwargs):
+                isolate_flags.append(bool(kwargs.get("isolate_mode")))
+
+            def set_execution_gateway(self, gateway):
+                return None
+
+            def run_once(self, run_config):
+                calls.append((run_config.mode, run_config.enabled))
+                return TradingRunReport(
+                    enabled=True,
+                    mode=run_config.mode,
+                    scanned_symbols=1,
+                    returned_signals=1,
+                    open_positions=[],
+                    events=[
+                        TradingEvent(
+                            action="SKIP",
+                            symbol="*",
+                            mode=run_config.mode,
+                            status=f"{run_config.mode}_done",
+                            message="test",
+                        )
+                    ],
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            with (
+                patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, scanner)),
+                patch("trade_signal_app.main._trading_store", return_value=store),
+                patch("trade_signal_app.main._feishu_trade_notifier", return_value=None),
+                patch("trade_signal_app.main._execution_gateway", return_value=object()),
+                patch("trade_signal_app.main.IntelligenceHub") as hub_cls,
+                patch("trade_signal_app.main.AutoTrader", FakeAutoTrader),
+            ):
+                hub_cls.return_value.snapshot.return_value = SimpleNamespace(
+                    execution_risk=SimpleNamespace(blocked_symbols={})
+                )
+                payload = _run_trading_once()
+
+        self.assertEqual(calls, [("paper", True), ("live", True)])
+        self.assertEqual(isolate_flags, [True, True])
+        self.assertEqual(payload["mode"], "paper+live")
+        self.assertEqual(payload["scanned_symbols"], 2)
+        self.assertEqual({event["status"] for event in payload["events"]}, {"paper_done", "live_done"})
+
+    def test_live_insufficient_balance_does_not_block_paper_fill(self) -> None:
+        signal = SimpleNamespace(
+            symbol="BTCUSDT",
+            score=84.0,
+            grade="A",
+            ticker=SimpleNamespace(last_price=100.0, quote_volume=20_000_000.0),
+            indicators=SimpleNamespace(
+                volume_ratio=1.6,
+                buy_pressure_ratio=0.63,
+                rsi_14=55.0,
+                price_vs_ema20_pct=1.0,
+                recent_change_pct=1.0,
+                support_level=99.0,
+                resistance_level=115.0,
+                support_distance_pct=1.0,
+                resistance_distance_pct=15.0,
+                support_strength=3.0,
+                structure_risk_reward=3.0,
+            ),
+        )
+        gateway = SimpleNamespace(ticker_price=Mock(return_value=100.0))
+        scanner = SimpleNamespace(
+            gateway=gateway,
+            scan=lambda: (SimpleNamespace(scanned_symbols=10, returned_signals=1), [signal]),
+        )
+        config = RuntimeConfig()
+        config.autotrade_defaults.enabled = True
+        config.autotrade_defaults.paper_enabled = True
+        config.autotrade_defaults.live_enabled = True
+        config.autotrade_defaults.order_test_only = False
+        config.autotrade_defaults.quote_order_qty = 25.0
+        config.autotrade_defaults.score_threshold = 75.0
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            with (
+                patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, scanner)),
+                patch("trade_signal_app.main._trading_store", return_value=store),
+                patch("trade_signal_app.main._feishu_trade_notifier", return_value=None),
+                patch(
+                    "trade_signal_app.main._trading_readiness_payload",
+                    return_value={
+                        "live_ready": False,
+                        "blockers": ["USDT 可用余额不足"],
+                    },
+                ),
+                patch("trade_signal_app.main.IntelligenceHub") as hub_cls,
+            ):
+                hub_cls.return_value.snapshot.return_value = SimpleNamespace(
+                    execution_risk=SimpleNamespace(blocked_symbols={})
+                )
+                payload = _run_trading_once()
+                stored_positions = store.load()
+
+        statuses = {event["status"] for event in payload["events"]}
+        self.assertIn("blocked", statuses)
+        self.assertIn("paper_filled", statuses)
+        self.assertIn("USDT 可用余额不足", " ".join(str(event["message"]) for event in payload["events"]))
+        self.assertEqual([(position.symbol, position.mode) for position in stored_positions], [("BTCUSDT", "paper")])
+        self.assertGreaterEqual(gateway.ticker_price.call_count, 1)
+
+    def test_live_readiness_error_does_not_block_paper_dispatch(self) -> None:
+        config = RuntimeConfig()
+        config.autotrade_defaults.enabled = True
+        config.autotrade_defaults.paper_enabled = True
+        config.autotrade_defaults.live_enabled = True
+        config.autotrade_defaults.order_test_only = False
+        scanner = SimpleNamespace(gateway=object())
+        calls: list[str] = []
+
+        class FakeAutoTrader:
+            def __init__(self, **kwargs):
+                return None
+
+            def set_execution_gateway(self, gateway):
+                return None
+
+            def run_once(self, run_config):
+                calls.append(run_config.mode)
+                return TradingRunReport(
+                    enabled=True,
+                    mode=run_config.mode,
+                    scanned_symbols=1,
+                    returned_signals=1,
+                    open_positions=[],
+                    events=[
+                        TradingEvent(
+                            action="SKIP",
+                            symbol="*",
+                            mode=run_config.mode,
+                            status=f"{run_config.mode}_done",
+                            message="test",
+                        )
+                    ],
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            with (
+                patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, scanner)),
+                patch("trade_signal_app.main._trading_store", return_value=store),
+                patch("trade_signal_app.main._feishu_trade_notifier", return_value=None),
+                patch("trade_signal_app.main._execution_gateway", return_value=object()),
+                patch("trade_signal_app.main._trading_readiness_payload", side_effect=RuntimeError("balance endpoint timeout")),
+                patch("trade_signal_app.main.IntelligenceHub") as hub_cls,
+                patch("trade_signal_app.main.AutoTrader", FakeAutoTrader),
+            ):
+                hub_cls.return_value.snapshot.return_value = SimpleNamespace(
+                    execution_risk=SimpleNamespace(blocked_symbols={})
+                )
+                payload = _run_trading_once()
+
+        self.assertEqual(calls, ["paper"])
+        self.assertEqual(payload["mode"], "paper+live")
+        self.assertEqual({event["status"] for event in payload["events"]}, {"blocked", "paper_done"})
+        self.assertIn("实盘就绪检查异常：balance endpoint timeout", " ".join(str(event["message"]) for event in payload["events"]))
 
     def test_forced_paper_trading_run_waits_for_pullback_on_spike(self) -> None:
         signal = SimpleNamespace(
@@ -2480,6 +3331,8 @@ class MainTests(unittest.TestCase):
                     "scan_min_trade_count": ["800"],
                     "autotrade_enabled": ["on"],
                     "autotrade_mode": ["paper"],
+                    "autotrade_paper_enabled": ["on"],
+                    "autotrade_live_enabled": ["on"],
                     "autotrade_execution_exchange": ["okx"],
                     "autotrade_quote_order_qty": ["30"],
                     "autotrade_leverage": ["5"],
@@ -2593,6 +3446,9 @@ class MainTests(unittest.TestCase):
         self.assertEqual(config.backtest_defaults.preset, "portfolio_rotation")
         self.assertEqual(config.scan_defaults.quote_asset, "FDUSD")
         self.assertTrue(config.autotrade_defaults.enabled)
+        self.assertTrue(config.autotrade_defaults.paper_enabled)
+        self.assertTrue(config.autotrade_defaults.live_enabled)
+        self.assertEqual(config.autotrade_defaults.mode, "live")
         self.assertEqual(config.autotrade_defaults.execution_exchange, "okx")
         self.assertEqual(config.autotrade_defaults.quote_order_qty, 30.0)
         self.assertEqual(config.autotrade_defaults.leverage, 5.0)
@@ -2644,10 +3500,28 @@ class MainTests(unittest.TestCase):
         self.assertEqual(config.okx_api_secret, "new-okx-secret")
         self.assertEqual(config.okx_api_passphrase, "")
 
+    def test_runtime_config_migrates_legacy_autotrade_mode_switch(self) -> None:
+        config = RuntimeConfig.from_dict(
+            {
+                "autotrade_defaults": {
+                    "enabled": True,
+                    "mode": "live",
+                    "order_test_only": False,
+                }
+            },
+            app_main.SETTINGS,
+        )
+
+        self.assertTrue(config.autotrade_defaults.enabled)
+        self.assertFalse(config.autotrade_defaults.paper_enabled)
+        self.assertTrue(config.autotrade_defaults.live_enabled)
+        self.assertEqual(config.autotrade_defaults.mode, "live")
+
     def test_build_runtime_config_preserves_unsubmitted_module_booleans(self) -> None:
         current = RuntimeConfig()
         current.tradingview_cache_enabled = True
         current.autotrade_defaults.enabled = True
+        current.autotrade_defaults.paper_enabled = True
         current.autotrade_defaults.order_test_only = True
         current.feishu_webhook_url = "https://open.feishu.cn/webhook/keep"
         current.intelligence_defaults.enabled = True
@@ -2670,6 +3544,7 @@ class MainTests(unittest.TestCase):
         self.assertEqual(scan_config.scan_defaults.quote_asset, "FDUSD")
         self.assertTrue(scan_config.tradingview_cache_enabled)
         self.assertTrue(scan_config.autotrade_defaults.enabled)
+        self.assertTrue(scan_config.autotrade_defaults.paper_enabled)
         self.assertTrue(scan_config.autotrade_defaults.order_test_only)
         self.assertEqual(scan_config.feishu_webhook_url, "https://open.feishu.cn/webhook/keep")
         self.assertTrue(scan_config.intelligence_defaults.enabled)
@@ -2688,6 +3563,8 @@ class MainTests(unittest.TestCase):
             )
 
         self.assertFalse(autotrade_config.autotrade_defaults.enabled)
+        self.assertFalse(autotrade_config.autotrade_defaults.paper_enabled)
+        self.assertFalse(autotrade_config.autotrade_defaults.live_enabled)
         self.assertFalse(autotrade_config.autotrade_defaults.order_test_only)
         self.assertTrue(autotrade_config.tradingview_cache_enabled)
         self.assertTrue(autotrade_config.intelligence_defaults.enabled)
@@ -2773,6 +3650,22 @@ class MainTests(unittest.TestCase):
                     "summary": "均衡波段模板",
                     "notes": ["成本假设：fee_model=flat"],
                 },
+                "parameter_sweep": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "interval": "4h",
+                        "status": "ok",
+                        "score_threshold": 70.0,
+                        "stop_loss_pct": 4.0,
+                        "final_equity": 1.18,
+                        "return_pct": 18.0,
+                        "max_drawdown_pct": -5.0,
+                        "profit_factor": 1.7,
+                        "signal_count": 8,
+                        "risk_adjusted_return": 3.6,
+                        "base_cell": True,
+                    }
+                ],
                 "series_reports": [
                     {
                         "symbol": "BTCUSDT",
@@ -2803,6 +3696,34 @@ class MainTests(unittest.TestCase):
         self.assertIn("param,backtest,,lookback_bars,240", csv_text)
         self.assertIn("series,BTCUSDT,4h,final_equity,1.23", csv_text)
         self.assertIn("portfolio,portfolio_top_2,4h,profit_factor,2.1", csv_text)
+        self.assertIn("sensitivity,score_70.0_stop_4.0,4h,return_pct,18.0", csv_text)
+
+    def test_backtest_html_export_contains_heatmap_and_escapes_params(self) -> None:
+        html = _backtest_export_html(
+            payload={
+                "strategy_explanation": {"summary": "参数研究", "notes": ["仅用于回测"]},
+                "series_reports": [],
+                "portfolio_reports": [],
+                "parameter_sweep": [
+                    {
+                        "status": "ok",
+                        "score_threshold": 70.0,
+                        "stop_loss_pct": 4.0,
+                        "final_equity": 1.08,
+                        "return_pct": 8.0,
+                        "max_drawdown_pct": -3.0,
+                    }
+                ],
+            },
+            params={"archives": "<script>alert(1)</script>"},
+            error=None,
+        )
+
+        self.assertIn("AI Trade 回测研究报告", html)
+        self.assertIn("参数敏感度热力图", html)
+        self.assertIn("+8.00%", html)
+        self.assertNotIn("<script>alert(1)</script>", html)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
 
     def test_backtest_payload_applies_preset_defaults(self) -> None:
         current = RuntimeConfig()

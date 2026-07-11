@@ -5,10 +5,14 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+from threading import RLock
 
 from .time_utils import now_app_time
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
+SQLITE_BUSY_TIMEOUT_MS = 10_000
+_INITIALIZE_LOCK = RLock()
+_INITIALIZED_PATHS: set[Path] = set()
 
 
 def _json_dumps(value: object) -> str:
@@ -43,16 +47,22 @@ class LocalDataStore:
 
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.path, timeout=5)
+        connection = sqlite3.connect(self.path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
         return connection
 
     def initialize(self) -> None:
-        with self._connect() as connection:
-            connection.executescript(
-                """
+        resolved_path = self.path.resolve()
+        with _INITIALIZE_LOCK:
+            if resolved_path in _INITIALIZED_PATHS and self.path.exists():
+                return
+            with self._connect() as connection:
+                connection.execute("PRAGMA journal_mode = WAL")
+                connection.execute("PRAGMA synchronous = NORMAL")
+                connection.executescript(
+                    """
                 CREATE TABLE IF NOT EXISTS meta (
                   key TEXT PRIMARY KEY,
                   value TEXT NOT NULL
@@ -140,12 +150,66 @@ class LocalDataStore:
 
                 CREATE INDEX IF NOT EXISTS idx_metric_snapshots_scope_created
                   ON metric_snapshots(scope, created_at);
-                """
-            )
-            connection.execute(
-                "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
-                ("schema_version", str(SCHEMA_VERSION)),
-            )
+
+                CREATE TABLE IF NOT EXISTS notification_deliveries (
+                  notification_key TEXT PRIMARY KEY,
+                  channel TEXT NOT NULL,
+                  report_date TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  attempt_count INTEGER NOT NULL DEFAULT 0,
+                  last_attempt_at TEXT NOT NULL,
+                  sent_at TEXT,
+                  error TEXT NOT NULL DEFAULT '',
+                  metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_notification_deliveries_channel_date
+                  ON notification_deliveries(channel, report_date);
+
+                CREATE TABLE IF NOT EXISTS carry_paper_positions (
+                  position_id TEXT PRIMARY KEY,
+                  symbol TEXT NOT NULL UNIQUE,
+                  opened_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  payload_json TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_carry_paper_positions_opened
+                  ON carry_paper_positions(opened_at);
+
+                CREATE TABLE IF NOT EXISTS carry_paper_events (
+                  event_uid TEXT PRIMARY KEY,
+                  position_id TEXT NOT NULL,
+                  action TEXT NOT NULL,
+                  symbol TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  realized_pnl REAL NOT NULL DEFAULT 0,
+                  created_at TEXT NOT NULL,
+                  payload_json TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_carry_paper_events_created
+                  ON carry_paper_events(created_at);
+
+                CREATE TABLE IF NOT EXISTS research_backtest_runs (
+                  run_uid TEXT PRIMARY KEY,
+                  strategy TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  last_seen_at TEXT NOT NULL,
+                  params_json TEXT NOT NULL,
+                  payload_json TEXT NOT NULL,
+                  error TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_research_backtest_runs_strategy_seen
+                  ON research_backtest_runs(strategy, last_seen_at);
+                    """
+                )
+                connection.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+                    ("schema_version", str(SCHEMA_VERSION)),
+                )
+            _INITIALIZED_PATHS.add(resolved_path)
 
     def upsert_trading_events(self, payloads: list[dict[str, object]]) -> None:
         if not payloads:
@@ -274,6 +338,99 @@ class LocalDataStore:
                 payloads.append(payload)
         return payloads
 
+    def replace_carry_paper_positions(self, payloads: list[dict[str, object]]) -> None:
+        self.initialize()
+        updated_at = now_app_time().isoformat()
+        rows = [
+            (
+                str(payload.get("position_id") or ""),
+                str(payload.get("symbol") or "").upper(),
+                str(payload.get("opened_at") or updated_at),
+                updated_at,
+                _json_dumps(payload),
+            )
+            for payload in payloads
+            if str(payload.get("position_id") or "") and str(payload.get("symbol") or "")
+        ]
+        with self._connect() as connection:
+            connection.execute("DELETE FROM carry_paper_positions")
+            connection.executemany(
+                """
+                INSERT INTO carry_paper_positions (
+                  position_id, symbol, opened_at, updated_at, payload_json
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def load_carry_paper_position_payloads(self) -> list[dict[str, object]]:
+        self.initialize()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload_json FROM carry_paper_positions ORDER BY opened_at, rowid"
+            ).fetchall()
+        payloads: list[dict[str, object]] = []
+        for row in rows:
+            payload = _json_loads(str(row["payload_json"]), {})
+            if isinstance(payload, dict):
+                payloads.append(payload)
+        return payloads
+
+    def append_carry_paper_events(self, payloads: list[dict[str, object]]) -> None:
+        if not payloads:
+            return
+        self.initialize()
+        rows = []
+        for payload in payloads:
+            identity = {
+                "position_id": payload.get("position_id"),
+                "action": payload.get("action"),
+                "status": payload.get("status"),
+                "created_at": payload.get("created_at"),
+            }
+            rows.append(
+                (
+                    _hash_payload(identity),
+                    str(payload.get("position_id") or ""),
+                    str(payload.get("action") or ""),
+                    str(payload.get("symbol") or "").upper(),
+                    str(payload.get("status") or ""),
+                    float(payload.get("realized_pnl") or 0.0),
+                    str(payload.get("created_at") or now_app_time().isoformat()),
+                    _json_dumps(payload),
+                )
+            )
+        with self._connect() as connection:
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO carry_paper_events (
+                  event_uid, position_id, action, symbol, status, realized_pnl,
+                  created_at, payload_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def load_carry_paper_event_payloads(self, *, limit: int = 200) -> list[dict[str, object]]:
+        self.initialize()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json FROM carry_paper_events
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?
+                """,
+                (max(1, min(int(limit), 5000)),),
+            ).fetchall()
+        payloads: list[dict[str, object]] = []
+        for row in rows:
+            payload = _json_loads(str(row["payload_json"]), {})
+            if isinstance(payload, dict):
+                payloads.append(payload)
+        return payloads
+
     def record_metric_snapshot(self, scope: str, metrics: dict[str, object]) -> None:
         self.initialize()
         created_at = now_app_time().isoformat()
@@ -286,6 +443,79 @@ class LocalDataStore:
                 """,
                 (_hash_payload(payload), scope, created_at, _json_dumps(metrics)),
             )
+
+    def record_notification_delivery(
+        self,
+        *,
+        notification_key: str,
+        channel: str,
+        report_date: str,
+        status: str,
+        error: str = "",
+        metadata: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        self.initialize()
+        attempted_at = now_app_time().isoformat()
+        sent_at = attempted_at if status == "sent" else None
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO notification_deliveries (
+                  notification_key, channel, report_date, status, attempt_count,
+                  last_attempt_at, sent_at, error, metadata_json
+                )
+                VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)
+                ON CONFLICT(notification_key) DO UPDATE SET
+                  channel = excluded.channel,
+                  report_date = excluded.report_date,
+                  status = CASE
+                    WHEN notification_deliveries.status = 'sent' THEN notification_deliveries.status
+                    ELSE excluded.status
+                  END,
+                  attempt_count = notification_deliveries.attempt_count + 1,
+                  last_attempt_at = excluded.last_attempt_at,
+                  sent_at = COALESCE(notification_deliveries.sent_at, excluded.sent_at),
+                  error = CASE
+                    WHEN notification_deliveries.status = 'sent' THEN notification_deliveries.error
+                    ELSE excluded.error
+                  END,
+                  metadata_json = excluded.metadata_json
+                """,
+                (
+                    notification_key,
+                    channel,
+                    report_date,
+                    status,
+                    attempted_at,
+                    sent_at,
+                    error,
+                    _json_dumps(metadata or {}),
+                ),
+            )
+        delivery = self.load_notification_delivery(notification_key)
+        return delivery or {}
+
+    def load_notification_delivery(self, notification_key: str) -> dict[str, object] | None:
+        self.initialize()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM notification_deliveries WHERE notification_key = ?",
+                (notification_key,),
+            ).fetchone()
+        return _notification_delivery_payload(row) if row is not None else None
+
+    def list_notification_deliveries(self, *, limit: int = 20) -> list[dict[str, object]]:
+        self.initialize()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM notification_deliveries
+                ORDER BY last_attempt_at DESC, notification_key DESC
+                LIMIT ?
+                """,
+                (max(1, min(int(limit), 500)),),
+            ).fetchall()
+        return [_notification_delivery_payload(row) for row in rows]
 
     def record_backtest_run(self, *, params: dict[str, object], payload: dict[str, object], error: str | None = None) -> str:
         self.initialize()
@@ -347,6 +577,42 @@ class LocalDataStore:
             )
         return run_uid
 
+    def record_research_backtest_run(
+        self,
+        *,
+        strategy: str,
+        params: dict[str, object],
+        payload: dict[str, object],
+        error: str | None = None,
+    ) -> str:
+        self.initialize()
+        run_uid = _hash_payload({"strategy": strategy, "params": params, "payload": payload, "error": error or ""})
+        seen_at = now_app_time().isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO research_backtest_runs (
+                  run_uid, strategy, created_at, last_seen_at, params_json,
+                  payload_json, error
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_uid) DO UPDATE SET
+                  last_seen_at = excluded.last_seen_at,
+                  payload_json = excluded.payload_json,
+                  error = excluded.error
+                """,
+                (
+                    run_uid,
+                    strategy,
+                    seen_at,
+                    seen_at,
+                    _json_dumps(params),
+                    _json_dumps(payload),
+                    error or "",
+                ),
+            )
+        return run_uid
+
     def status(self) -> dict[str, object]:
         self.initialize()
         with self._connect() as connection:
@@ -355,6 +621,10 @@ class LocalDataStore:
                 "trading_positions": connection.execute("SELECT COUNT(*) FROM trading_positions").fetchone()[0],
                 "backtest_runs": connection.execute("SELECT COUNT(*) FROM backtest_runs").fetchone()[0],
                 "metric_snapshots": connection.execute("SELECT COUNT(*) FROM metric_snapshots").fetchone()[0],
+                "notification_deliveries": connection.execute("SELECT COUNT(*) FROM notification_deliveries").fetchone()[0],
+                "carry_paper_positions": connection.execute("SELECT COUNT(*) FROM carry_paper_positions").fetchone()[0],
+                "carry_paper_events": connection.execute("SELECT COUNT(*) FROM carry_paper_events").fetchone()[0],
+                "research_backtest_runs": connection.execute("SELECT COUNT(*) FROM research_backtest_runs").fetchone()[0],
             }
             schema_version = connection.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
         return {
@@ -363,3 +633,18 @@ class LocalDataStore:
             "schema_version": int(schema_version[0]) if schema_version else SCHEMA_VERSION,
             **counts,
         }
+
+
+def _notification_delivery_payload(row: sqlite3.Row) -> dict[str, object]:
+    metadata = _json_loads(str(row["metadata_json"]), {})
+    return {
+        "notification_key": str(row["notification_key"]),
+        "channel": str(row["channel"]),
+        "report_date": str(row["report_date"]),
+        "status": str(row["status"]),
+        "attempt_count": int(row["attempt_count"]),
+        "last_attempt_at": str(row["last_attempt_at"]),
+        "sent_at": str(row["sent_at"] or ""),
+        "error": str(row["error"] or ""),
+        "metadata": metadata if isinstance(metadata, dict) else {},
+    }

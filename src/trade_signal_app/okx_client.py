@@ -287,6 +287,10 @@ class OKXSpotGateway:
         if isinstance(data, dict) and isinstance(data.get("data"), list) and data["data"]:
             first = data["data"][0]
             if isinstance(first, dict):
+                s_code = str(first.get("sCode", "0"))
+                if s_code not in {"", "0"}:
+                    message = str(first.get("sMsg") or s_code or "OKX order rejected")
+                    raise OKXAPIError(message)
                 result.update(first)
         return result
 

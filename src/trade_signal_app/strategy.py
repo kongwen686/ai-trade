@@ -14,6 +14,7 @@ from .entry_filters import (
     structure_entry_reason_from_config,
 )
 from .models import IndicatorSnapshot
+from .volatility import volatility_entry_reason
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,10 @@ class EntryRuleConfig:
     min_entry_support_strength: float = STRUCTURE_DEFAULT_MIN_SUPPORT_STRENGTH
     min_entry_risk_reward_ratio: float = STRUCTURE_DEFAULT_MIN_RISK_REWARD_RATIO
     min_entry_resistance_distance_pct: float = STRUCTURE_DEFAULT_MIN_RESISTANCE_DISTANCE_PCT
+    volatility_filter_enabled: bool = True
+    block_extreme_volatility: bool = True
+    max_entry_volatility_percentile: float = 92.0
+    max_entry_volatility_ratio: float = 2.0
     require_macd_rising: bool = True
     require_kdj_confirmation: bool = True
 
@@ -82,6 +87,20 @@ def evaluate_long_entry(
 
     if score < config.min_score:
         return TriggerDecision(False, reasons)
+
+    volatility_issue = volatility_entry_reason(
+        regime=indicators.volatility_regime,
+        percentile=indicators.volatility_percentile,
+        ratio=indicators.volatility_ratio,
+        atr_pct=indicators.atr_pct,
+        enabled=config.volatility_filter_enabled,
+        block_extreme=config.block_extreme_volatility,
+        max_percentile=config.max_entry_volatility_percentile,
+        max_ratio=config.max_entry_volatility_ratio,
+    )
+    if volatility_issue:
+        return TriggerDecision(False, [volatility_issue])
+    reasons.append(f"波动状态可交易：{indicators.volatility_label}")
 
     if not (indicators.close_price > indicators.ema_20 and indicators.ema_20 > indicators.ema_50):
         return TriggerDecision(False, reasons)

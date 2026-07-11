@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from trade_signal_app.runtime_config import BacktestDefaults, RuntimeConfig, ScanDefaults
-from trade_signal_app.strategy_builder import _compiled_from_payload, compile_strategy
+from trade_signal_app.strategy_builder import _compiled_from_payload, compile_strategy, compile_strategy_template
 
 
 class StrategyBuilderTests(unittest.TestCase):
@@ -99,6 +99,8 @@ class StrategyBuilderTests(unittest.TestCase):
                 "autotrade_defaults": {
                     "enabled": "true",
                     "mode": "live",
+                    "paper_enabled": "true",
+                    "live_enabled": "true",
                     "order_test_only": "false",
                 },
             },
@@ -110,6 +112,8 @@ class StrategyBuilderTests(unittest.TestCase):
         self.assertFalse(strategy.backtest_defaults["no_binance_discount"])
         self.assertFalse(strategy.autotrade_defaults["enabled"])
         self.assertEqual(strategy.autotrade_defaults["mode"], "paper")
+        self.assertFalse(strategy.autotrade_defaults["paper_enabled"])
+        self.assertFalse(strategy.autotrade_defaults["live_enabled"])
         self.assertTrue(strategy.autotrade_defaults["order_test_only"])
 
     def test_runtime_risk_defaults_are_clamped(self) -> None:
@@ -127,6 +131,22 @@ class StrategyBuilderTests(unittest.TestCase):
         self.assertEqual(strategy.backtest_defaults["stop_loss_pct"], 0.1)
         self.assertEqual(strategy.backtest_defaults["take_profit_pct"], 100.0)
         self.assertEqual(strategy.backtest_defaults["max_holding_bars"], 3)
+
+    def test_registered_template_compiles_without_enabling_execution(self) -> None:
+        strategy = compile_strategy_template("confirmed_breakout", RuntimeConfig())
+
+        self.assertEqual(strategy.source, "template_registry")
+        self.assertEqual(strategy.backtest_defaults["preset"], "breakout_confirmed")
+        self.assertEqual(strategy.backtest_defaults["max_entry_volatility_percentile"], 90.0)
+        self.assertFalse(strategy.autotrade_defaults["enabled"])
+        self.assertEqual(strategy.autotrade_defaults["mode"], "paper")
+        self.assertFalse(strategy.autotrade_defaults["paper_enabled"])
+        self.assertFalse(strategy.autotrade_defaults["live_enabled"])
+        self.assertTrue(strategy.autotrade_defaults["order_test_only"])
+
+    def test_unknown_registered_template_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "未知策略模板"):
+            compile_strategy_template("missing-template", RuntimeConfig())
 
 
 if __name__ == "__main__":

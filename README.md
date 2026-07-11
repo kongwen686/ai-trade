@@ -22,6 +22,8 @@
 
 - 实时扫描
   - Binance Spot 交易对筛选
+  - Binance 公开 `miniTicker` WebSocket：扫描页可见标的价格与 24h 涨跌约每秒更新
+  - WebSocket 断线自动重连，并降级到本地只读 REST 实时价格接口
   - 支持计价币、周期、候选池、成交额、成交笔数过滤
 - 技术指标
   - RSI(14)
@@ -30,6 +32,7 @@
   - KDJ(9, 3, 3)
   - 量能放大
   - 主动买盘占比
+  - 波动率状态：已实现波动率、历史分位、波动率倍数、ATR 和冲击强度
 - 社区与情报
   - X/Twitter 实时舆情
   - 指定账号情报模式：`off` / `blend` / `only`
@@ -44,6 +47,8 @@
   - Twitter/X tracked accounts 配置画像
   - 链上大额异动和交易所流入 / 流出监控
   - 现货 / 合约价差与跨市场 basis 分析
+  - Carry 双腿 paper 引擎：模拟现货做多 + 永续做空，统一核算基差、资金费率、手续费和滑点
+  - 配对 / 统计套利回测：滚动对数价格 OLS、动态对冲比率、z-score、下一根开盘撮合
   - 自然语言策略编译：把用户描述拆解为回测参数和 paper 自动交易参数
   - 支持趋势跟随、均值回归、动量突破、再平衡、季节性和 basis 监控等策略语义
   - 策略命中、自动交易候选和风控意图聚合
@@ -70,9 +75,10 @@
   - 手续费 / maker-taker / Binance 账户真实 commission
   - 固定滑点 / 动态滑点
   - 资金曲线 / 最大回撤 / Profit Factor
-  - 页面级权益对比图和 JSON / CSV 结果导出
+  - 页面级权益对比图、风险收益散点图、参数热力图和 JSON / CSV / HTML 结果导出
   - 内建参数预设与策略组合模板
   - 加密资产等权再平衡溢价研究：比较定期再平衡组合和自然漂移组合
+  - 配对 / 统计套利研究：双腿成交、相关性、残差半衰期、成本、净收益和资金曲线
 - 运行配置
   - Web 页面直接配置 Binance key、OKX key、X token、链上数据 key、LLM key、情报账号和策略默认值
   - 保存后自动应用到扫描页、总控台、自动交易页和回测页
@@ -97,6 +103,7 @@
 - 自动量化：`http://127.0.0.1:8000/trading`
 - 本地健康检查 API：`http://127.0.0.1:8000/api/health`
 - 扫描 API：`http://127.0.0.1:8000/api/scan`
+- 只读实时价格 API：`http://127.0.0.1:8000/api/market/realtime?symbols=BTCUSDT,ETHUSDT`
 - 智能总控台 API：`http://127.0.0.1:8000/api/terminal/snapshot`
 - 平台能力 API：`http://127.0.0.1:8000/api/platform/capabilities`
 - 平台账户 API：`http://127.0.0.1:8000/api/platform/accounts`
@@ -108,6 +115,10 @@
 - 回测 API：`http://127.0.0.1:8000/api/backtest`
 - 自动交易 API：`POST http://127.0.0.1:8000/api/trading/run`
 - 模拟交易 API：`POST http://127.0.0.1:8000/api/trading/paper/run`
+- Carry 模拟状态：`GET http://127.0.0.1:8000/api/research/carry/paper/status`
+- Carry 模拟轮询：`POST http://127.0.0.1:8000/api/research/carry/paper/run`
+- 配对回测默认值：`GET http://127.0.0.1:8000/api/research/stat-arb/defaults`
+- 配对回测执行：`POST http://127.0.0.1:8000/api/research/stat-arb/backtest`
 
 ## 中英文界面
 
@@ -284,6 +295,10 @@ export AI_TRADE_LIVE_CONFIRM="I_UNDERSTAND_REAL_ORDERS"
 - `GET /api/trading/readiness`：返回当前自动交易模式、`AI_TRADE_LIVE_CONFIRM`、Binance 授权、交易权限、报价资产余额和阻断原因。
 - `GET /api/trading/status`：包含当前配置、readiness、持仓和执行事件。
 - `GET /api/health`：只做本地健康检查，不访问外部交易所，适合启动后确认配置文件、交易状态文件和本地 live 阻断项。
+- `GET /api/notifications/feishu/daily/status`：返回 22:00 日报调度线程、下次执行时间、最近发送结果和 SQLite 投递记录。
+- `POST /api/notifications/feishu/daily/run`：手动补发日报；可传 `report_date=YYYY-MM-DD`，不传时优先执行当前待补发日期。
+
+飞书日报按 `UTC+8` 每天 22:00 执行。失败后每 300 秒重试，服务在次日 10:00 前恢复时会补发前一日任务；日报与 BTC 专属信号分别去重，单项失败不会重复发送已成功的另一项。
 
 当 `mode=live` 且关闭 `order/test` 准备真实成交时，系统会先检查 readiness。授权失败、缺少交易权限、缺少确认环境变量或报价资产余额不足时，会写入 `blocked` 事件并直接返回，不会继续扫描并尝试下单。
 
@@ -412,10 +427,11 @@ python3 -m trade_signal_app
 项目会把交易书籍中的方法论转成可回测、可验证、可受控执行的工程清单，而不是直接照搬书中策略。
 
 - 学习/实现手册：[docs/research/trading-books-strategy-playbook.md](docs/research/trading-books-strategy-playbook.md)
+- 已接入：波动率状态过滤（扫描、回测、自动入场风控）、Carry/资金费率双腿 paper 模拟、配对/统计套利历史回测
 - 已接入策略语义：综合评分突破、量价压力、趋势跟随、区间突破、动量轮动、均值回归、等权再平衡、BTC 隔夜季节性、现货/合约 basis 监控
-- 仍处于研究阶段：配对交易、统计套利、carry/资金费率、波动率状态过滤、做市
+- 仍处于研究阶段：做市。当前尚未接入 L2 队列仿真、库存偏斜、撤改单延迟和 kill switch，因此不会生成做市订单
 
-所有新增策略默认先进入 `research`、`watch_only` 或 `paper`，不会自动开启实盘。
+所有新增策略默认先进入 `research`、`watch_only` 或 `paper`，不会自动开启实盘。Carry 引擎与配对回测均不调用 Binance/OKX 下单接口，即使主自动交易开启实盘也不会改变这一边界。
 
 ## 社区热度与 Twitter 情报
 
@@ -652,6 +668,21 @@ python3 -m trade_signal_app.backtest "data/spot/monthly/klines/*/4h/*.zip" \
   - 返回扁平化 CSV 摘要，适合后续表格分析
 - `GET /api/backtest/export?format=json`
   - 返回带缩进的导出 JSON
+- `GET /api/backtest/export?format=html`
+  - 返回可独立保存和打开的 HTML 研究报告，包含结果摘要、参数表和参数热力图
+
+CSV 会同时写入单币种、组合、稳健性检查和参数敏感度明细；JSON 会保留完整结构化结果。三个导出端点均返回附件文件名，避免浏览器只把结果展示为临时页面。
+
+### 参数敏感度
+
+回测高级条件中的 `Parameter Sweep` 默认关闭。开启后系统会：
+
+- 选取首个有效币种/周期，并使用与主回测一致的完整历史样本
+- 对 `score_threshold` 的 `-4 / 当前 / +4` 和 `stop_loss_pct` 的 `0.75x / 当前 / 1.25x` 运行 3×3 扫描
+- 返回每个组合的最终权益、收益率、最大回撤、Profit Factor、交易数和风险调整收益
+- 在回测页绘制真实参数热力图，并标记当前参数和风险调整收益最佳的邻域组合
+
+扫描是额外的 9 次单序列回测，因此不会默认执行。`btc_overnight_seasonality` 和 `crypto_rebalance_premium` 有独立执行语义，不套用评分阈值 × 止损比例热力图。
 
 ### 回测预设
 
@@ -661,6 +692,10 @@ python3 -m trade_signal_app.backtest "data/spot/monthly/klines/*/4h/*.zip" \
 - `balanced_swing`
 - `breakout_aggressive`
 - `portfolio_rotation`
+- `trend_pullback_conservative`
+- `breakout_confirmed`
+- `mean_reversion_guarded`
+- `quality_rotation`
 - `crypto_rebalance_premium`
 - `btc_overnight_seasonality`
 - `btc_cycle_trend`
@@ -672,6 +707,33 @@ python3 -m trade_signal_app.backtest "data/spot/monthly/klines/*/4h/*.zip" \
 - 在 `/backtest` 里快速套用一组参数
 - 在 `/settings` 里把某个 preset 保存成默认回测模板
 - 通过 `GET /api/backtest/presets` 查看模板清单和参数
+
+每个预设同时返回风险等级、验证阶段、建议周期和适用市场状态。新增的四组执行型预设默认启用波动率状态过滤，并显式限制资金暴露与最大并发：
+
+- `trend_pullback_conservative`：等待顺势回踩和量价恢复，减少追涨
+- `breakout_confirmed`：评分、量能、买压和波动率共同确认突破
+- `mean_reversion_guarded`：超卖反弹确认、短持仓和严格冷却
+- `quality_rotation`：主流高流动性标的质量轮动
+
+### 策略模板注册表
+
+`/terminal/strategies` 提供可直接选择的策略模板。模板把策略语义、回测 preset、安全的 paper 参数和适用条件绑定在一起：
+
+- `quality_trend_pullback`
+- `confirmed_breakout`
+- `guarded_mean_reversion`
+- `quality_asset_rotation`
+- `btc_cycle_trend`
+- `btc_core_trading`
+- `equal_weight_rebalance`
+- `btc_overnight_window`
+
+相关 API：
+
+- `GET /api/strategy/templates`：返回模板目录和选择元数据
+- `POST /api/strategy/templates/compile`：提交 `{"template_id":"quality_trend_pullback"}`，生成确定性的回测与 paper 参数
+
+策略模板编译不会读取或修改当前自动交易运行状态，并强制输出 `enabled=false`、`paper_enabled=false`、`live_enabled=false`、`order_test_only=true`。模板只能用于回测或后续人工确认后的模拟配置，不会自动触发真实订单。
 
 `crypto_rebalance_premium` 来自对 Quant Wiki crypto 策略的 spot-only 改造：
 
@@ -817,11 +879,13 @@ python3 -m compileall src run.py run_backtest.py tests
 
 ## 路线图
 
-- 接入 Binance WebSocket，支持更接近实时的刷新
-- 增加更完整的参数预设与策略模板
-- 给回测页补更完整的图形化结果和导出能力
-- 增加更多样本区间和多交易对的回测验证
-- 完善安装与发布体验
+- [x] 接入 Binance 公开 `miniTicker` WebSocket，支持扫描页可见价格与 24h 涨跌实时刷新；评分仍以最近一次完整扫描为准
+- [x] 增加更完整的参数预设与策略模板：统一注册表、选择元数据、安全模板编译 API 和策略库入口
+- [x] 给回测页补更完整的图形化结果、参数热力图和导出能力：风险收益地图、3×3 参数扫描、CSV/JSON/HTML 报告
+- [ ] 增加更多样本区间、多交易对和 walk-forward 样本外验证
+- [ ] 完善安装、升级和发布体验
+
+WebSocket 使用 Binance 官方公开市场流，不携带 API Key，也不连接用户数据流或订单接口。连接按官方 24 小时生命周期自动重建；具体协议参考 [Binance Spot WebSocket Streams](https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams)。
 
 ## 项目状态
 

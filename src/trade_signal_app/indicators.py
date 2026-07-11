@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .models import Candlestick, IndicatorSnapshot
+from .volatility import build_volatility_state
 
 
 def clamp(value: float, lower: float, upper: float) -> float:
@@ -158,6 +159,7 @@ def build_indicator_snapshot(candles: list[Candlestick]) -> IndicatorSnapshot:
     avg_volume = sum(previous_volume_window) / max(len(previous_volume_window), 1)
     volume_ratio = volumes[-1] / avg_volume if avg_volume else 1.0
     structure = _nearest_structure_levels(highs=highs, lows=lows, closes=closes)
+    volatility = build_volatility_state(candles)
 
     return IndicatorSnapshot(
         close_price=latest_close,
@@ -186,5 +188,13 @@ def build_indicator_snapshot(candles: list[Candlestick]) -> IndicatorSnapshot:
         resistance_strength=structure["resistance_strength"],
         structure_risk_reward=structure["structure_risk_reward"],
         pullback_from_high_pct=structure["pullback_from_high_pct"],
+        volatility_regime=volatility.regime,
+        volatility_label=volatility.label,
+        realized_volatility_pct=volatility.realized_volatility_pct,
+        baseline_volatility_pct=volatility.baseline_volatility_pct,
+        volatility_percentile=volatility.volatility_percentile,
+        volatility_ratio=volatility.volatility_ratio,
+        atr_pct=volatility.atr_pct,
+        volatility_shock_sigma=volatility.shock_sigma,
         closes=closes[-48:],
     )

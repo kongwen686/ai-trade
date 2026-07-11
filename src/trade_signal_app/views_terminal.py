@@ -4,7 +4,7 @@ from html import escape
 
 from .time_utils import now_app_time
 from .views_common import _display_value, _hidden_lang_input, _layout, _text, _url, normalize_language
-from .views_components import _float_from_any, _strategy_builder_panel, _terminal_rows, _trading_account_metric_cards, _trading_event_rows, _trading_position_rows
+from .views_components import _btc_trading_zone, _float_from_any, _strategy_builder_panel, _terminal_rows, _trading_account_metric_cards, _trading_event_rows, _trading_position_rows
 
 
 def _terminal_card(title: str, value: str, subtitle: str, accent: str = "") -> str:
@@ -14,6 +14,144 @@ def _terminal_card(title: str, value: str, subtitle: str, accent: str = "") -> s
         <strong>{escape(value)}</strong>
         <small>{escape(subtitle)}</small>
       </article>
+    """
+
+
+def _strategy_templates_panel(templates: object, lang: str) -> str:
+    t = lambda zh, en: _text(lang, zh, en)
+    rows = templates if isinstance(templates, list) else []
+    if not rows:
+        return f'<p class="helper-text">{escape(t("当前没有可用策略模板。", "No strategy templates are available."))}</p>'
+    risk_labels = {
+        "low": t("低", "Low"),
+        "medium": t("中", "Medium"),
+        "medium_high": t("中高", "Medium High"),
+        "high": t("高", "High"),
+    }
+    validation_labels = {
+        "historical_validated": t("历史验证", "Historically Validated"),
+        "paper_candidate": t("待模拟验证", "Paper Candidate"),
+        "research": t("研究阶段", "Research"),
+        "baseline": t("基线", "Baseline"),
+        "unvalidated": t("未验证", "Unvalidated"),
+    }
+    cards: list[str] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        template_id = str(item.get("template_id") or "")
+        preset_id = str(item.get("preset_id") or "custom")
+        intervals = item.get("recommended_intervals") if isinstance(item.get("recommended_intervals"), list) else []
+        regimes = item.get("market_regimes") if isinstance(item.get("market_regimes"), list) else []
+        risk = str(item.get("risk_level") or "medium")
+        validation = str(item.get("validation_status") or "research")
+        tags = [
+            f'{t("风险", "Risk")} {risk_labels.get(risk, risk)}',
+            validation_labels.get(validation, validation),
+            " / ".join(str(value) for value in intervals) or "-",
+        ]
+        cards.append(
+            f"""
+            <article class="strategy-template-card">
+              <header>
+                <span>{escape(str(item.get("style") or "strategy"))}</span>
+                <strong>{escape(str(item.get("label") or template_id))}</strong>
+              </header>
+              <p>{escape(str(item.get("description") or ""))}</p>
+              <div class="strategy-template-tags">{"".join(f'<span>{escape(tag)}</span>' for tag in tags)}</div>
+              <small>{escape(t("适用行情", "Regimes"))}: {escape(" / ".join(str(value) for value in regimes) or "-")}</small>
+              <div class="strategy-template-actions">
+                <form method="post" action="/terminal/strategies/templates/compile">
+                  {_hidden_lang_input(lang)}
+                  <input type="hidden" name="template_id" value="{escape(template_id, quote=True)}" />
+                  <button type="submit">{t("生成安全参数", "Compile Safe Parameters")}</button>
+                </form>
+                <a href="{escape(_url(f'/backtest?preset={preset_id}', lang), quote=True)}">{t("打开回测", "Open Backtest")}</a>
+              </div>
+            </article>
+            """
+        )
+    return f"""
+      <div class="strategy-template-toolbar">
+        <span>{escape(t("模板只生成回测与 paper 参数，不会开启自动轮询或真实订单。", "Templates only generate backtest and paper parameters; they never activate polling or live orders."))}</span>
+        <a href="{escape(_url('/api/strategy/templates', lang), quote=True)}">JSON API</a>
+      </div>
+      <div class="strategy-template-grid">{"".join(cards)}</div>
+    """
+
+
+def _stat_arb_backtest_panel(
+    *,
+    result: dict[str, object] | None,
+    params: dict[str, object] | None,
+    message: str | None,
+    error: str | None,
+    lang: str,
+) -> str:
+    t = lambda zh, en: _text(lang, zh, en)
+    values = {
+        "archive_a": "",
+        "archive_b": "",
+        "lookback_bars": 120,
+        "entry_z": 2.0,
+        "exit_z": 0.4,
+        "stop_z": 3.5,
+        "max_holding_bars": 48,
+        "min_correlation": 0.65,
+        "notional_per_leg": 1000.0,
+        "fee_bps_per_leg": 10.0,
+        "slippage_bps_per_leg": 2.0,
+    }
+    if params:
+        values.update(params)
+    report = result.get("report") if isinstance(result, dict) and isinstance(result.get("report"), dict) else {}
+    metrics = report.get("metrics") if isinstance(report.get("metrics"), dict) else {}
+    diagnostics = report.get("diagnostics") if isinstance(report.get("diagnostics"), dict) else {}
+    trades = report.get("trades") if isinstance(report.get("trades"), list) else []
+    equity_curve = report.get("equity_curve") if isinstance(report.get("equity_curve"), list) else []
+    warnings = report.get("warnings") if isinstance(report.get("warnings"), list) else []
+    result_html = ""
+    if report:
+        result_html = f"""
+          <div class="mini-stat-grid compact-grid trading-risk-grid">
+            <div class="mini-stat"><span>{t("交易次数", "Trades")}</span><strong>{int(metrics.get("trade_count") or 0)}</strong></div>
+            <div class="mini-stat"><span>{t("胜率", "Win Rate")}</span><strong>{float(metrics.get("win_rate_pct") or 0):.2f}%</strong></div>
+            <div class="mini-stat"><span>{t("净收益", "Net PnL")}</span><strong>{float(metrics.get("net_pnl") or 0):+.4f}</strong></div>
+            <div class="mini-stat"><span>{t("总回报", "Return")}</span><strong>{float(metrics.get("total_return_pct") or 0):+.3f}%</strong></div>
+            <div class="mini-stat"><span>{t("最大回撤", "Max Drawdown")}</span><strong>{float(metrics.get("max_drawdown_pct") or 0):.3f}%</strong></div>
+            <div class="mini-stat"><span>{t("交易成本", "Costs")}</span><strong>{float(metrics.get("costs") or 0):.4f}</strong></div>
+          </div>
+          <h3>{t("配对诊断", "Pair Diagnostics")}</h3>
+          {_terminal_rows([diagnostics], [(t("对冲比率", "Hedge Ratio"), "hedge_ratio"), (t("相关性", "Correlation"), "correlation"), (t("最新 Z 分数", "Latest Z"), "latest_z_score"), (t("半衰期 K 线", "Half-life Bars"), "half_life_bars"), (t("方法", "Method"), "method")], lang=lang)}
+          <h3>{t("双腿成交", "Two-leg Trades")}</h3>
+          {_terminal_rows(trades, [(t("开仓", "Opened"), "opened_at"), (t("方向", "Direction"), "direction"), (t("入场 Z", "Entry Z"), "entry_z"), (t("退出 Z", "Exit Z"), "exit_z"), (t("持有 K 线", "Bars Held"), "bars_held"), (t("退出原因", "Exit Reason"), "exit_reason"), (t("成本", "Costs"), "costs"), (t("净收益", "Net PnL"), "net_pnl")], lang=lang)}
+          <h3>{t("资金曲线", "Equity Curve")}</h3>
+          {_terminal_rows(equity_curve[-60:], [(t("时间", "Time"), "timestamp"), (t("权益", "Equity"), "equity"), (t("回撤 %", "Drawdown %"), "drawdown_pct")], lang=lang)}
+          <h3>{t("研究警告", "Research Warnings")}</h3>
+          {_terminal_rows([{"warning": warning} for warning in warnings], [(t("说明", "Warning"), "warning")], lang=lang)}
+        """
+    return f"""
+      <form method="post" action="{_url('/terminal/strategies/stat-arb/run', lang)}" class="ant-form backtest-form settings-form">
+        {_hidden_lang_input(lang)}
+        <div class="settings-grid">
+          <label class="full-span"><span>{t("标的 A 历史数据", "Archive A")}</span><input type="text" name="archive_a" value="{escape(str(values['archive_a']), quote=True)}" placeholder="data/tradingview_klines/BINANCE/BTCUSDT/1h.csv" required /></label>
+          <label class="full-span"><span>{t("标的 B 历史数据", "Archive B")}</span><input type="text" name="archive_b" value="{escape(str(values['archive_b']), quote=True)}" placeholder="data/tradingview_klines/BINANCE/ETHUSDT/1h.csv" required /></label>
+          <label><span>Lookback Bars</span><input type="number" name="lookback_bars" min="30" value="{int(float(values['lookback_bars']))}" /></label>
+          <label><span>Entry Z</span><input type="number" name="entry_z" min="0.1" step="0.1" value="{float(values['entry_z']):.2f}" /></label>
+          <label><span>Exit Z</span><input type="number" name="exit_z" min="0" step="0.1" value="{float(values['exit_z']):.2f}" /></label>
+          <label><span>Stop Z</span><input type="number" name="stop_z" min="0.2" step="0.1" value="{float(values['stop_z']):.2f}" /></label>
+          <label><span>Max Holding Bars</span><input type="number" name="max_holding_bars" min="1" value="{int(float(values['max_holding_bars']))}" /></label>
+          <label><span>Min Correlation</span><input type="number" name="min_correlation" min="0" max="1" step="0.05" value="{float(values['min_correlation']):.2f}" /></label>
+          <label><span>Notional Per Leg</span><input type="number" name="notional_per_leg" min="1" step="1" value="{float(values['notional_per_leg']):.2f}" /></label>
+          <label><span>Fee bps / Leg</span><input type="number" name="fee_bps_per_leg" min="0" step="0.1" value="{float(values['fee_bps_per_leg']):.1f}" /></label>
+          <label><span>Slippage bps / Leg</span><input type="number" name="slippage_bps_per_leg" min="0" step="0.1" value="{float(values['slippage_bps_per_leg']):.1f}" /></label>
+        </div>
+        <div class="settings-submit-bar"><button type="submit">{t("运行配对统计套利回测", "Run Pair Stat-arb Backtest")}</button></div>
+      </form>
+      {f'<div class="notice notice-success">{escape(message)}</div>' if message else ""}
+      {f'<div class="notice notice-error">{escape(error)}</div>' if error else ""}
+      <p class="helper-text">{t("研究回测采用滚动对数价格 OLS；相关性与残差半衰期仅用于诊断，不等同于协整检验结论。", "The research backtest uses rolling log-price OLS; correlation and residual half-life are diagnostics, not proof of cointegration.")}</p>
+      {result_html}
     """
 
 
@@ -177,7 +315,7 @@ def _terminal_status_chip(label: str, status: object, lang: str) -> str:
     raw_status = str(status or "").lower()
     if raw_status in {"ready", "configured", "ready_public", "api_live", "live", "enabled", "ok"}:
         chip_class = "ready"
-    elif raw_status in {"guarded", "partial_configured", "fallback", "monitoring", "watch_only", "pending_scan", "wait_pullback", "wait_support"}:
+    elif raw_status in {"guarded", "partial_configured", "fallback", "monitoring", "watch_only", "pending_scan", "wait_pullback", "wait_support", "wait_volatility"}:
         chip_class = "pending"
     elif raw_status in {"source_missing", "not_configured", "auth_failed", "empty", "error"}:
         chip_class = "blocked"
@@ -503,11 +641,13 @@ def render_terminal_page(
     onchain_sources = snapshot.get("onchain_sources", [])
     spreads = snapshot["spreads"]
     funding_rates = snapshot.get("funding_rates", [])
+    carry_paper = snapshot.get("carry_paper") if isinstance(snapshot.get("carry_paper"), dict) else {}
     market_sources = snapshot.get("market_sources", [])
     strategy_hits = snapshot["strategy_hits"]
     llm = snapshot["llm_insight"] if isinstance(snapshot.get("llm_insight"), dict) else {}
     risk = snapshot["execution_risk"]
     platform = snapshot["platform"]
+    btc_trading = snapshot.get("btc_trading") if isinstance(snapshot.get("btc_trading"), dict) else {}
     hero_right = f"""
       {_terminal_card(t("扫描标的", "Scanned Symbols"), str(int(snapshot["scanned_symbols"])), "Binance Spot Universe", "cyan")}
       {_terminal_card(t("策略命中", "Strategy Hits"), str(len(strategy_hits)), t("含资金费率过滤", "with funding filters"), "green")}
@@ -517,6 +657,7 @@ def render_terminal_page(
     panels = "".join(
         [
             _terminal_dashboard_showcase(snapshot, active_lang),
+            _terminal_panel(t("BTC交易专区", "BTC Trading Zone"), t("BTC 专属信号、模拟账户 BTC 统计和执行建议。", "BTC-specific signal, paper BTC metrics, and execution plan."), _btc_trading_zone(btc_trading, active_lang), wide=True),
             _terminal_panel(t("功能实现状态", "Capability Status"), t("架构组件、API 入口和配置状态。", "Architecture components, API endpoints, and configuration state."), _terminal_rows(platform["components"], [(t("层级", "Layer"), "layer"), (t("名称", "Name"), "name"), (t("状态", "Status"), "status"), (t("能力", "Capability"), "capability"), (t("接口", "Endpoint"), "endpoint")], lang=active_lang), wide=True),
             _terminal_panel(t("交易账户概览", "Trading Accounts"), t("模拟交易和真实交易账户状态。", "Paper and live account state."), _terminal_rows(platform["accounts"], [(t("交易所", "Exchange"), "exchange"), (t("模式", "Mode"), "mode"), (t("状态", "Status"), "status"), (t("持仓数", "Positions"), "open_positions"), (t("敞口", "Exposure"), "quote_exposure"), (t("执行事件", "Events"), "event_count"), (t("累计成交", "Fills"), "total_trades"), (t("平仓数", "Closed"), "closed_trades"), (t("胜率", "Win Rate"), "win_rate_pct"), (t("盈亏比", "P/L Ratio"), "profit_loss_ratio"), (t("已实现盈亏", "Realized PnL"), "realized_pnl")], lang=active_lang), wide=True),
             _terminal_panel(t("大模型分析", "LLM Analysis"), t("基于行情、社区、链上、价差、资金费率和风控快照生成机会、风险和执行建议。", "Generates opportunity, risk, and execution suggestions from market, community, on-chain, basis, funding, and risk snapshots."), _llm_analysis_content(llm, active_lang), wide=True),
@@ -561,6 +702,10 @@ def render_terminal_module_page(
     error: str | None = None,
     strategy_builder_result: dict[str, object] | None = None,
     strategy_builder_text: str = "",
+    stat_arb_result: dict[str, object] | None = None,
+    stat_arb_params: dict[str, object] | None = None,
+    stat_arb_message: str | None = None,
+    stat_arb_error: str | None = None,
     lang: str = "zh",
     layout_context: dict[str, object] | None = None,
 ) -> str:
@@ -572,8 +717,10 @@ def render_terminal_module_page(
     onchain_sources = snapshot.get("onchain_sources", [])
     spreads = snapshot["spreads"]
     funding_rates = snapshot.get("funding_rates", [])
+    carry_paper = snapshot.get("carry_paper") if isinstance(snapshot.get("carry_paper"), dict) else {}
     market_sources = snapshot.get("market_sources", [])
     strategy_hits = snapshot["strategy_hits"]
+    strategy_templates = snapshot.get("strategy_templates", [])
     risk = snapshot["execution_risk"]
     platform = snapshot["platform"]
     trading_status = trading_status or {"config": {}, "open_positions": [], "events": []}
@@ -625,17 +772,49 @@ def render_terminal_module_page(
             ]
         )
     elif module == "basis":
+        carry_config = carry_paper.get("config") if isinstance(carry_paper.get("config"), dict) else {}
+        carry_metrics = carry_paper.get("metrics") if isinstance(carry_paper.get("metrics"), dict) else {}
+        carry_positions = carry_paper.get("open_positions") if isinstance(carry_paper.get("open_positions"), list) else []
+        carry_events = carry_paper.get("recent_events") if isinstance(carry_paper.get("recent_events"), list) else []
+        carry_command = f"""
+          <div class="terminal-action-grid">
+            <form method="post" action="{_url('/terminal/basis/carry/run', active_lang)}" class="inline-form">
+              {_hidden_lang_input(active_lang)}
+              <button type="submit">{t("运行 Carry 模拟轮询", "Run Carry Paper Cycle")}</button>
+            </form>
+            <a class="action-link" href="{escape(_url('/settings#settings-llm', active_lang), quote=True)}">{t("配置开仓与退出阈值", "Configure Entry and Exit Rules")}</a>
+            <a class="action-link" href="{escape(_url('/api/research/carry/paper/status', active_lang), quote=True)}">{t("查看 JSON", "View JSON")}</a>
+          </div>
+          <div class="mini-stat-grid compact-grid trading-risk-grid">
+            <div class="mini-stat"><span>{t("新开仓开关", "New Entries")}</span><strong>{t("已开启", "Enabled") if carry_paper.get("enabled") else t("已关闭", "Disabled")}</strong></div>
+            <div class="mini-stat"><span>{t("模拟持仓", "Paper Positions")}</span><strong>{int(carry_metrics.get("open_positions") or 0)}</strong></div>
+            <div class="mini-stat"><span>{t("总敞口", "Gross Exposure")}</span><strong>{float(carry_metrics.get("gross_exposure") or 0):.2f}</strong></div>
+            <div class="mini-stat"><span>{t("累计已实现", "Realized PnL")}</span><strong>{float(carry_metrics.get("realized_pnl") or 0):+.4f}</strong></div>
+            <div class="mini-stat"><span>{t("最小基差", "Min Basis")}</span><strong>{float(carry_config.get("min_basis_bps") or 0):.1f} bps</strong></div>
+            <div class="mini-stat"><span>{t("最小资金费率", "Min Funding")}</span><strong>{float(carry_config.get("min_funding_bps") or 0):.1f} bps/8h</strong></div>
+          </div>
+          {f'<div class="notice notice-success">{escape(message)}</div>' if message else ""}
+          <p class="helper-text">{t("严格限定为本地双腿模拟：现货做多 + 永续做空，不调用 Binance/OKX 下单接口。", "Strictly local two-leg simulation: long spot plus short perpetual, with no Binance/OKX order calls.")}</p>
+        """
         panels = "".join(
             [
                 notice_html,
                 _terminal_panel(t("现货 / 合约价差", "Spot / Futures Basis"), t("用于套利、对冲、资金费率观察和异常价差阻断。", "Used for arbitrage, hedging, funding-rate monitoring, and basis anomaly blocks."), _terminal_rows(spreads, [(t("标的", "Symbol"), "symbol"), (t("现货", "Spot"), "spot_exchange"), (t("现货价格", "Spot Price"), "spot_price"), (t("合约", "Futures"), "futures_exchange"), (t("合约价格", "Futures Price"), "futures_price"), ("Spread bps", "spread_bps"), (t("方向", "Direction"), "direction")], lang=active_lang), wide=True),
                 _terminal_panel(t("合约资金费率", "Futures Funding"), t("极端正费率会参与执行前阻断，负费率可作为暴跌反弹的空头拥挤确认。", "Extreme positive funding feeds pre-trade blocks; negative funding confirms short-crowding rebounds."), _terminal_rows(funding_rates, [(t("标的", "Symbol"), "symbol"), (t("合约", "Futures"), "futures_exchange"), ("Funding bps", "funding_rate_bps"), ("Annualized %", "annualized_pct"), (t("来源", "Source"), "source")], lang=active_lang), wide=True),
+                _terminal_panel(t("Carry 双腿模拟", "Carry Two-leg Paper Engine"), t("基差收敛、资金费率、双腿手续费和滑点统一计入净收益。", "Basis convergence, funding, two-leg fees, and slippage are included in net PnL."), carry_command + _terminal_rows(carry_positions, [(t("标的", "Symbol"), "symbol"), (t("开仓基差", "Entry Basis"), "entry_basis_bps"), (t("当前基差", "Current Basis"), "last_basis_bps"), (t("资金费率", "Funding"), "last_funding_rate_bps"), (t("资金收益", "Funding PnL"), "funding_pnl"), (t("净收益", "Net PnL"), "net_pnl"), (t("持有小时", "Held Hours"), "held_hours")], lang=active_lang), wide=True),
+                _terminal_panel(t("Carry 模拟事件", "Carry Paper Events"), t("仅记录本地模拟开仓和平仓，不会混入自动交易真实订单日志。", "Local paper opens and closes only; real auto-trading order logs are kept separate."), _terminal_rows(carry_events, [(t("时间", "Time"), "created_at"), (t("动作", "Action"), "action"), (t("标的", "Symbol"), "symbol"), (t("状态", "Status"), "status"), (t("退出原因", "Exit Reason"), "exit_reason"), (t("已实现盈亏", "Realized PnL"), "realized_pnl")], lang=active_lang), wide=True),
                 _terminal_panel(t("价差执行提示", "Basis Execution Notes"), t("极端 basis 不直接下单，会进入风控复核。", "Extreme basis does not trigger direct orders; it goes to risk review."), _terminal_rows(platform["risk_rules"], [(t("规则", "Rule"), "name"), (t("状态", "Status"), "status"), (t("阈值", "Threshold"), "threshold"), (t("动作", "Action"), "action")], lang=active_lang), wide=True),
             ]
         )
     elif module == "strategies":
         panels = "".join(
             [
+                _terminal_panel(
+                    t("参数预设与策略模板", "Parameter Presets & Strategy Templates"),
+                    t("按风险、周期和市场状态选择模板，再进入回测或生成受限 paper 参数。", "Select by risk, interval, and market regime, then backtest or compile restricted paper parameters."),
+                    _strategy_templates_panel(strategy_templates, active_lang),
+                    wide=True,
+                ),
                 _terminal_panel(
                     t("自然语言策略编译器", "Natural-language Strategy Compiler"),
                     t("把策略描述拆解为回测参数和 paper 执行参数。", "Compile a strategy description into backtest and paper execution parameters."),
@@ -644,6 +823,18 @@ def render_terminal_module_page(
                         text=strategy_builder_text,
                         message=message,
                         error=error,
+                        lang=active_lang,
+                    ),
+                    wide=True,
+                ),
+                _terminal_panel(
+                    t("配对 / 统计套利回测", "Pair / Statistical Arbitrage Backtest"),
+                    t("使用两组同周期本地 K 线完成滚动对冲与均值回归研究。", "Run rolling hedge and mean-reversion research on two aligned local K-line series."),
+                    _stat_arb_backtest_panel(
+                        result=stat_arb_result,
+                        params=stat_arb_params,
+                        message=stat_arb_message,
+                        error=stat_arb_error,
                         lang=active_lang,
                     ),
                     wide=True,
@@ -659,6 +850,7 @@ def render_terminal_module_page(
         positions = trading_status["open_positions"]
         events = trading_status["events"]
         account_metrics = trading_status.get("account_metrics") if isinstance(trading_status.get("account_metrics"), dict) else {}
+        btc_trading = trading_status.get("btc_trading") if isinstance(trading_status.get("btc_trading"), dict) else {}
         event_summary = trading_status.get("event_summary") if isinstance(trading_status.get("event_summary"), dict) else {}
         event_summary_text = (
             t(
@@ -676,6 +868,12 @@ def render_terminal_module_page(
         auto_status = paper_auto_status or {}
         auto_running = bool(auto_status.get("running"))
         auto_error = str(auto_status.get("last_error") or "")
+        auto_force_paper = bool(auto_status.get("force_paper", True))
+        auto_mode_text = (
+            t("强制模拟", "Forced paper")
+            if auto_force_paper
+            else t("按配置：模拟/实盘", "Configured: paper/live")
+        )
         auto_status_notice = f'<div class="notice notice-error">{escape(auto_error)}</div>' if auto_error else ""
         command = f"""
           <form method="post" action="{_url('/terminal/trading/run', active_lang)}" class="ant-form trading-command terminal-action-form">
@@ -686,11 +884,11 @@ def render_terminal_module_page(
             </div>
             <button type="submit">{t("运行模拟量化交易", "Run Paper Quant Trade")}</button>
           </form>
-          <div class="ant-card nested-panel auto-trading-panel">
-            <div class="section-heading compact-heading">
-              <h3>{t("策略信号自动交易", "Strategy Signal Auto Trading")}</h3>
-              <p>{t("按固定间隔自动扫描策略信号并以 paper 模式执行开仓、止盈和止损。不会提交真实订单。", "Automatically scan strategy signals on an interval and execute entries, take profit, and stop loss in paper mode. No live orders are submitted.")}</p>
-            </div>
+	          <div class="ant-card nested-panel auto-trading-panel">
+	            <div class="section-heading compact-heading">
+	              <h3>{t("策略信号自动交易", "Strategy Signal Auto Trading")}</h3>
+	              <p>{t("按固定间隔自动扫描策略信号，并按当前 Auto Trade 开关执行。若同时开启模拟和实盘，且关闭订单预检/test，会在同一轮同时记录模拟单并提交真实订单。", "Automatically scan strategy signals on an interval and execute using current Auto Trade switches. If paper and live are both enabled and order precheck/test is disabled, the same run records paper fills and submits live orders.")}</p>
+	            </div>
             <div class="terminal-action-grid">
               <form method="post" action="{_url('/terminal/trading/auto/start', active_lang)}" class="inline-form">
                 {_hidden_lang_input(active_lang)}
@@ -705,9 +903,10 @@ def render_terminal_module_page(
                 <button type="submit" class="button-secondary">{t("停止自动策略交易", "Stop Auto Strategy Trading")}</button>
               </form>
             </div>
-            <div class="mini-stat-grid compact-grid trading-risk-grid">
-              <div class="mini-stat"><span>{t("自动循环", "Auto Loop")}</span><strong>{t("运行中", "Running") if auto_running else t("已停止", "Stopped")}</strong></div>
-              <div class="mini-stat"><span>{t("运行次数", "Runs")}</span><strong>{int(auto_status.get("run_count") or 0)}</strong></div>
+	            <div class="mini-stat-grid compact-grid trading-risk-grid">
+	              <div class="mini-stat"><span>{t("自动循环", "Auto Loop")}</span><strong>{t("运行中", "Running") if auto_running else t("已停止", "Stopped")}</strong></div>
+	              <div class="mini-stat"><span>{t("轮询模式", "Loop Mode")}</span><strong>{escape(auto_mode_text)}</strong></div>
+	              <div class="mini-stat"><span>{t("运行次数", "Runs")}</span><strong>{int(auto_status.get("run_count") or 0)}</strong></div>
               <div class="mini-stat"><span>{t("最近运行", "Last Run")}</span><strong>{escape(_display_value(auto_status.get("last_run_at") or "-", active_lang))}</strong></div>
               <div class="mini-stat"><span>{t("最近错误", "Last Error")}</span><strong>{escape(auto_error or "-")}</strong></div>
             </div>
@@ -727,6 +926,7 @@ def render_terminal_module_page(
         panels = "".join(
             [
                 _terminal_panel(t("模拟账户执行", "Paper Account Execution"), t("用策略信号源完成一轮 paper 自动交易。", "Complete one paper auto-trading run from the strategy signal source."), command, wide=True),
+                _terminal_panel(t("BTC交易专区", "BTC Trading Zone"), t("BTC 专属信号、模拟账户 BTC 成交统计和执行建议。", "BTC-specific signal, paper BTC metrics, and execution plan."), _btc_trading_zone(btc_trading, active_lang), wide=True),
                 _terminal_panel(t("账户表现", "Account Performance"), t("成交、执行事件、持仓敞口、盈亏比、胜率和已实现盈亏。", "Fills, execution events, exposure, P/L ratio, win rate, and realized PnL."), _terminal_rows(platform["accounts"], [(t("交易所", "Exchange"), "exchange"), (t("模式", "Mode"), "mode"), (t("持仓", "Positions"), "open_positions"), (t("敞口", "Exposure"), "quote_exposure"), (t("执行事件", "Events"), "event_count"), (t("累计成交", "Fills"), "total_trades"), (t("平仓数", "Closed"), "closed_trades"), (t("胜率", "Win Rate"), "win_rate_pct"), (t("盈亏比", "P/L Ratio"), "profit_loss_ratio"), ("Profit Factor", "profit_factor"), (t("已实现盈亏", "Realized PnL"), "realized_pnl")], lang=active_lang), wide=True),
                 _terminal_panel(t("持仓状态", "Position State"), t("本地模拟账户持仓。", "Local paper account positions."), _trading_position_rows(positions, active_lang), wide=True),
                 _terminal_panel(t("交易日志", "Trading Logs"), t("自动交易执行、跳过、阻断和下单事件；成交事件优先保留。", "Automated trading execution, skip, block, and order events; filled trades are retained first."), event_summary_html + _trading_event_rows(events, active_lang), wide=True),

@@ -31,6 +31,8 @@ class RuntimeConfigTests(unittest.TestCase):
             config.backtest_defaults.preset = "balanced_swing"
             config.scan_defaults.quote_asset = "FDUSD"
             config.backtest_defaults.score_threshold = 74.5
+            config.carry_paper_defaults.enabled = True
+            config.carry_paper_defaults.min_basis_bps = 32.0
             store.save(config)
 
             loaded = store.load(settings)
@@ -41,6 +43,8 @@ class RuntimeConfigTests(unittest.TestCase):
             self.assertEqual(loaded.backtest_defaults.preset, "balanced_swing")
             self.assertEqual(loaded.scan_defaults.quote_asset, "FDUSD")
             self.assertEqual(loaded.backtest_defaults.score_threshold, 74.5)
+            self.assertTrue(loaded.carry_paper_defaults.enabled)
+            self.assertEqual(loaded.carry_paper_defaults.min_basis_bps, 32.0)
 
     def test_store_encrypts_when_passphrase_is_set(self) -> None:
         settings = AppSettings()

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 import re
 from typing import Any
 from urllib.request import Request, urlopen
 
 from .intelligence import OpenAIInsightClient
-from .presets import apply_backtest_preset
+from .presets import apply_backtest_preset, backtest_preset_ids, get_strategy_template
 from .runtime_config import RuntimeConfig
 
 
@@ -51,17 +51,7 @@ ASSET_ALIASES = {
     "姨太": "ETH",
     "索拉纳": "SOL",
 }
-BACKTEST_PRESETS = {
-    "custom",
-    "balanced_swing",
-    "breakout_aggressive",
-    "portfolio_rotation",
-    "crypto_rebalance_premium",
-    "btc_overnight_seasonality",
-    "btc_cycle_trend",
-    "btc_core_trading",
-    "btc_compounding_risk_off",
-}
+BACKTEST_PRESETS = backtest_preset_ids()
 
 
 @dataclass(frozen=True)
@@ -107,6 +97,27 @@ def compile_strategy(description: str, runtime_config: RuntimeConfig) -> Compile
             f"OpenAI 策略编译失败，已回退本地规则：{exc}",
         ]
         return _replace_compiled(local_result, warnings=warnings)
+
+
+def compile_strategy_template(template_id: str, runtime_config: RuntimeConfig) -> CompiledStrategy:
+    """Compile a registered template without allowing it to activate any execution path."""
+    template = get_strategy_template(template_id)
+    base = LocalStrategyCompiler(runtime_config).compile(template.compiler_prompt)
+    backtest_defaults = apply_backtest_preset(base.backtest_defaults, template.preset_id)
+    autotrade_defaults = _merge_autotrade_defaults(base.autotrade_defaults, dict(template.autotrade_values))
+    warning = "模板仅生成回测和 paper 参数，不会开启模拟轮询、实盘开关或真实订单。"
+    return replace(
+        base,
+        name=template.label,
+        description=template.description,
+        symbols=list(template.symbols) or base.symbols,
+        style=template.style,
+        backtest_defaults=backtest_defaults,
+        autotrade_defaults=autotrade_defaults,
+        source="template_registry",
+        model="deterministic_rules",
+        warnings=_dedupe([*base.warnings, warning]),
+    )
 
 
 class LocalStrategyCompiler:
@@ -418,6 +429,8 @@ class LocalStrategyCompiler:
         defaults = asdict(self.runtime_config.autotrade_defaults)
         defaults["enabled"] = False
         defaults["mode"] = "paper"
+        defaults["paper_enabled"] = False
+        defaults["live_enabled"] = False
         defaults["order_test_only"] = True
         return defaults
 
@@ -501,6 +514,8 @@ def _compiled_from_payload(payload: dict[str, object], *, base: CompiledStrategy
     )
     autotrade_defaults["enabled"] = False
     autotrade_defaults["mode"] = "paper"
+    autotrade_defaults["paper_enabled"] = False
+    autotrade_defaults["live_enabled"] = False
     autotrade_defaults["order_test_only"] = True
 
     return CompiledStrategy(
@@ -546,9 +561,16 @@ def _merge_backtest_defaults(base: dict[str, object], updates: dict[str, object]
             "min_buy_pressure",
             "min_rsi",
             "max_rsi",
+            "max_entry_volatility_percentile",
+            "max_entry_volatility_ratio",
         }:
             result[key] = _clamp_float(value, _float_bounds(key))
-        elif key in {"no_binance_discount", "no_kdj_confirmation"}:
+        elif key in {
+            "no_binance_discount",
+            "no_kdj_confirmation",
+            "volatility_filter_enabled",
+            "block_extreme_volatility",
+        }:
             result[key] = _safe_bool(value)
         elif key == "holding_periods":
             result[key] = _safe_holding_periods(value, str(result.get(key, "3,6,12")))
@@ -564,6 +586,8 @@ def _merge_autotrade_defaults(base: dict[str, object], updates: dict[str, object
             result[key] = False
         elif key == "mode":
             result[key] = "paper"
+        elif key in {"paper_enabled", "live_enabled"}:
+            result[key] = False
         elif key == "order_test_only":
             result[key] = True
         elif key in {"max_open_positions", "cooldown_minutes"}:
@@ -581,6 +605,8 @@ def _merge_autotrade_defaults(base: dict[str, object], updates: dict[str, object
             result[key] = _clamp_float(value, _autotrade_float_bounds(key))
     result["enabled"] = False
     result["mode"] = "paper"
+    result["paper_enabled"] = False
+    result["live_enabled"] = False
     result["order_test_only"] = True
     return result
 
@@ -865,6 +891,8 @@ def _float_bounds(key: str) -> tuple[float, float]:
         "min_buy_pressure": (0.0, 1.0),
         "min_rsi": (0.0, 100.0),
         "max_rsi": (0.0, 100.0),
+        "max_entry_volatility_percentile": (0.0, 100.0),
+        "max_entry_volatility_ratio": (0.1, 20.0),
     }[key]
 
 

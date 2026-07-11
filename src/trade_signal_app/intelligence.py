@@ -15,6 +15,7 @@ from .onchain import OpenMultiChainOnchainProvider
 from .runtime_config import IntelligenceDefaults, RuntimeConfig
 from .service import SignalScanner
 from .time_utils import now_app_time
+from .volatility import volatility_entry_reason
 
 
 @dataclass(frozen=True)
@@ -554,6 +555,16 @@ class IntelligenceHub:
                 recent_change_pct=float(getattr(signal.indicators, "recent_change_pct", 0.0)),
                 config=self.runtime_config.autotrade_defaults,
             )
+            volatility_issue = volatility_entry_reason(
+                regime=str(getattr(signal.indicators, "volatility_regime", "normal")),
+                percentile=float(getattr(signal.indicators, "volatility_percentile", 50.0)),
+                ratio=float(getattr(signal.indicators, "volatility_ratio", 1.0)),
+                atr_pct=float(getattr(signal.indicators, "atr_pct", 0.0)),
+                enabled=self.runtime_config.autotrade_defaults.volatility_filter_enabled,
+                block_extreme=self.runtime_config.autotrade_defaults.block_extreme_volatility,
+                max_percentile=self.runtime_config.autotrade_defaults.max_entry_volatility_percentile,
+                max_ratio=self.runtime_config.autotrade_defaults.max_entry_volatility_ratio,
+            )
             community_signal = getattr(signal, "community_signal", None)
             community_score = None if community_signal is None else float(getattr(community_signal, "score", 0.0))
             structure_issue = structure_entry_reason_from_config(
@@ -576,14 +587,18 @@ class IntelligenceHub:
                         strategy="auto_score_breakout",
                         score=signal.score,
                         grade=signal.grade,
-                        action="wait_pullback"
+                        action="wait_volatility"
+                        if volatility_issue
+                        else "wait_pullback"
                         if anti_chase
                         else "wait_support"
                         if structure_issue
                         else "candidate_buy"
                         if self.runtime_config.autotrade_defaults.enabled
                         else "watch",
-                        reasons=[anti_chase, *signal.reasons[:3]]
+                        reasons=[volatility_issue, *signal.reasons[:3]]
+                        if volatility_issue
+                        else [anti_chase, *signal.reasons[:3]]
                         if anti_chase
                         else [structure_issue, *signal.reasons[:3]]
                         if structure_issue
@@ -718,7 +733,7 @@ class IntelligenceHub:
 
         hit_symbols = []
         for hit in strategy_hits:
-            if hit.action in {"wait_pullback", "wait_support"}:
+            if hit.action in {"wait_pullback", "wait_support", "wait_volatility"}:
                 continue
             if hit.symbol not in hit_symbols:
                 hit_symbols.append(hit.symbol)

@@ -13,6 +13,7 @@ from .runtime_config import AutoTradeDefaults
 from .service import SignalScanner
 from .storage import LocalDataStore
 from .time_utils import now_app_time, to_app_time
+from .volatility import volatility_entry_reason
 
 LIVE_CONFIRM_VALUE = "I_UNDERSTAND_REAL_ORDERS"
 MIN_EMERGENCY_ALERT_COOLDOWN_MINUTES = 30
@@ -295,27 +296,33 @@ class AutoTrader:
         state_store: TradingStateStore,
         blocked_symbols: dict[str, str] | None = None,
         trade_notifier: FeishuTradeNotifier | None = None,
+        isolate_mode: bool = False,
     ) -> None:
         self.scanner = scanner
         self.execution_gateway = getattr(scanner, "gateway", None)
         self.state_store = state_store
         self.blocked_symbols = blocked_symbols or {}
         self.trade_notifier = trade_notifier
+        self.isolate_mode = isolate_mode
 
     def set_execution_gateway(self, gateway: object) -> None:
         self.execution_gateway = gateway
 
     def run_once(self, config: AutoTradeDefaults) -> TradingRunReport:
-        positions = self.state_store.load()
+        loaded_positions = self.state_store.load()
+        if self.isolate_mode:
+            positions = [position for position in loaded_positions if position.mode == config.mode]
+            passthrough_positions = [position for position in loaded_positions if position.mode != config.mode]
+        else:
+            positions = loaded_positions
+            passthrough_positions = []
         recent_events = self.state_store.load_events()
         events: list[TradingEvent] = []
         summary, signals = self.scanner.scan()
         now = now_app_time()
 
-        latest_prices = self._latest_prices_for_positions(
-            positions,
-            {signal.symbol: signal.ticker.last_price for signal in signals},
-        )
+        signal_prices = {signal.symbol: signal.ticker.last_price for signal in signals}
+        latest_prices = self._latest_prices_for_positions(positions, signal_prices)
         positions = self._evaluate_exits(
             positions,
             config,
@@ -325,7 +332,8 @@ class AutoTrader:
             recent_events=recent_events,
         )
         if not config.enabled:
-            self.state_store.save(positions)
+            combined_positions = [*passthrough_positions, *positions]
+            self.state_store.save(combined_positions)
             events.append(
                 TradingEvent(
                     action="SKIP",
@@ -342,7 +350,7 @@ class AutoTrader:
                 mode=config.mode,
                 scanned_symbols=summary.scanned_symbols,
                 returned_signals=summary.returned_signals,
-                open_positions=positions,
+                open_positions=combined_positions,
                 events=events,
             )
 
@@ -359,14 +367,15 @@ class AutoTrader:
                     exchange=config.execution_exchange.upper(),
                 )
             )
-            self.state_store.save(positions)
+            combined_positions = [*passthrough_positions, *positions]
+            self.state_store.save(combined_positions)
             self.state_store.append_events(events)
             return TradingRunReport(
                 enabled=True,
                 mode=config.mode,
                 scanned_symbols=summary.scanned_symbols,
                 returned_signals=summary.returned_signals,
-                open_positions=positions,
+                open_positions=combined_positions,
                 events=events,
             )
 
@@ -406,6 +415,21 @@ class AutoTrader:
                 continue
             if signal.indicators.buy_pressure_ratio < config.min_buy_pressure:
                 continue
+            volatility_issue = self._volatility_entry_reason(signal, config)
+            if volatility_issue:
+                events.append(
+                    TradingEvent(
+                        action="SKIP",
+                        symbol=signal.symbol,
+                        mode=config.mode,
+                        status="wait_volatility",
+                        message=volatility_issue,
+                        score=signal.score,
+                        price=signal.ticker.last_price,
+                        exchange=config.execution_exchange.upper(),
+                    )
+                )
+                continue
             anti_chase = self._anti_chase_reason(signal, config)
             if anti_chase:
                 events.append(
@@ -421,7 +445,8 @@ class AutoTrader:
                     )
                 )
                 continue
-            structure_issue = self._structure_entry_reason(signal, config)
+            entry_price = self._latest_price_for_symbol(signal.symbol, fallback=self._signal_price(signal))
+            structure_issue = self._structure_entry_reason(signal, config, current_price=entry_price)
             if structure_issue:
                 events.append(
                     TradingEvent(
@@ -431,13 +456,13 @@ class AutoTrader:
                         status="wait_support",
                         message=structure_issue,
                         score=signal.score,
-                        price=signal.ticker.last_price,
+                        price=entry_price,
                         exchange=config.execution_exchange.upper(),
                     )
                 )
                 continue
 
-            position, event = self._open_position(signal, config)
+            position, event = self._open_position(signal, config, entry_price=entry_price)
             events.append(event)
             if event.status in {"filled", "paper_filled"}:
                 positions.append(position)
@@ -445,14 +470,15 @@ class AutoTrader:
                 open_symbols.add(position.symbol)
                 exposure += self._position_margin_notional(position)
 
-        self.state_store.save(positions)
+        combined_positions = [*passthrough_positions, *positions]
+        self.state_store.save(combined_positions)
         self.state_store.append_events(events)
         return TradingRunReport(
             enabled=True,
             mode=config.mode,
             scanned_symbols=summary.scanned_symbols,
             returned_signals=summary.returned_signals,
-            open_positions=positions,
+            open_positions=combined_positions,
             events=events,
         )
 
@@ -678,9 +704,31 @@ class AutoTrader:
             config=config,
         )
 
-    def _structure_entry_reason(self, signal: object, config: AutoTradeDefaults) -> str:
+    def _volatility_entry_reason(self, signal: object, config: AutoTradeDefaults) -> str:
+        if isinstance(signal, dict):
+            regime = str(signal.get("volatility_regime") or "normal")
+        else:
+            regime = str(getattr(getattr(signal, "indicators", None), "volatility_regime", "normal"))
+        return volatility_entry_reason(
+            regime=regime,
+            percentile=self._signal_indicator_float(signal, "volatility_percentile", 50.0),
+            ratio=self._signal_indicator_float(signal, "volatility_ratio", 1.0),
+            atr_pct=self._signal_indicator_float(signal, "atr_pct", 0.0),
+            enabled=config.volatility_filter_enabled,
+            block_extreme=config.block_extreme_volatility,
+            max_percentile=config.max_entry_volatility_percentile,
+            max_ratio=config.max_entry_volatility_ratio,
+        )
+
+    def _structure_entry_reason(
+        self,
+        signal: object,
+        config: AutoTradeDefaults,
+        *,
+        current_price: float | None = None,
+    ) -> str:
         return structure_entry_reason_from_config(
-            close_price=self._signal_price(signal),
+            close_price=current_price if current_price and current_price > 0 else self._signal_price(signal),
             support_level=self._signal_indicator_float(signal, "support_level", 0.0),
             resistance_level=self._signal_indicator_float(signal, "resistance_level", 0.0),
             support_distance_pct=self._signal_indicator_float(signal, "support_distance_pct", 0.0),
@@ -739,34 +787,79 @@ class AutoTrader:
         except (TypeError, ValueError):
             return None
 
+    def _fresh_prices_for_symbols(self, symbols: set[str] | list[str] | tuple[str, ...]) -> dict[str, float]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for symbol in symbols:
+            normalized_symbol = str(symbol).upper().strip()
+            if normalized_symbol and normalized_symbol not in seen:
+                normalized.append(normalized_symbol)
+                seen.add(normalized_symbol)
+        if not normalized:
+            return {}
+
+        gateway = self.execution_gateway or getattr(self.scanner, "gateway", None)
+        prices: dict[str, float] = {}
+        ticker_prices = getattr(gateway, "ticker_prices", None)
+        if callable(ticker_prices):
+            try:
+                for symbol, price in (ticker_prices(normalized) or {}).items():
+                    normalized_symbol = str(symbol).upper()
+                    parsed_price = float(price)
+                    if normalized_symbol in seen and parsed_price > 0:
+                        prices[normalized_symbol] = parsed_price
+            except Exception:  # noqa: BLE001
+                prices = {}
+
+        missing_symbols = [symbol for symbol in normalized if symbol not in prices]
+        ticker_price = getattr(gateway, "ticker_price", None)
+        if missing_symbols and callable(ticker_price):
+            for symbol in list(missing_symbols):
+                try:
+                    parsed_price = float(ticker_price(symbol))
+                except Exception:  # noqa: BLE001
+                    continue
+                if parsed_price > 0:
+                    prices[symbol] = parsed_price
+            missing_symbols = [symbol for symbol in normalized if symbol not in prices]
+
+        ticker24hr_symbols = getattr(gateway, "ticker24hr_symbols", None)
+        if missing_symbols and callable(ticker24hr_symbols):
+            try:
+                for row in ticker24hr_symbols(missing_symbols):
+                    symbol = str(row.get("symbol", "")).upper()
+                    if symbol in missing_symbols:
+                        parsed_price = float(row["lastPrice"])
+                        if parsed_price > 0:
+                            prices[symbol] = parsed_price
+            except Exception:  # noqa: BLE001
+                return prices
+        return prices
+
+    def _latest_price_for_symbol(self, symbol: str, *, fallback: float = 0.0) -> float:
+        normalized = symbol.upper().strip()
+        live_price = self._fresh_prices_for_symbols([normalized]).get(normalized)
+        return live_price if live_price and live_price > 0 else fallback
+
     def _latest_prices_for_positions(
         self,
         positions: list[TradingPosition],
         signal_prices: dict[str, float],
     ) -> dict[str, float]:
         latest_prices = dict(signal_prices)
-        missing_symbols = {
-            position.symbol
-            for position in positions
-            if position.symbol not in latest_prices
-        }
-        if not missing_symbols:
-            return latest_prices
-        try:
-            ticker24hr_symbols = getattr(self.scanner.gateway, "ticker24hr_symbols", None)
-            if not callable(ticker24hr_symbols):
-                return latest_prices
-            for row in ticker24hr_symbols(sorted(missing_symbols)):
-                symbol = str(row.get("symbol", "")).upper()
-                if symbol in missing_symbols:
-                    latest_prices[symbol] = float(row["lastPrice"])
-        except Exception:  # noqa: BLE001
-            return latest_prices
+        position_symbols = {position.symbol.upper() for position in positions}
+        latest_prices.update(self._fresh_prices_for_symbols(sorted(position_symbols)))
         return latest_prices
 
-    def _open_position(self, signal, config: AutoTradeDefaults) -> tuple[TradingPosition, TradingEvent]:
+    def _open_position(
+        self,
+        signal,
+        config: AutoTradeDefaults,
+        *,
+        entry_price: float | None = None,
+    ) -> tuple[TradingPosition, TradingEvent]:
         now = now_app_time()
-        price = signal.ticker.last_price
+        price = entry_price if entry_price and entry_price > 0 else signal.ticker.last_price
         leverage = config.leverage if config.mode == "paper" else 1.0
         margin_notional = config.quote_order_qty
         position_notional = margin_notional * leverage

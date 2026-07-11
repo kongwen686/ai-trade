@@ -8,7 +8,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from trade_signal_app.okx_client import OKXSpotGateway
+from trade_signal_app.okx_client import OKXAPIError, OKXSpotGateway
 
 
 class FakeResponse(io.StringIO):
@@ -81,6 +81,13 @@ class OKXClientTests(unittest.TestCase):
         self.assertEqual(body["tgtCcy"], "quote_ccy")
         self.assertEqual(body["sz"], "25.5")
         self.assertEqual(payload["ordId"], "123")
+
+    def test_order_rejects_nonzero_row_status_code(self) -> None:
+        response = {"code": "0", "data": [{"sCode": "51008", "sMsg": "Insufficient balance"}]}
+        with patch("trade_signal_app.okx_client.urlopen", return_value=FakeResponse(json.dumps(response))):
+            gateway = OKXSpotGateway(api_key="okx-key", api_secret="okx-secret", passphrase="okx-pass")
+            with self.assertRaisesRegex(OKXAPIError, "Insufficient balance"):
+                gateway.order_market_buy(symbol="BTCUSDT", quote_order_qty=25.5, test=False)
 
     def test_ticker_shape_computes_24h_change_from_okx_payload(self) -> None:
         payload = OKXSpotGateway._ticker_to_binance_shape(

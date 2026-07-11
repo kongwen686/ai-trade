@@ -20,6 +20,7 @@ from .models import (
     Candlestick,
     EquityPoint,
     ForwardReturnStat,
+    IndicatorSnapshot,
     MarketTicker,
     PortfolioBacktestReport,
     PortfolioReturnStat,
@@ -35,6 +36,7 @@ from .tradingview_data import load_tradingview_csv
 
 
 HISTORICAL_DATA_SUFFIXES = {".zip", ".csv"}
+BacktestAnalysisCache = dict[int, tuple[IndicatorSnapshot, MarketTicker, float]]
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -171,6 +173,7 @@ def run_backtest_for_series(
     execution_config: ExecutionConfig | None = None,
     cooldown_bars: int | None = None,
     sample_start_time: datetime | None = None,
+    analysis_cache: BacktestAnalysisCache | None = None,
 ) -> BacktestReport:
     entry_config = entry_config or EntryRuleConfig(min_score=score_threshold)
     horizons = sorted({value for value in holding_periods if value > 0})
@@ -184,6 +187,7 @@ def run_backtest_for_series(
 
     sample_start_utc = _as_utc(sample_start_time) if sample_start_time is not None else None
     sample_candles = _candles_at_or_after(candles, sample_start_utc)
+    analysis_cache = analysis_cache if analysis_cache is not None else {}
     day_bars = bars_per_day(candles)
     cooldown_bars = cooldown_bars if cooldown_bars is not None else exit_config.cooldown_bars_after_exit
     warmup = 60
@@ -214,18 +218,24 @@ def run_backtest_for_series(
         if index < next_entry_index:
             continue
 
-        history = candles[max(0, index - lookback_bars + 1) : index + 1]
-        indicators = build_indicator_snapshot(history)
-        ticker = build_historical_ticker(symbol, candles, index, day_bars)
-        quote_volumes, trade_counts = rolling_liquidity_baseline(symbol, candles, index, day_bars)
-        liquidity_score = compute_liquidity_score(ticker, quote_volumes, trade_counts)
-        breakdown = build_subscores(
-            ticker=ticker,
-            indicators=indicators,
-            liquidity_score=liquidity_score,
-            community_signal=None,
-        )
-        score = composite_score(breakdown)
+        history: list[Candlestick] | None = None
+        analysis = analysis_cache.get(index)
+        if analysis is None:
+            history = candles[max(0, index - lookback_bars + 1) : index + 1]
+            indicators = build_indicator_snapshot(history)
+            ticker = build_historical_ticker(symbol, candles, index, day_bars)
+            quote_volumes, trade_counts = rolling_liquidity_baseline(symbol, candles, index, day_bars)
+            liquidity_score = compute_liquidity_score(ticker, quote_volumes, trade_counts)
+            breakdown = build_subscores(
+                ticker=ticker,
+                indicators=indicators,
+                liquidity_score=liquidity_score,
+                community_signal=None,
+            )
+            score = composite_score(breakdown)
+            analysis_cache[index] = (indicators, ticker, score)
+        else:
+            indicators, ticker, score = analysis
         decision = evaluate_long_entry(
             score=score,
             indicators=indicators,
@@ -234,6 +244,8 @@ def run_backtest_for_series(
         if not decision.allowed:
             continue
 
+        if history is None:
+            history = candles[max(0, index - lookback_bars + 1) : index + 1]
         general_reasons, _ = build_reasons(ticker, indicators, None)
         reasons = decision.reasons + [reason for reason in general_reasons if reason not in decision.reasons]
         trade = simulate_long_trade(

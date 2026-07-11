@@ -148,9 +148,21 @@ def build_reasons(ticker: MarketTicker, indicators: IndicatorSnapshot, community
         reasons.append(f"24h 涨幅 {ticker.price_change_percent:.2f}%")
     if indicators.support_level > 0 and indicators.support_distance_pct <= 2.5 and indicators.support_strength >= 2:
         reasons.append(f"靠近结构支撑 {indicators.support_distance_pct:.1f}%")
+    if indicators.volatility_regime in {"compressed", "normal"}:
+        reasons.append(
+            f"{indicators.volatility_label}（分位 {indicators.volatility_percentile:.0f}%）"
+        )
     if community_signal and community_signal.score >= 70:
         reasons.append(f"社区热度较高 ({community_signal.source})")
 
+    if indicators.volatility_regime == "extreme":
+        warnings.append(
+            f"极端波动：分位 {indicators.volatility_percentile:.0f}%，波动比 {indicators.volatility_ratio:.2f}x"
+        )
+    elif indicators.volatility_regime == "expansion":
+        warnings.append(
+            f"波动扩张：分位 {indicators.volatility_percentile:.0f}%，需降低追价"
+        )
     if indicators.rsi_14 >= 72:
         warnings.append("RSI 过热，追高风险增大")
     if indicators.price_vs_ema20_pct >= 7:

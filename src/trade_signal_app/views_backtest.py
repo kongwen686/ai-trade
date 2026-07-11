@@ -4,7 +4,44 @@ from html import escape
 from urllib.parse import urlencode
 
 from .presets import get_backtest_preset
+from .runtime_config import TRADINGVIEW_BARS_DEFAULT, TRADINGVIEW_BARS_MAX, TRADINGVIEW_BARS_MIN
 from .views_common import _backtest_preset_options, _hidden_lang_input, _layout, _module_tabs, _option, _text, normalize_language
+
+
+BACKTEST_ADVANCED_HELP = {
+    "Fee bps": "统一手续费，单位 bps；10 bps 等于 0.10%。",
+    "Fee Model": "flat 使用统一费率；maker_taker 会区分挂单和吃单费率。",
+    "Fee Source": "manual 使用页面填写费率；account/symbol 会尝试读取 Binance 账户或交易对费率。",
+    "Maker Fee bps": "maker_taker 模型下，选择 maker 角色时使用的挂单费率。",
+    "Taker Fee bps": "maker_taker 模型下，选择 taker 角色时使用的吃单费率。",
+    "Entry Fee Role": "入场成交按 maker 还是 taker 费率计入成本。",
+    "Exit Fee Role": "出场成交按 maker 还是 taker 费率计入成本。",
+    "Fee Discount %": "手续费折扣百分比，例如 BNB 抵扣或平台费率优惠。",
+    "Slippage bps": "固定滑点或动态滑点基础值，单位 bps。",
+    "Slippage Model": "fixed 使用固定滑点；dynamic 会根据成交量状态动态调整滑点。",
+    "Min Slippage": "动态滑点模型允许的最小滑点，避免过度乐观。",
+    "Max Slippage": "动态滑点模型允许的最大滑点，用于限制极端流动性冲击。",
+    "Slip Window": "动态滑点计算参考的最近成交量窗口长度。",
+    "Capital %": "单笔交易最多可动用的资金比例。",
+    "Max Exposure %": "组合回测允许同时暴露的最大资金比例。",
+    "Max Concurrent": "组合回测允许同时持有的最大标的数；0 表示不限制。",
+    "Min Volume Ratio": "入场要求当前成交量相对基准放大的最低倍数。",
+    "Min Buy Pressure": "入场要求主动买入压力的最低比例。",
+    "Min RSI": "入场允许的最低 RSI；低于该值通常表示动能偏弱。",
+    "Max RSI": "入场允许的最高 RSI；高于该值用于避免过热追高。",
+    "Volatility Regime Filter": "使用收益波动分位、波动比和 ATR 划分压缩、常态、扩张、极端状态，并过滤不可交易状态。",
+    "Block Extreme Volatility": "阻断极端波动状态的新开仓，已有持仓仍按原退出规则管理。",
+    "Max Volatility Percentile": "当前波动率相对历史窗口的最高允许分位；越低越保守。",
+    "Max Volatility Ratio": "当前 20 根波动率相对历史中位波动率的最高允许倍数。",
+    "Disable Binance discount": "勾选后即使 Binance 返回折扣信息，也不应用手续费折扣。",
+    "Disable KDJ confirmation": "勾选后入场不再要求 KDJ 方向确认。",
+    "Stability Checks": "额外运行 score±3、滑点上调和滚动 walk-forward 复测。",
+    "Parameter Sweep": "在首个有效币种/周期上运行评分阈值 × 止损比例 3×3 邻域扫描，用于生成真实参数热力图。",
+}
+
+
+def _backtest_advanced_help(label: str) -> str:
+    return f'<small class="settings-description">{escape(BACKTEST_ADVANCED_HELP[label])}</small>'
 
 
 def _stats_table(rows: list[dict[str, object]], *, portfolio: bool = False) -> str:
@@ -442,6 +479,153 @@ def _backtest_visual_analysis(
     """
 
 
+def _risk_return_scatter(
+    series_reports: list[dict[str, object]],
+    portfolio_reports: list[dict[str, object]],
+) -> str:
+    rows = _backtest_result_rows(series_reports, portfolio_reports)[:10]
+    if not rows:
+        return '<div class="sensitivity-empty"><strong>等待风险收益样本</strong><span>运行回测后才会绘制真实散点。</span></div>'
+    width = 720.0
+    height = 300.0
+    left = 58.0
+    right = 24.0
+    top = 28.0
+    bottom = 46.0
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+    max_risk = max(abs(float(item["max_drawdown_pct"])) for item in rows) or 1.0
+    returns = [float(item["return_pct"]) for item in rows]
+    min_return = min([0.0, *returns])
+    max_return = max([0.0, *returns])
+    return_span = max_return - min_return or 1.0
+    zero_y = top + ((max_return - 0.0) / return_span) * plot_height
+    points = []
+    legend = []
+    for item in rows:
+        risk = abs(float(item["max_drawdown_pct"]))
+        return_pct = float(item["return_pct"])
+        x = left + max(0.02, risk / max_risk) * plot_width
+        y = top + ((max_return - return_pct) / return_span) * plot_height
+        tone = "positive" if return_pct >= 0 else "negative"
+        label = f'{item["label"]} {item["interval"]}'
+        points.append(
+            f'<g class="risk-point {tone}"><circle cx="{x:.2f}" cy="{y:.2f}" r="7"><title>{escape(label)} · Return {return_pct:+.2f}% · DD {float(item["max_drawdown_pct"]):+.2f}%</title></circle>'
+            f'<text x="{min(x + 10, width - 110):.2f}" y="{(y + 22 if y < top + 24 else y - 10):.2f}">{escape(str(item["label"]))}</text></g>'
+        )
+        legend.append(
+            f'<span><i class="{tone}"></i><strong>{escape(label)}</strong> {return_pct:+.2f}% / DD {float(item["max_drawdown_pct"]):+.2f}%</span>'
+        )
+    return f"""
+      <div class="risk-return-chart">
+        <svg viewBox="0 0 {width:.0f} {height:.0f}" role="img" aria-label="风险收益散点图">
+          <path class="chart-grid" d="M{left:.0f} {top:.0f}V{height - bottom:.0f}H{width - right:.0f}" />
+          <path class="chart-zero" d="M{left:.0f} {zero_y:.2f}H{width - right:.0f}" />
+          <text class="axis-label" x="{left:.0f}" y="18">收益 ↑</text>
+          <text class="axis-label" x="{width - 190:.0f}" y="{height - 12:.0f}">最大回撤越大越靠右</text>
+          {''.join(points)}
+        </svg>
+        <div class="risk-return-legend">{''.join(legend)}</div>
+      </div>
+    """
+
+
+def _parameter_heatmap(params: dict[str, object], parameter_sweep: list[dict[str, object]]) -> str:
+    enabled = bool(params.get("parameter_sweep"))
+    successful = [item for item in parameter_sweep if isinstance(item, dict) and item.get("status") == "ok"]
+    if not enabled:
+        sweep_params = {**params, "parameter_sweep": True}
+        return f"""
+          <div class="sensitivity-empty">
+            <strong>参数热力图尚未运行</strong>
+            <span>扫描评分阈值与止损比例的 9 个邻域组合；只使用首个有效序列，避免多币种组合导致计算失控。</span>
+            <a class="action-link" href="/backtest?{escape(_build_backtest_export_query(sweep_params), quote=True)}#backtest-sensitivity">运行参数扫描</a>
+          </div>
+        """
+    if not successful:
+        return '<div class="sensitivity-empty warning"><strong>没有可绘制的参数组合</strong><span>当前预设不适用二维扫描，或历史样本不足。</span></div>'
+    scores = sorted({float(item["score_threshold"]) for item in successful})
+    stops = sorted({float(item["stop_loss_pct"]) for item in successful})
+    lookup = {(float(item["stop_loss_pct"]), float(item["score_threshold"])): item for item in successful}
+    best = max(
+        successful,
+        key=lambda item: (
+            float(item.get("risk_adjusted_return", -1_000_000.0)),
+            float(item.get("return_pct", -1_000_000.0)),
+            bool(item.get("base_cell")),
+        ),
+    )
+    rows = []
+    for stop_loss_pct in stops:
+        cells = []
+        for score_threshold in scores:
+            item = lookup.get((stop_loss_pct, score_threshold))
+            if item is None:
+                cells.append('<td class="heat-empty">-</td>')
+                continue
+            return_pct = float(item.get("return_pct", 0.0))
+            tone = "heat-strong" if return_pct >= 10 else "heat-positive" if return_pct > 0 else "heat-neutral" if return_pct > -5 else "heat-negative"
+            base_class = " base-cell" if item.get("base_cell") else ""
+            title = (
+                f'Equity {float(item.get("final_equity", 1.0)):.4f}; '
+                f'DD {float(item.get("max_drawdown_pct", 0.0)):+.2f}%; '
+                f'PF {float(item.get("profit_factor", 0.0)):.2f}; '
+                f'Trades {int(item.get("signal_count", 0))}'
+            )
+            profit_factor = float(item.get("profit_factor", 0.0))
+            profit_factor_label = "∞" if profit_factor >= 999.0 else f"{profit_factor:.2f}"
+            cells.append(
+                f'<td class="{tone}{base_class}" title="{escape(title, quote=True)}">'
+                f'<strong>{return_pct:+.2f}%</strong><span>Eq {float(item.get("final_equity", 1.0)):.3f}</span>'
+                f'<small>DD {float(item.get("max_drawdown_pct", 0.0)):+.2f}% · PF {profit_factor_label}</small></td>'
+            )
+        rows.append(f'<tr><th>{stop_loss_pct:.2f}%</th>{"".join(cells)}</tr>')
+    return f"""
+      <div class="parameter-heatmap-shell">
+        <div class="heatmap-summary">
+          <span>样本 {escape(str(best.get("symbol", "")))} · {escape(str(best.get("interval", "")))}</span>
+          <strong>最佳邻域：评分 {float(best["score_threshold"]):.1f} / 止损 {float(best["stop_loss_pct"]):.2f}%</strong>
+          <small>风险调整收益 {float(best.get("risk_adjusted_return", 0.0)):+.3f} · 共 {len(successful)} 个有效组合</small>
+        </div>
+        <div class="parameter-heatmap-scroll">
+          <table class="parameter-heatmap">
+            <thead><tr><th>止损 \\ 评分</th>{''.join(f'<th>{score:.1f}</th>' for score in scores)}</tr></thead>
+            <tbody>{''.join(rows)}</tbody>
+          </table>
+        </div>
+        <small class="heatmap-mobile-hint">横向滑动查看全部评分组合</small>
+        <div class="heatmap-legend"><span class="heat-strong">强正收益</span><span class="heat-positive">正收益</span><span class="heat-neutral">轻微负收益</span><span class="heat-negative">明显负收益</span><span class="base-cell">当前参数</span></div>
+      </div>
+    """
+
+
+def _backtest_sensitivity_workbench(
+    *,
+    params: dict[str, object],
+    series_reports: list[dict[str, object]],
+    portfolio_reports: list[dict[str, object]],
+    parameter_sweep: list[dict[str, object]],
+) -> str:
+    return f"""
+      <section id="backtest-sensitivity" class="backtest-sensitivity-board backtest-compact-section">
+        <div class="section-heading">
+          <h2>风险收益与参数敏感度</h2>
+          <p>散点图比较真实回测结果；热力图只展示实际运行的评分阈值 × 止损比例组合。</p>
+        </div>
+        <div class="sensitivity-grid">
+          <article class="sensitivity-panel">
+            <div class="analysis-panel-head"><h3>风险收益地图</h3><p>左上区域代表更低回撤和更高收益。</p></div>
+            {_risk_return_scatter(series_reports, portfolio_reports)}
+          </article>
+          <article class="sensitivity-panel heatmap-panel">
+            <div class="analysis-panel-head"><h3>参数热力图</h3><p>基础参数单元格带描边；悬停可查看权益、回撤、PF 和交易数。</p></div>
+            {_parameter_heatmap(params, parameter_sweep)}
+          </article>
+        </div>
+      </section>
+    """
+
+
 def _benchmark_trade_feed(report: dict[str, object], *, capital: float = 10_000.0) -> str:
     events = report.get("events", [])
     if not isinstance(events, list) or not events:
@@ -679,8 +863,9 @@ def _backtest_overview(
             </div>
           </div>
           <div class="action-row">
-            <a class="action-link" href="/api/backtest?{escape(export_query)}">导出 JSON</a>
-            <a class="action-link" href="/api/backtest/export?format=csv&amp;{escape(export_query)}">导出 CSV</a>
+            <a class="action-link" href="/api/backtest/export?format=json&amp;{escape(export_query)}">导出完整 JSON</a>
+            <a class="action-link" href="/api/backtest/export?format=csv&amp;{escape(export_query)}">导出分析 CSV</a>
+            <a class="action-link" href="/api/backtest/export?format=html&amp;{escape(export_query)}">导出 HTML 报告</a>
           </div>
           <div class="mini-stat-grid compact-grid">
             <div class="mini-stat"><span>Series Trades</span><strong>{total_series_trades}</strong></div>
@@ -1060,8 +1245,10 @@ def render_backtest_page(
     portfolio_reports: list[dict[str, object]],
     error: str | None,
     presets: list[dict[str, object]],
+    parameter_sweep: list[dict[str, object]] | None = None,
     rebalance_reports: list[dict[str, object]] | None = None,
     strategy_explanation: dict[str, object] | None = None,
+    performance: dict[str, object] | None = None,
     lang: str = "zh",
     layout_context: dict[str, object] | None = None,
 ) -> str:
@@ -1071,10 +1258,32 @@ def render_backtest_page(
     tradingview_exchange = escape(str(params.get("tradingview_exchange", "BINANCE")))
     tradingview_symbol = escape(str(params.get("tradingview_symbol", "BTCUSDT")))
     tradingview_interval = str(params.get("tradingview_interval", "4h"))
-    tradingview_bars = int(params.get("tradingview_bars", 5000) or 5000)
+    tradingview_bars = int(params.get("tradingview_bars", TRADINGVIEW_BARS_DEFAULT) or TRADINGVIEW_BARS_DEFAULT)
     rebalance_reports = rebalance_reports or []
+    parameter_sweep = parameter_sweep or []
+    performance = performance or {}
     current_preset = get_backtest_preset(str(params["preset"]))
     preset_options = _backtest_preset_options(str(params["preset"]))
+    risk_labels = {
+        "custom": t("自定义", "Custom"),
+        "low": t("低风险", "Low Risk"),
+        "medium": t("中风险", "Medium Risk"),
+        "medium_high": t("中高风险", "Medium-high Risk"),
+        "high": t("高风险", "High Risk"),
+    }
+    validation_labels = {
+        "historical_validated": t("已完成历史验证", "Historically Validated"),
+        "paper_candidate": t("待模拟验证", "Paper Candidate"),
+        "research": t("研究阶段", "Research"),
+        "baseline": t("基线模板", "Baseline"),
+        "unvalidated": t("未验证", "Unvalidated"),
+    }
+    preset_meta = [
+        risk_labels.get(current_preset.risk_level, current_preset.risk_level),
+        validation_labels.get(current_preset.validation_status, current_preset.validation_status),
+        " / ".join(current_preset.recommended_intervals) or t("手动周期", "Manual Interval"),
+        " / ".join(current_preset.market_regimes) or t("手动行情", "Manual Regime"),
+    ]
     hero_right = f"""
       <div class="ant-statistic-card stat-card">
         <span>Series Reports</span>
@@ -1095,6 +1304,11 @@ def render_backtest_page(
         <span>Lookback</span>
         <strong>{int(params["lookback_bars"])}</strong>
         <small>{escape(str(params["slippage_model"]))} slippage · cooldown {int(params["cooldown_bars"])}</small>
+      </div>
+      <div class="ant-statistic-card stat-card">
+        <span>{t("计算耗时", "Runtime")}</span>
+        <strong>{float(performance.get("total_seconds") or 0):.2f}s</strong>
+        <small>{t("缓存命中", "cache hit") if performance.get("cache_hit") else f'{int(performance.get("candle_count") or 0):,} K-lines'}</small>
       </div>
     """
 
@@ -1124,6 +1338,7 @@ def render_backtest_page(
             ("#backtest-data", "数据源"),
             ("#backtest-benchmark", "基准"),
             ("#backtest-analysis", "分析"),
+            ("#backtest-sensitivity", "参数敏感度"),
             ("#backtest-export", "导出"),
             ("#backtest-rebalance", "再平衡"),
             ("#backtest-portfolio", "组合"),
@@ -1153,6 +1368,7 @@ def render_backtest_page(
                 <strong>{escape(current_preset.label)}</strong>
                 <span>{escape(current_preset.description)}</span>
                 <a href="/api/backtest/presets">查看模板清单</a>
+                <small class="preset-meta">{"".join(f'<b>{escape(item)}</b>' for item in preset_meta)}</small>
               </div>
               <label class="full-span">
                 <span>Archive Patterns</span>
@@ -1169,35 +1385,47 @@ def render_backtest_page(
               <details class="backtest-advanced-options">
                 <summary>
                   <span>高级成本 / 风控参数</span>
-                  <small>手续费、滑点、资金暴露、量能与 RSI 过滤</small>
+                  <small>手续费、滑点、资金暴露、量能、RSI 与波动率状态过滤</small>
                 </summary>
                 <div class="backtest-advanced-grid">
-                  <label><span>Fee bps</span><input type="number" step="0.1" name="fee_bps" value="{float(params['fee_bps']):.1f}" /></label>
-                  <label><span>Fee Model</span><select name="fee_model">{''.join(_option(item, str(params['fee_model'])) for item in ['flat', 'maker_taker'])}</select></label>
-                  <label><span>Fee Source</span><select name="fee_source">{''.join(_option(item, str(params['fee_source'])) for item in ['manual', 'account', 'symbol'])}</select></label>
-                  <label><span>Maker Fee bps</span><input type="number" step="0.1" name="maker_fee_bps" value="{float(params['maker_fee_bps']):.1f}" /></label>
-                  <label><span>Taker Fee bps</span><input type="number" step="0.1" name="taker_fee_bps" value="{float(params['taker_fee_bps']):.1f}" /></label>
-                  <label><span>Entry Fee Role</span><select name="entry_fee_role">{''.join(_option(item, str(params['entry_fee_role'])) for item in ['maker', 'taker'])}</select></label>
-                  <label><span>Exit Fee Role</span><select name="exit_fee_role">{''.join(_option(item, str(params['exit_fee_role'])) for item in ['maker', 'taker'])}</select></label>
-                  <label><span>Fee Discount %</span><input type="number" step="0.1" name="fee_discount_pct" value="{float(params['fee_discount_pct']):.1f}" /></label>
-                  <label><span>Slippage bps</span><input type="number" step="0.1" name="slippage_bps" value="{float(params['slippage_bps']):.1f}" /></label>
-                  <label><span>Slippage Model</span><select name="slippage_model">{''.join(_option(item, str(params['slippage_model'])) for item in ['fixed', 'dynamic'])}</select></label>
-                  <label><span>Min Slippage</span><input type="number" step="0.1" name="min_slippage_bps" value="{float(params['min_slippage_bps']):.1f}" /></label>
-                  <label><span>Max Slippage</span><input type="number" step="0.1" name="max_slippage_bps" value="{float(params['max_slippage_bps']):.1f}" /></label>
-                  <label><span>Slip Window</span><input type="number" min="1" name="slippage_window_bars" value="{int(params['slippage_window_bars'])}" /></label>
-                  <label><span>Capital %</span><input type="number" step="0.1" name="capital_fraction_pct" value="{float(params['capital_fraction_pct']):.1f}" /></label>
-                  <label><span>Max Exposure %</span><input type="number" step="0.1" name="max_portfolio_exposure_pct" value="{float(params['max_portfolio_exposure_pct']):.1f}" /></label>
-                  <label><span>Max Concurrent</span><input type="number" min="0" name="max_concurrent_positions" value="{int(params['max_concurrent_positions'])}" /></label>
-                  <label><span>Min Volume Ratio</span><input type="number" step="0.01" name="min_volume_ratio" value="{float(params['min_volume_ratio']):.2f}" /></label>
-                  <label><span>Min Buy Pressure</span><input type="number" step="0.01" name="min_buy_pressure" value="{float(params['min_buy_pressure']):.2f}" /></label>
-                  <label><span>Min RSI</span><input type="number" step="0.1" name="min_rsi" value="{float(params['min_rsi']):.1f}" /></label>
-                  <label><span>Max RSI</span><input type="number" step="0.1" name="max_rsi" value="{float(params['max_rsi']):.1f}" /></label>
-                  <label class="inline-check"><input type="checkbox" name="no_binance_discount" {"checked" if params["no_binance_discount"] else ""} /><span>Disable Binance discount</span></label>
-                  <label class="inline-check"><input type="checkbox" name="no_kdj_confirmation" {"checked" if params["no_kdj_confirmation"] else ""} /><span>Disable KDJ confirmation</span></label>
-                  <label class="inline-check"><input type="checkbox" name="stability_checks" {"checked" if params.get("stability_checks") else ""} /><span>Stability Checks</span><small class="settings-description">额外运行 score±3、滑点上调和滚动 walk-forward 复测。</small></label>
+                  <label><span>Fee bps</span>{_backtest_advanced_help("Fee bps")}<input type="number" step="0.1" name="fee_bps" value="{float(params['fee_bps']):.1f}" /></label>
+                  <label><span>Fee Model</span>{_backtest_advanced_help("Fee Model")}<select name="fee_model">{''.join(_option(item, str(params['fee_model'])) for item in ['flat', 'maker_taker'])}</select></label>
+                  <label><span>Fee Source</span>{_backtest_advanced_help("Fee Source")}<select name="fee_source">{''.join(_option(item, str(params['fee_source'])) for item in ['manual', 'account', 'symbol'])}</select></label>
+                  <label><span>Maker Fee bps</span>{_backtest_advanced_help("Maker Fee bps")}<input type="number" step="0.1" name="maker_fee_bps" value="{float(params['maker_fee_bps']):.1f}" /></label>
+                  <label><span>Taker Fee bps</span>{_backtest_advanced_help("Taker Fee bps")}<input type="number" step="0.1" name="taker_fee_bps" value="{float(params['taker_fee_bps']):.1f}" /></label>
+                  <label><span>Entry Fee Role</span>{_backtest_advanced_help("Entry Fee Role")}<select name="entry_fee_role">{''.join(_option(item, str(params['entry_fee_role'])) for item in ['maker', 'taker'])}</select></label>
+                  <label><span>Exit Fee Role</span>{_backtest_advanced_help("Exit Fee Role")}<select name="exit_fee_role">{''.join(_option(item, str(params['exit_fee_role'])) for item in ['maker', 'taker'])}</select></label>
+                  <label><span>Fee Discount %</span>{_backtest_advanced_help("Fee Discount %")}<input type="number" step="0.1" name="fee_discount_pct" value="{float(params['fee_discount_pct']):.1f}" /></label>
+                  <label><span>Slippage bps</span>{_backtest_advanced_help("Slippage bps")}<input type="number" step="0.1" name="slippage_bps" value="{float(params['slippage_bps']):.1f}" /></label>
+                  <label><span>Slippage Model</span>{_backtest_advanced_help("Slippage Model")}<select name="slippage_model">{''.join(_option(item, str(params['slippage_model'])) for item in ['fixed', 'dynamic'])}</select></label>
+                  <label><span>Min Slippage</span>{_backtest_advanced_help("Min Slippage")}<input type="number" step="0.1" name="min_slippage_bps" value="{float(params['min_slippage_bps']):.1f}" /></label>
+                  <label><span>Max Slippage</span>{_backtest_advanced_help("Max Slippage")}<input type="number" step="0.1" name="max_slippage_bps" value="{float(params['max_slippage_bps']):.1f}" /></label>
+                  <label><span>Slip Window</span>{_backtest_advanced_help("Slip Window")}<input type="number" min="1" name="slippage_window_bars" value="{int(params['slippage_window_bars'])}" /></label>
+                  <label><span>Capital %</span>{_backtest_advanced_help("Capital %")}<input type="number" step="0.1" name="capital_fraction_pct" value="{float(params['capital_fraction_pct']):.1f}" /></label>
+                  <label><span>Max Exposure %</span>{_backtest_advanced_help("Max Exposure %")}<input type="number" step="0.1" name="max_portfolio_exposure_pct" value="{float(params['max_portfolio_exposure_pct']):.1f}" /></label>
+                  <label><span>Max Concurrent</span>{_backtest_advanced_help("Max Concurrent")}<input type="number" min="0" name="max_concurrent_positions" value="{int(params['max_concurrent_positions'])}" /></label>
+                  <label><span>Min Volume Ratio</span>{_backtest_advanced_help("Min Volume Ratio")}<input type="number" step="0.01" name="min_volume_ratio" value="{float(params['min_volume_ratio']):.2f}" /></label>
+                  <label><span>Min Buy Pressure</span>{_backtest_advanced_help("Min Buy Pressure")}<input type="number" step="0.01" name="min_buy_pressure" value="{float(params['min_buy_pressure']):.2f}" /></label>
+                  <label><span>Min RSI</span>{_backtest_advanced_help("Min RSI")}<input type="number" step="0.1" name="min_rsi" value="{float(params['min_rsi']):.1f}" /></label>
+                  <label><span>Max RSI</span>{_backtest_advanced_help("Max RSI")}<input type="number" step="0.1" name="max_rsi" value="{float(params['max_rsi']):.1f}" /></label>
+                  <label class="inline-check"><input type="hidden" name="volatility_filter_enabled" value="0" /><input type="checkbox" name="volatility_filter_enabled" value="1" {"checked" if params.get("volatility_filter_enabled") else ""} /><span>Volatility Regime Filter</span>{_backtest_advanced_help("Volatility Regime Filter")}</label>
+                  <label class="inline-check"><input type="hidden" name="block_extreme_volatility" value="0" /><input type="checkbox" name="block_extreme_volatility" value="1" {"checked" if params.get("block_extreme_volatility") else ""} /><span>Block Extreme Volatility</span>{_backtest_advanced_help("Block Extreme Volatility")}</label>
+                  <label><span>Max Volatility Percentile</span>{_backtest_advanced_help("Max Volatility Percentile")}<input type="number" min="50" max="100" step="1" name="max_entry_volatility_percentile" value="{float(params.get('max_entry_volatility_percentile', 92.0)):.0f}" /></label>
+                  <label><span>Max Volatility Ratio</span>{_backtest_advanced_help("Max Volatility Ratio")}<input type="number" min="1" max="10" step="0.1" name="max_entry_volatility_ratio" value="{float(params.get('max_entry_volatility_ratio', 2.0)):.1f}" /></label>
+                  <label class="inline-check"><input type="checkbox" name="no_binance_discount" {"checked" if params["no_binance_discount"] else ""} /><span>Disable Binance discount</span>{_backtest_advanced_help("Disable Binance discount")}</label>
+                  <label class="inline-check"><input type="checkbox" name="no_kdj_confirmation" {"checked" if params["no_kdj_confirmation"] else ""} /><span>Disable KDJ confirmation</span>{_backtest_advanced_help("Disable KDJ confirmation")}</label>
+                  <label class="inline-check"><input type="checkbox" name="stability_checks" {"checked" if params.get("stability_checks") else ""} /><span>Stability Checks</span>{_backtest_advanced_help("Stability Checks")}</label>
+                  <label class="inline-check"><input type="checkbox" name="parameter_sweep" {"checked" if params.get("parameter_sweep") else ""} /><span>Parameter Sweep</span>{_backtest_advanced_help("Parameter Sweep")}</label>
                 </div>
               </details>
-              <button type="submit">运行回测</button>
+              <button type="submit" data-backtest-submit>运行回测</button>
+              <div class="backtest-job-status full-span" data-backtest-job-status hidden aria-live="polite">
+                <span class="backtest-job-spinner" aria-hidden="true"></span>
+                <div>
+                  <strong data-backtest-job-title>正在提交回测任务</strong>
+                  <small data-backtest-job-detail>请求会在后台执行，页面无需持续占用同一个接口连接。</small>
+                </div>
+              </div>
             </form>
             <aside class="backtest-data-source">
               <form method="post" action="/backtest/tradingview/fetch" class="ant-form backtest-form tradingview-fetch-form">
@@ -1215,7 +1443,7 @@ def render_backtest_page(
                 <label><span>TV Exchange</span><input type="text" name="tradingview_exchange" value="{tradingview_exchange}" /></label>
                 <label><span>TV Symbol</span><input type="text" name="tradingview_symbol" value="{tradingview_symbol}" /></label>
                 <label><span>TV Interval</span><select name="tradingview_interval">{''.join(_option(item, tradingview_interval) for item in ['1m', '3m', '5m', '15m', '30m', '45m', '1h', '2h', '3h', '4h', '1d', '1w', '1M'])}</select></label>
-                <label><span>TV Bars</span><input type="number" min="100" max="50000" step="100" name="tradingview_bars" value="{tradingview_bars}" /></label>
+                <label><span>TV Bars</span><input type="number" min="{TRADINGVIEW_BARS_MIN}" max="{TRADINGVIEW_BARS_MAX}" step="100" name="tradingview_bars" value="{tradingview_bars}" /></label>
                 <button type="submit">拉取并回测</button>
               </form>
               <div class="backtest-source-note">
@@ -1229,6 +1457,7 @@ def render_backtest_page(
         <div class="backtest-result-stack">
           {_benchmark_workbench(series_reports)}
           {_backtest_visual_analysis(series_reports=series_reports, portfolio_reports=portfolio_reports, rebalance_reports=rebalance_reports, strategy_explanation=strategy_explanation)}
+          {_backtest_sensitivity_workbench(params=params, series_reports=series_reports, portfolio_reports=portfolio_reports, parameter_sweep=parameter_sweep)}
           {_backtest_overview(params=params, series_reports=series_reports, portfolio_reports=portfolio_reports, rebalance_reports=rebalance_reports, strategy_explanation=strategy_explanation)}
         </div>
 
@@ -1256,6 +1485,7 @@ def render_backtest_page(
         <div class="backtest-grid">{series_html}</div>
       </section>
       </div>
+      <script src="/static/backtest.js" defer></script>
     """
 
     return _layout(
@@ -1288,6 +1518,9 @@ __all__ = [
     '_analysis_quality_label',
     '_backtest_result_rows',
     '_backtest_visual_analysis',
+    '_risk_return_scatter',
+    '_parameter_heatmap',
+    '_backtest_sensitivity_workbench',
     '_benchmark_trade_feed',
     '_benchmark_ai_notes',
     '_benchmark_workbench',

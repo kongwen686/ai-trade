@@ -99,6 +99,17 @@ def _community_badge(signal: dict[str, object], *, table: bool = False) -> str:
     )
 
 
+def _volatility_badge(signal: dict[str, object], lang: str) -> str:
+    regime = str(signal.get("volatility_regime") or "normal")
+    label = str(signal.get("volatility_label") or _text(lang, "常态波动", "Normal Volatility"))
+    percentile = float(signal.get("volatility_percentile") or 0.0)
+    ratio = float(signal.get("volatility_ratio") or 1.0)
+    return (
+        f'<span class="ant-tag volatility-tag volatility-{escape(regime)}" '
+        f'title="percentile {percentile:.1f}% · ratio {ratio:.2f}x">{escape(label)} · P{percentile:.0f}</span>'
+    )
+
+
 def _scan_view_url(params: dict[str, object], lang: str, view_mode: str) -> str:
     query = {
         "quote_asset": params.get("quote_asset", ""),
@@ -181,13 +192,14 @@ def _signal_empty_state(lang: str) -> str:
 def _signal_card(signal: dict[str, object]) -> str:
     grade_class = str(signal["grade"]).lower().replace("+", "-plus")
     community = _community_badge(signal)
+    change_pct = float(signal["price_change_percent"])
 
     return f"""
-    <article class="ant-card signal-card grade-{grade_class}">
+    <article class="ant-card signal-card grade-{grade_class}" data-live-symbol="{escape(str(signal['symbol']))}">
       <div class="signal-topline">
         <div>
           <p class="symbol">{escape(str(signal["symbol"]))}</p>
-          <p class="subline">24h {float(signal["price_change_percent"]):+.2f}%</p>
+          <p class="subline">24h <span data-live-change class="{'positive' if change_pct >= 0 else 'negative'}">{change_pct:+.2f}%</span></p>
         </div>
         <div class="score-badge">
           <span>{escape(str(signal["grade"]))}</span>
@@ -202,7 +214,7 @@ def _signal_card(signal: dict[str, object]) -> str:
       <div class="metric-row">
         <div>
           <span>最新价</span>
-          <strong>{float(signal.get("last_price") or 0.0):.6g}</strong>
+          <strong data-live-price data-live-value="{float(signal.get('last_price') or 0.0):.12g}">{float(signal.get("last_price") or 0.0):.6g}</strong>
         </div>
         <div>
           <span>RSI</span>
@@ -232,7 +244,7 @@ def _signal_card(signal: dict[str, object]) -> str:
 
       <footer class="card-footer">
         <span>24h 成交额 {float(signal["quote_volume_m"]):.1f}M</span>
-        <span>MACD Hist {float(signal["macd_hist"]):+.4f}</span>
+        <span>{_volatility_badge(signal, "zh")} · ATR {float(signal.get("atr_pct") or 0.0):.2f}%</span>
       </footer>
     </article>
     """
@@ -251,6 +263,7 @@ def _signal_table(signals: list[dict[str, object]], lang: str) -> str:
         _text(lang, "成交额", "Quote Vol"),
         "RSI",
         _text(lang, "量比", "Vol Ratio"),
+        _text(lang, "波动状态", "Volatility"),
         "EMA",
         "MACD",
         _text(lang, "社区", "Community"),
@@ -267,6 +280,7 @@ def _signal_table(signals: list[dict[str, object]], lang: str) -> str:
             <col class="col-volume" />
             <col class="col-rsi" />
             <col class="col-volume-ratio" />
+            <col class="col-volatility" />
             <col class="col-ema" />
             <col class="col-macd" />
             <col class="col-community" />
@@ -290,15 +304,16 @@ def _signal_table(signals: list[dict[str, object]], lang: str) -> str:
         warning_tags = "".join(_table_warning_tag(item, lang) for item in warnings)
         rows.append(
             f"""
-            <tr>
+            <tr data-live-symbol="{escape(str(signal['symbol']))}">
               <td><strong class="table-symbol">{escape(str(signal["symbol"]))}</strong></td>
               <td><span class="table-grade grade-{grade_class}">{escape(grade)}</span></td>
               <td class="numeric strong">{float(signal["score"]):.1f}</td>
-              <td class="numeric">{float(signal.get("last_price") or 0.0):.6g}</td>
-              <td class="numeric">{float(signal["price_change_percent"]):+.2f}%</td>
+              <td class="numeric"><span data-live-price data-live-value="{float(signal.get('last_price') or 0.0):.12g}">{float(signal.get("last_price") or 0.0):.6g}</span></td>
+              <td class="numeric"><span data-live-change class="{'positive' if float(signal['price_change_percent']) >= 0 else 'negative'}">{float(signal["price_change_percent"]):+.2f}%</span></td>
               <td class="numeric">{float(signal["quote_volume_m"]):.1f}M</td>
               <td class="numeric">{float(signal["rsi_14"]):.1f}</td>
               <td class="numeric">{float(signal["volume_ratio"]):.2f}x</td>
+              <td>{_volatility_badge(signal, lang)}</td>
               <td class="numeric">{float(signal["ema_spread_pct"]):+.2f}%</td>
               <td class="numeric">{float(signal["macd_hist"]):+.4f}</td>
               <td class="community-cell">{community}</td>
@@ -363,6 +378,34 @@ def render_index_page(
         )
         scan_notice = f'<div class="notice notice-warning">{escape(notice_text)}</div>'
 
+    live_market = f"""
+      <section
+        class="scan-live-market"
+        data-live-market
+        data-live-state="connecting"
+        data-label-connecting="{escape(t('正在连接实时行情', 'Connecting live market'), quote=True)}"
+        data-label-live="{escape(t('实时行情在线', 'Live market online'), quote=True)}"
+        data-label-fallback="{escape(t('WebSocket 不可用，已切换 REST', 'WebSocket unavailable, using REST'), quote=True)}"
+        data-label-retry="{escape(t('实时行情重连中', 'Reconnecting live market'), quote=True)}"
+        data-label-websocket="Binance WebSocket"
+        data-label-rest="Binance REST"
+        aria-live="polite"
+      >
+        <div class="scan-live-state">
+          <span class="live-status-dot" aria-hidden="true"></span>
+          <div>
+            <strong data-live-status>{t("正在连接实时行情", "Connecting live market")}</strong>
+            <small>{t("价格与 24h 涨跌实时更新；评分、支撑阻力和波动状态来自最近一次完整扫描。", "Price and 24h change update live; scores, structure, and volatility remain from the latest full scan.")}</small>
+          </div>
+        </div>
+        <div class="scan-live-meta">
+          <span>{t("来源", "Source")} <strong data-live-source>Binance WebSocket</strong></span>
+          <span>{t("最近更新", "Updated")} <strong data-live-updated>-</strong></span>
+          <button type="button" class="button-secondary" data-live-reconnect>{t("重新连接", "Reconnect")}</button>
+        </div>
+      </section>
+    """
+
     options = "".join(_option(interval, str(params["interval"])) for interval in intervals)
     candidate_symbols = int(summary.get("candidate_symbols") or summary["scanned_symbols"])
     eligible_symbols = int(summary.get("eligible_symbols") or summary["scanned_symbols"])
@@ -387,6 +430,7 @@ def render_index_page(
     content = f"""
       <section class="ant-card control-panel">
         {scan_notice}
+        {live_market}
         <form method="get" class="ant-form filters">
           {_hidden_lang_input(active_lang)}
           <input type="hidden" name="view_mode" value="{escape(view_mode)}" />
@@ -426,6 +470,7 @@ def render_index_page(
       </section>
 
       {signal_results}
+      <script src="/static/scan_live.js" defer></script>
     """
     return _layout(
         page_title="Binance Signal Scanner",

@@ -28,6 +28,10 @@ def _signal(
     resistance_distance_pct: float = 0.0,
     support_strength: float = 0.0,
     structure_risk_reward: float = 0.0,
+    volatility_regime: str = "normal",
+    volatility_percentile: float = 50.0,
+    volatility_ratio: float = 1.0,
+    atr_pct: float = 1.0,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         symbol=symbol,
@@ -46,6 +50,10 @@ def _signal(
             resistance_distance_pct=resistance_distance_pct,
             support_strength=support_strength,
             structure_risk_reward=structure_risk_reward,
+            volatility_regime=volatility_regime,
+            volatility_percentile=volatility_percentile,
+            volatility_ratio=volatility_ratio,
+            atr_pct=atr_pct,
         ),
     )
 
@@ -177,6 +185,91 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(stored_events[0].status, "paper_filled")
         self.assertEqual(scanner.gateway.buy_calls, [])
         self.assertEqual(notifier.calls, [("BUY", "BTCUSDT", "BTCUSDT")])
+
+    def test_isolated_paper_mode_can_open_same_symbol_as_live_position(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            store.save(
+                [
+                    TradingPosition(
+                        symbol="BTCUSDT",
+                        quantity=0.5,
+                        entry_price=100.0,
+                        quote_notional=50.0,
+                        score=82.0,
+                        grade="A",
+                        opened_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                        stop_price=90.0,
+                        take_profit_price=120.0,
+                        mode="live",
+                    )
+                ]
+            )
+            scanner = FakeScanner([_signal(symbol="BTCUSDT", price=100.0)])
+            trader = AutoTrader(scanner=scanner, state_store=store, isolate_mode=True)
+
+            report = trader.run_once(
+                AutoTradeDefaults(
+                    enabled=True,
+                    mode="paper",
+                    quote_order_qty=50.0,
+                    score_threshold=75.0,
+                )
+            )
+            stored_positions = store.load()
+
+        paper_positions = [position for position in stored_positions if position.mode == "paper"]
+        live_positions = [position for position in stored_positions if position.mode == "live"]
+        self.assertEqual(len(paper_positions), 1)
+        self.assertEqual(len(live_positions), 1)
+        self.assertEqual(paper_positions[0].symbol, "BTCUSDT")
+        self.assertEqual(live_positions[0].symbol, "BTCUSDT")
+        self.assertEqual(report.events[0].status, "paper_filled")
+        self.assertEqual(scanner.gateway.buy_calls, [])
+
+    def test_paper_entry_prefers_live_ticker_price_over_signal_price(self) -> None:
+        class LivePriceGateway(FakeGateway):
+            def ticker_price(self, symbol):
+                self.ticker24hr_symbols_calls.append([symbol])
+                return 125.0
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            gateway = LivePriceGateway()
+            scanner = FakeScanner([_signal(price=100.0)], gateway=gateway)
+            trader = AutoTrader(scanner=scanner, state_store=store)
+
+            report = trader.run_once(AutoTradeDefaults(enabled=True, mode="paper", quote_order_qty=50.0, score_threshold=75.0))
+
+        self.assertEqual(len(report.open_positions), 1)
+        self.assertAlmostEqual(report.open_positions[0].entry_price, 125.0)
+        self.assertAlmostEqual(report.open_positions[0].quantity, 0.4)
+        self.assertEqual(gateway.ticker24hr_symbols_calls, [["BTCUSDT"]])
+
+    def test_entry_price_prefers_execution_gateway_over_scanner_gateway(self) -> None:
+        class LivePriceGateway(FakeGateway):
+            def __init__(self, price: float) -> None:
+                super().__init__()
+                self.price = price
+
+            def ticker_price(self, symbol):
+                self.ticker24hr_symbols_calls.append([symbol])
+                return self.price
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            scanner_gateway = LivePriceGateway(101.0)
+            execution_gateway = LivePriceGateway(130.0)
+            scanner = FakeScanner([_signal(price=100.0)], gateway=scanner_gateway)
+            trader = AutoTrader(scanner=scanner, state_store=store)
+            trader.set_execution_gateway(execution_gateway)
+
+            report = trader.run_once(AutoTradeDefaults(enabled=True, mode="paper", quote_order_qty=65.0, score_threshold=75.0))
+
+        self.assertEqual(len(report.open_positions), 1)
+        self.assertAlmostEqual(report.open_positions[0].entry_price, 130.0)
+        self.assertEqual(scanner_gateway.ticker24hr_symbols_calls, [])
+        self.assertEqual(execution_gateway.ticker24hr_symbols_calls, [["BTCUSDT"]])
 
     def test_paper_leverage_scales_notional_and_margin_roi(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -533,6 +626,36 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(report.events[0].status, "wait_pullback")
         self.assertIn("等待回调", report.events[0].message)
         self.assertEqual(stored_events[0].status, "wait_pullback")
+        self.assertEqual(notifier.calls, [])
+
+    def test_paper_run_waits_for_extreme_volatility_to_cool(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            scanner = FakeScanner(
+                [
+                    _signal(
+                        volatility_regime="extreme",
+                        volatility_percentile=98.0,
+                        volatility_ratio=2.4,
+                        atr_pct=4.2,
+                    )
+                ]
+            )
+            notifier = FakeTradeNotifier()
+            trader = AutoTrader(scanner=scanner, state_store=store, trade_notifier=notifier)
+
+            report = trader.run_once(
+                AutoTradeDefaults(
+                    enabled=True,
+                    mode="paper",
+                    quote_order_qty=50.0,
+                    score_threshold=75.0,
+                )
+            )
+
+        self.assertEqual(report.open_positions, [])
+        self.assertEqual(report.events[0].status, "wait_volatility")
+        self.assertIn("极端波动过滤", report.events[0].message)
         self.assertEqual(notifier.calls, [])
 
     def test_paper_run_waits_for_support_when_structure_risk_reward_is_weak(self) -> None:

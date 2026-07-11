@@ -70,6 +70,14 @@ class IndicatorSnapshot:
     resistance_strength: float = 0.0
     structure_risk_reward: float = 0.0
     pullback_from_high_pct: float = 0.0
+    volatility_regime: str = "normal"
+    volatility_label: str = "常态波动"
+    realized_volatility_pct: float = 0.0
+    baseline_volatility_pct: float = 0.0
+    volatility_percentile: float = 50.0
+    volatility_ratio: float = 1.0
+    atr_pct: float = 0.0
+    volatility_shock_sigma: float = 0.0
     closes: list[float] = field(default_factory=list)
 
 

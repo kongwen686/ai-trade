@@ -6,7 +6,17 @@ from .config import SETTINGS
 from .data_services import LLM_PROVIDER_PRESETS, PUBLIC_DATA_PRESETS, get_llm_provider, llm_provider_ids, public_data_preset_ids
 from .platform import okx_credential_state
 from .presets import apply_backtest_preset, list_backtest_presets
-from .runtime_config import AUTOTRADE_EXIT_PROFILES, AutoTradeDefaults, BacktestDefaults, IntelligenceDefaults, RuntimeConfig, ScanDefaults
+from .runtime_config import (
+    AUTOTRADE_EXIT_PROFILES,
+    TRADINGVIEW_BARS_MAX,
+    TRADINGVIEW_BARS_MIN,
+    AutoTradeDefaults,
+    BacktestDefaults,
+    CarryPaperDefaults,
+    IntelligenceDefaults,
+    RuntimeConfig,
+    ScanDefaults,
+)
 from .tradingview_data import TRADINGVIEW_INTERVALS
 
 SCAN_INTERVALS = {"15m", "1h", "2h", "4h", "1d"}
@@ -94,7 +104,7 @@ def _validate_runtime_config(config: RuntimeConfig) -> None:
     _validate_range(config.reddit_recent_window_hours, "Reddit Window Hours", minimum=1)
     _validate_range(config.reddit_max_results, "Reddit Max Results", minimum=5, maximum=100)
     _validate_range(config.x_account_weight_pct, "Account Weight", minimum=0, maximum=100)
-    _validate_range(config.tradingview_bars, "TradingView Bars", minimum=100, maximum=50000)
+    _validate_range(config.tradingview_bars, "TradingView Bars", minimum=TRADINGVIEW_BARS_MIN, maximum=TRADINGVIEW_BARS_MAX)
     if config.feishu_webhook_url and not config.feishu_webhook_url.startswith(("http://", "https://")):
         raise ValueError("Feishu Webhook URL 必须以 http:// 或 https:// 开头。")
     if not config.tradingview_exchange.strip().isalnum():
@@ -128,6 +138,8 @@ def _validate_runtime_config(config: RuntimeConfig) -> None:
     _validate_range(autotrade.min_entry_support_strength, "Auto Trade Min Entry Support Strength", minimum=0)
     _validate_range(autotrade.min_entry_risk_reward_ratio, "Auto Trade Min Entry Risk Reward", minimum=0)
     _validate_range(autotrade.min_entry_resistance_distance_pct, "Auto Trade Min Entry Resistance Distance", minimum=0)
+    _validate_range(autotrade.max_entry_volatility_percentile, "Auto Trade Max Volatility Percentile", minimum=50, maximum=100)
+    _validate_range(autotrade.max_entry_volatility_ratio, "Auto Trade Max Volatility Ratio", minimum=1, maximum=10)
     _validate_range(autotrade.support_stop_buffer_pct, "Auto Trade Support Stop Buffer", minimum=0)
     _validate_range(autotrade.resistance_take_profit_buffer_pct, "Auto Trade Resistance Take Profit Buffer", minimum=0)
     _validate_range(autotrade.stop_loss_pct, "Auto Trade Stop Loss", minimum=0.1)
@@ -153,6 +165,20 @@ def _validate_runtime_config(config: RuntimeConfig) -> None:
     _validate_range(intelligence.min_spread_bps, "Intelligence Min Spread", minimum=0)
     _validate_range(intelligence.whale_transfer_threshold_usd, "Whale Transfer Threshold", minimum=0)
 
+    carry = config.carry_paper_defaults
+    _validate_range(carry.notional_per_leg, "Carry Notional Per Leg", minimum=1)
+    _validate_range(carry.min_basis_bps, "Carry Min Basis", minimum=0)
+    _validate_range(carry.min_funding_bps, "Carry Min Funding", minimum=-100, maximum=100)
+    _validate_range(carry.exit_basis_bps, "Carry Exit Basis", minimum=-100, maximum=100)
+    _validate_range(carry.exit_funding_bps, "Carry Exit Funding", minimum=-100, maximum=100)
+    _validate_range(carry.stop_basis_bps, "Carry Stop Basis", minimum=0.1)
+    _validate_range(carry.max_holding_hours, "Carry Max Holding Hours", minimum=1, maximum=8760)
+    _validate_range(carry.max_positions, "Carry Max Positions", minimum=1, maximum=20)
+    _validate_range(carry.fee_bps_per_leg, "Carry Fee Per Leg", minimum=0, maximum=100)
+    _validate_range(carry.slippage_bps_per_leg, "Carry Slippage Per Leg", minimum=0, maximum=100)
+    if carry.exit_basis_bps >= carry.min_basis_bps:
+        raise ValueError("Carry Exit Basis 必须小于 Min Basis。")
+
     backtest = config.backtest_defaults
     _validate_range(backtest.lookback_bars, "Lookback Bars", minimum=60)
     _validate_range(backtest.portfolio_top_n, "Portfolio Top N", minimum=0)
@@ -175,6 +201,8 @@ def _validate_runtime_config(config: RuntimeConfig) -> None:
     _validate_range(backtest.min_buy_pressure, "Backtest Min Buy Pressure", minimum=0, maximum=1)
     _validate_range(backtest.min_rsi, "Min RSI", minimum=0, maximum=100)
     _validate_range(backtest.max_rsi, "Max RSI", minimum=0, maximum=100)
+    _validate_range(backtest.max_entry_volatility_percentile, "Backtest Max Volatility Percentile", minimum=50, maximum=100)
+    _validate_range(backtest.max_entry_volatility_ratio, "Backtest Max Volatility Ratio", minimum=1, maximum=10)
     if backtest.min_rsi > backtest.max_rsi:
         raise ValueError("Min RSI 不能大于 Max RSI。")
 
@@ -224,6 +252,10 @@ def _backtest_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "min_rsi": defaults.min_rsi,
         "max_rsi": defaults.max_rsi,
         "no_kdj_confirmation": defaults.no_kdj_confirmation,
+        "volatility_filter_enabled": defaults.volatility_filter_enabled,
+        "block_extreme_volatility": defaults.block_extreme_volatility,
+        "max_entry_volatility_percentile": defaults.max_entry_volatility_percentile,
+        "max_entry_volatility_ratio": defaults.max_entry_volatility_ratio,
     }
     return apply_backtest_preset(params, defaults.preset)
 
@@ -232,6 +264,7 @@ def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
     backtest = _backtest_params_from_config(config)
     autotrade = config.autotrade_defaults
     intelligence = config.intelligence_defaults
+    carry = config.carry_paper_defaults
     okx_state = okx_credential_state(config)
     return {
         "binance_recv_window_ms": config.binance_recv_window_ms,
@@ -276,6 +309,8 @@ def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "scan_min_trade_count": config.scan_defaults.min_trade_count,
         "autotrade_enabled": autotrade.enabled,
         "autotrade_mode": autotrade.mode,
+        "autotrade_paper_enabled": autotrade.paper_enabled,
+        "autotrade_live_enabled": autotrade.live_enabled,
         "autotrade_execution_exchange": autotrade.execution_exchange,
         "autotrade_quote_order_qty": autotrade.quote_order_qty,
         "autotrade_leverage": autotrade.leverage,
@@ -295,6 +330,10 @@ def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "autotrade_min_entry_support_strength": autotrade.min_entry_support_strength,
         "autotrade_min_entry_risk_reward_ratio": autotrade.min_entry_risk_reward_ratio,
         "autotrade_min_entry_resistance_distance_pct": autotrade.min_entry_resistance_distance_pct,
+        "autotrade_volatility_filter_enabled": autotrade.volatility_filter_enabled,
+        "autotrade_block_extreme_volatility": autotrade.block_extreme_volatility,
+        "autotrade_max_entry_volatility_percentile": autotrade.max_entry_volatility_percentile,
+        "autotrade_max_entry_volatility_ratio": autotrade.max_entry_volatility_ratio,
         "autotrade_support_stop_buffer_pct": autotrade.support_stop_buffer_pct,
         "autotrade_resistance_take_profit_buffer_pct": autotrade.resistance_take_profit_buffer_pct,
         "autotrade_stop_loss_pct": autotrade.stop_loss_pct,
@@ -324,6 +363,17 @@ def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "intelligence_min_intel_severity": intelligence.min_intel_severity,
         "intelligence_min_spread_bps": intelligence.min_spread_bps,
         "intelligence_whale_transfer_threshold_usd": intelligence.whale_transfer_threshold_usd,
+        "carry_paper_enabled": carry.enabled,
+        "carry_notional_per_leg": carry.notional_per_leg,
+        "carry_min_basis_bps": carry.min_basis_bps,
+        "carry_min_funding_bps": carry.min_funding_bps,
+        "carry_exit_basis_bps": carry.exit_basis_bps,
+        "carry_exit_funding_bps": carry.exit_funding_bps,
+        "carry_stop_basis_bps": carry.stop_basis_bps,
+        "carry_max_holding_hours": carry.max_holding_hours,
+        "carry_max_positions": carry.max_positions,
+        "carry_fee_bps_per_leg": carry.fee_bps_per_leg,
+        "carry_slippage_bps_per_leg": carry.slippage_bps_per_leg,
         **{f"backtest_{key}": value for key, value in backtest.items()},
     }
 
@@ -354,6 +404,9 @@ def _settings_status_from_config(config: RuntimeConfig, *, storage_mode: str, tr
         "storage_mode": storage_mode,
         "autotrade_enabled": config.autotrade_defaults.enabled,
         "autotrade_mode": config.autotrade_defaults.mode,
+        "autotrade_paper_enabled": config.autotrade_defaults.paper_enabled,
+        "autotrade_live_enabled": config.autotrade_defaults.live_enabled,
+        "carry_paper_enabled": config.carry_paper_defaults.enabled,
         "feishu_webhook_configured": bool(config.feishu_webhook_url),
         "intelligence_enabled": config.intelligence_defaults.enabled,
         "llm_enabled": config.intelligence_defaults.llm_enabled,
@@ -454,6 +507,29 @@ def _build_runtime_config(form: dict[str, list[str]], *, current_config: Runtime
         _get_first(form, "intelligence_openai_model", current_config.llm_model),
     ).strip() or get_llm_provider(llm_provider).default_model
     llm_base_url = _get_first(form, "llm_base_url", current_config.llm_base_url).strip()
+    current_autotrade = current_config.autotrade_defaults
+    autotrade_mode = _get_first(form, "autotrade_mode", current_autotrade.mode).strip() or "paper"
+    legacy_paper_enabled = current_autotrade.paper_enabled or (
+        current_autotrade.enabled and not current_autotrade.live_enabled and current_autotrade.mode == "paper"
+    )
+    legacy_live_enabled = current_autotrade.live_enabled or (
+        current_autotrade.enabled and not current_autotrade.paper_enabled and current_autotrade.mode == "live"
+    )
+    autotrade_enabled = _runtime_bool(form, "autotrade_enabled", current_autotrade.enabled)
+    autotrade_paper_enabled = _runtime_bool(form, "autotrade_paper_enabled", legacy_paper_enabled)
+    autotrade_live_enabled = _runtime_bool(form, "autotrade_live_enabled", legacy_live_enabled)
+    if "autotrade_enabled" in form and not autotrade_enabled:
+        if "autotrade_paper_enabled" not in form:
+            autotrade_paper_enabled = False
+        if "autotrade_live_enabled" not in form:
+            autotrade_live_enabled = False
+    if autotrade_enabled and not autotrade_paper_enabled and not autotrade_live_enabled:
+        if autotrade_mode == "live":
+            autotrade_live_enabled = True
+        else:
+            autotrade_paper_enabled = True
+    autotrade_enabled = autotrade_enabled or autotrade_paper_enabled or autotrade_live_enabled
+    autotrade_primary_mode = "live" if autotrade_live_enabled else ("paper" if autotrade_paper_enabled else autotrade_mode)
 
     config = RuntimeConfig(
         binance_api_key=keep_binance_key,
@@ -509,8 +585,10 @@ def _build_runtime_config(form: dict[str, list[str]], *, current_config: Runtime
             min_trade_count=_parse_int_value(_get_first(form, "scan_min_trade_count", str(current_config.scan_defaults.min_trade_count)), "Min Trade Count"),
         ),
         autotrade_defaults=AutoTradeDefaults(
-            enabled=_runtime_bool(form, "autotrade_enabled", current_config.autotrade_defaults.enabled),
-            mode=_get_first(form, "autotrade_mode", current_config.autotrade_defaults.mode).strip() or "paper",
+            enabled=autotrade_enabled,
+            mode=autotrade_primary_mode,
+            paper_enabled=autotrade_paper_enabled,
+            live_enabled=autotrade_live_enabled,
             execution_exchange=_get_first(
                 form,
                 "autotrade_execution_exchange",
@@ -553,6 +631,16 @@ def _build_runtime_config(form: dict[str, list[str]], *, current_config: Runtime
                 _get_first(form, "autotrade_min_entry_resistance_distance_pct", str(current_config.autotrade_defaults.min_entry_resistance_distance_pct)),
                 "Auto Trade Min Entry Resistance Distance",
             ),
+            volatility_filter_enabled=_runtime_bool(form, "autotrade_volatility_filter_enabled", current_config.autotrade_defaults.volatility_filter_enabled),
+            block_extreme_volatility=_runtime_bool(form, "autotrade_block_extreme_volatility", current_config.autotrade_defaults.block_extreme_volatility),
+            max_entry_volatility_percentile=_parse_float_value(
+                _get_first(form, "autotrade_max_entry_volatility_percentile", str(current_config.autotrade_defaults.max_entry_volatility_percentile)),
+                "Auto Trade Max Volatility Percentile",
+            ),
+            max_entry_volatility_ratio=_parse_float_value(
+                _get_first(form, "autotrade_max_entry_volatility_ratio", str(current_config.autotrade_defaults.max_entry_volatility_ratio)),
+                "Auto Trade Max Volatility Ratio",
+            ),
             support_stop_buffer_pct=_parse_float_value(
                 _get_first(form, "autotrade_support_stop_buffer_pct", str(current_config.autotrade_defaults.support_stop_buffer_pct)),
                 "Auto Trade Support Stop Buffer",
@@ -579,6 +667,49 @@ def _build_runtime_config(form: dict[str, list[str]], *, current_config: Runtime
             emergency_low_liquidity_min_score=_parse_float_value(_get_first(form, "autotrade_emergency_low_liquidity_min_score", str(current_config.autotrade_defaults.emergency_low_liquidity_min_score)), "Auto Trade Emergency Low Liquidity Score"),
             cooldown_minutes=_parse_int_value(_get_first(form, "autotrade_cooldown_minutes", str(current_config.autotrade_defaults.cooldown_minutes)), "Auto Trade Cooldown"),
             order_test_only=_runtime_bool(form, "autotrade_order_test_only", current_config.autotrade_defaults.order_test_only),
+        ),
+        carry_paper_defaults=CarryPaperDefaults(
+            enabled=_runtime_bool(form, "carry_paper_enabled", current_config.carry_paper_defaults.enabled),
+            notional_per_leg=_parse_float_value(
+                _get_first(form, "carry_notional_per_leg", str(current_config.carry_paper_defaults.notional_per_leg)),
+                "Carry Notional Per Leg",
+            ),
+            min_basis_bps=_parse_float_value(
+                _get_first(form, "carry_min_basis_bps", str(current_config.carry_paper_defaults.min_basis_bps)),
+                "Carry Min Basis",
+            ),
+            min_funding_bps=_parse_float_value(
+                _get_first(form, "carry_min_funding_bps", str(current_config.carry_paper_defaults.min_funding_bps)),
+                "Carry Min Funding",
+            ),
+            exit_basis_bps=_parse_float_value(
+                _get_first(form, "carry_exit_basis_bps", str(current_config.carry_paper_defaults.exit_basis_bps)),
+                "Carry Exit Basis",
+            ),
+            exit_funding_bps=_parse_float_value(
+                _get_first(form, "carry_exit_funding_bps", str(current_config.carry_paper_defaults.exit_funding_bps)),
+                "Carry Exit Funding",
+            ),
+            stop_basis_bps=_parse_float_value(
+                _get_first(form, "carry_stop_basis_bps", str(current_config.carry_paper_defaults.stop_basis_bps)),
+                "Carry Stop Basis",
+            ),
+            max_holding_hours=_parse_int_value(
+                _get_first(form, "carry_max_holding_hours", str(current_config.carry_paper_defaults.max_holding_hours)),
+                "Carry Max Holding Hours",
+            ),
+            max_positions=_parse_int_value(
+                _get_first(form, "carry_max_positions", str(current_config.carry_paper_defaults.max_positions)),
+                "Carry Max Positions",
+            ),
+            fee_bps_per_leg=_parse_float_value(
+                _get_first(form, "carry_fee_bps_per_leg", str(current_config.carry_paper_defaults.fee_bps_per_leg)),
+                "Carry Fee Per Leg",
+            ),
+            slippage_bps_per_leg=_parse_float_value(
+                _get_first(form, "carry_slippage_bps_per_leg", str(current_config.carry_paper_defaults.slippage_bps_per_leg)),
+                "Carry Slippage Per Leg",
+            ),
         ),
         intelligence_defaults=IntelligenceDefaults(
             enabled=_runtime_bool(form, "intelligence_enabled", current_config.intelligence_defaults.enabled),
@@ -626,6 +757,16 @@ def _build_runtime_config(form: dict[str, list[str]], *, current_config: Runtime
             min_rsi=_parse_float_value(_get_first(form, "backtest_min_rsi", str(current_config.backtest_defaults.min_rsi)), "Min RSI"),
             max_rsi=_parse_float_value(_get_first(form, "backtest_max_rsi", str(current_config.backtest_defaults.max_rsi)), "Max RSI"),
             no_kdj_confirmation=_runtime_bool(form, "backtest_no_kdj_confirmation", current_config.backtest_defaults.no_kdj_confirmation),
+            volatility_filter_enabled=_runtime_bool(form, "backtest_volatility_filter_enabled", current_config.backtest_defaults.volatility_filter_enabled),
+            block_extreme_volatility=_runtime_bool(form, "backtest_block_extreme_volatility", current_config.backtest_defaults.block_extreme_volatility),
+            max_entry_volatility_percentile=_parse_float_value(
+                _get_first(form, "backtest_max_entry_volatility_percentile", str(current_config.backtest_defaults.max_entry_volatility_percentile)),
+                "Backtest Max Volatility Percentile",
+            ),
+            max_entry_volatility_ratio=_parse_float_value(
+                _get_first(form, "backtest_max_entry_volatility_ratio", str(current_config.backtest_defaults.max_entry_volatility_ratio)),
+                "Backtest Max Volatility Ratio",
+            ),
         ),
     )
     _validate_runtime_config(config)

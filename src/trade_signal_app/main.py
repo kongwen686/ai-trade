@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict, is_dataclass, replace
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta, timezone
@@ -10,12 +11,21 @@ import argparse
 import json
 import os
 from threading import Event, RLock, Thread
+from time import monotonic
 from urllib.parse import parse_qs, urlencode, urlparse
+from uuid import uuid4
 
 from . import __version__
 from .app_state import AppState
 from .backtest import resolve_execution_config_from_binance
 from .binance_client import BinancePublicAPIError, parse_ticker
+from .btc_signal import BTC_SYMBOL, build_btc_signal_summary
+from .carry import (
+    build_carry_market_snapshots,
+    carry_position_from_payload,
+    carry_position_mark_payload,
+    run_carry_paper_cycle,
+)
 from .config import BASE_DIR, SETTINGS
 from .entry_filters import anti_chase_reason_from_config, structure_adjusted_exit_prices, structure_entry_reason_from_config
 from .feishu import FeishuNotificationError, FeishuTradeNotifier
@@ -23,15 +33,17 @@ from .intelligence import IntelligenceHub, IntelligenceSnapshot, LlmInsightClien
 from .okx_client import OKXSpotGateway
 from .onchain import DEFAULT_ONCHAIN_SYMBOLS, OPEN_MULTICHAIN_CONFIGS, OpenMultiChainOnchainProvider
 from .platform import build_platform_snapshot, okx_credential_state
-from .presets import list_backtest_presets
+from .presets import get_strategy_template, list_backtest_presets, list_strategy_templates
 from .runtime_config import AutoTradeDefaults, RuntimeConfig
 from . import main_settings as settings_handlers
 from . import main_backtest as backtest_handlers
 from . import main_scan as scan_handlers
 from .main_request_body import _read_body, _strategy_description_from_body
 from .storage import LocalDataStore
-from .strategy_builder import compile_strategy
+from .stat_arb import PairStatArbConfig, run_pair_stat_arb_from_archives
+from .strategy_builder import compile_strategy, compile_strategy_template
 from .time_utils import APP_TIMEZONE, now_app_time
+from .volatility import volatility_entry_reason
 from .trading import (
     AutoTrader,
     FILLED_TRADE_STATUSES,
@@ -42,7 +54,7 @@ from .trading import (
     TradingRunReport,
     TradingStateStore,
 )
-from .views import normalize_language, render_backtest_page, render_index_page, render_settings_page, render_terminal_module_page, render_terminal_page, render_trading_page
+from .views import normalize_language, render_backtest_page, render_btc_signal_page, render_index_page, render_settings_page, render_terminal_module_page, render_terminal_page, render_trading_page
 
 RUNTIME_CONFIG_PATH = BASE_DIR / "data" / "runtime_config.json"
 TRADING_STATE_PATH = BASE_DIR / "data" / "trading_state.json"
@@ -65,11 +77,26 @@ _ONCHAIN_MODULE_CACHE_LOCK = RLock()
 _ONCHAIN_MODULE_CACHE: dict[str, object] = {"key": None, "expires_at": datetime.min.replace(tzinfo=APP_TIMEZONE), "payload": None}
 _ONCHAIN_INFLIGHT: dict[tuple[object, ...], Future] = {}
 _ONCHAIN_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="onchain-refresh")
+_BACKTEST_JOB_LOCK = RLock()
+_BACKTEST_JOB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="backtest-job")
+_BACKTEST_JOBS: dict[str, dict[str, object]] = {}
+_BACKTEST_JOB_RESULTS: dict[str, tuple[dict[str, object], dict[str, object], str | None]] = {}
+BACKTEST_JOB_HISTORY_LIMIT = 20
+BACKTEST_JOB_ACTIVE_LIMIT = 3
 PAPER_AUTO_DEFAULT_INTERVAL_SECONDS = 300
 PAPER_AUTO_MIN_INTERVAL_SECONDS = 30
+FEISHU_DAILY_REPORT_HOUR = 22
+FEISHU_DAILY_REPORT_MINUTE = 0
+FEISHU_DAILY_REPORT_RETRY_SECONDS = 300
+FEISHU_DAILY_REPORT_HEARTBEAT_SECONDS = 60
+FEISHU_DAILY_REPORT_CATCHUP_WINDOW = timedelta(hours=12)
+FEISHU_DAILY_SUMMARY_CHANNEL = "feishu_daily_summary"
+FEISHU_BTC_SIGNAL_CHANNEL = "feishu_btc_signal"
 TRADING_STATUS_FILLED_EVENT_LIMIT = 5000
 TRADING_STATUS_DIAGNOSTIC_EVENT_LIMIT = 500
+REALTIME_MARKET_MAX_SYMBOLS = 40
 _PAPER_AUTO_LOCK = RLock()
+_CARRY_PAPER_LOCK = RLock()
 _PAPER_AUTO_STOP_EVENT: Event | None = None
 _PAPER_AUTO_THREAD: Thread | None = None
 _PAPER_AUTO_STATE: dict[str, object] = {
@@ -80,6 +107,21 @@ _PAPER_AUTO_STATE: dict[str, object] = {
     "last_run_at": None,
     "last_error": "",
     "run_count": 0,
+    "last_result": None,
+    "force_paper": True,
+    "mode_label": "paper_only",
+}
+_FEISHU_DAILY_REPORT_LOCK = RLock()
+_FEISHU_DAILY_REPORT_RUN_LOCK = RLock()
+_FEISHU_DAILY_REPORT_STOP_EVENT: Event | None = None
+_FEISHU_DAILY_REPORT_THREAD: Thread | None = None
+_FEISHU_DAILY_REPORT_STATE: dict[str, object] = {
+    "running": False,
+    "last_sent_date": None,
+    "last_btc_sent_date": None,
+    "last_run_at": None,
+    "last_error": "",
+    "next_run_at": None,
     "last_result": None,
 }
 _validate_runtime_config = settings_handlers._validate_runtime_config
@@ -200,7 +242,7 @@ def _health_payload() -> dict[str, object]:
     autotrade = runtime_config.autotrade_defaults
     live_confirmed = os.getenv("AI_TRADE_LIVE_CONFIRM", "") == LIVE_CONFIRM_VALUE
     blockers = []
-    if autotrade.mode == "live" and not autotrade.order_test_only:
+    if autotrade.live_enabled and not autotrade.order_test_only:
         selected_exchange = autotrade.execution_exchange.lower()
         if selected_exchange == "okx":
             okx_state = okx_credential_state(runtime_config)
@@ -220,10 +262,18 @@ def _health_payload() -> dict[str, object]:
         "database": database_status,
         "features": {
             "binance_public_market_data": True,
+            "binance_public_market_websocket": True,
+            "realtime_market_rest_fallback": True,
             "tradingview_unofficial_market_data": True,
             "binance_private_auth_configured": bool(runtime_config.binance_api_key and runtime_config.binance_api_secret),
             "okx_private_connector": okx_state["status"],
             "autotrade_execution_exchange": runtime_config.autotrade_defaults.execution_exchange,
+            "autotrade_paper_enabled": runtime_config.autotrade_defaults.paper_enabled,
+            "autotrade_live_enabled": runtime_config.autotrade_defaults.live_enabled,
+            "volatility_regime_filter": runtime_config.autotrade_defaults.volatility_filter_enabled,
+            "carry_paper_engine": True,
+            "carry_paper_entries_enabled": runtime_config.carry_paper_defaults.enabled,
+            "pair_stat_arb_backtest": True,
             "x_auth_configured": bool(runtime_config.x_bearer_token),
             "x_provider": runtime_config.x_provider,
             "x_nitter_configured": bool(runtime_config.x_nitter_base_url),
@@ -238,6 +288,8 @@ def _health_payload() -> dict[str, object]:
         "autotrade": {
             "enabled": autotrade.enabled,
             "mode": autotrade.mode,
+            "paper_enabled": autotrade.paper_enabled,
+            "live_enabled": autotrade.live_enabled,
             "order_test_only": autotrade.order_test_only,
             "live_confirmed": live_confirmed,
             "local_blockers": blockers,
@@ -260,6 +312,175 @@ def _trading_store() -> TradingStateStore:
 
 def _local_data_store() -> LocalDataStore:
     return LocalDataStore(LOCAL_DATABASE_PATH)
+
+
+def _carry_paper_status_payload() -> dict[str, object]:
+    runtime_config, _ = APP_STATE.snapshot()
+    config = runtime_config.carry_paper_defaults
+    store = _local_data_store()
+    positions = [
+        carry_position_from_payload(payload)
+        for payload in store.load_carry_paper_position_payloads()
+    ]
+    events = store.load_carry_paper_event_payloads(limit=5000)
+    closed_events = [event for event in events if str(event.get("action") or "").upper() == "CLOSE"]
+    position_payloads = [
+        _to_jsonable(carry_position_mark_payload(position, config))
+        for position in positions
+    ]
+    realized_pnl = sum(float(event.get("realized_pnl") or 0.0) for event in closed_events)
+    winning_trades = sum(1 for event in closed_events if float(event.get("realized_pnl") or 0.0) > 0)
+    return {
+        "enabled": config.enabled,
+        "mode": "paper",
+        "research_only": True,
+        "execution_boundary": "public market data -> local simulation -> SQLite; no exchange order gateway",
+        "config": _to_jsonable(config),
+        "open_positions": position_payloads,
+        "recent_events": events[:50],
+        "metrics": {
+            "open_positions": len(positions),
+            "gross_exposure": round(sum(position.notional_per_leg * 2 for position in positions), 8),
+            "unrealized_pnl": round(
+                sum(float(payload.get("net_pnl") or 0.0) for payload in position_payloads if isinstance(payload, dict)),
+                8,
+            ),
+            "closed_trades": len(closed_events),
+            "winning_trades": winning_trades,
+            "win_rate_pct": round((winning_trades / len(closed_events)) * 100, 2) if closed_events else 0.0,
+            "realized_pnl": round(realized_pnl, 8),
+            "funding_pnl": round(sum(float(event.get("funding_pnl") or 0.0) for event in closed_events), 8),
+            "costs": round(
+                sum(float(event.get("costs") or 0.0) for event in closed_events)
+                + sum(position.entry_cost for position in positions),
+                8,
+            ),
+        },
+    }
+
+
+def _run_carry_paper_once(
+    *,
+    market_sections: dict[str, object] | None = None,
+    observed_at: datetime | None = None,
+) -> dict[str, object]:
+    runtime_config, scanner = APP_STATE.snapshot()
+    sections = market_sections or _realtime_market_sections(runtime_config, scanner)
+    spreads = [item for item in sections.get("spreads", []) if isinstance(item, dict)]
+    funding_rates = [item for item in sections.get("funding_rates", []) if isinstance(item, dict)]
+    snapshots = build_carry_market_snapshots(
+        spreads,
+        funding_rates,
+        observed_at=observed_at,
+    )
+    with _CARRY_PAPER_LOCK:
+        store = _local_data_store()
+        positions = [
+            carry_position_from_payload(payload)
+            for payload in store.load_carry_paper_position_payloads()
+        ]
+        report = run_carry_paper_cycle(
+            snapshots=snapshots,
+            positions=positions,
+            config=runtime_config.carry_paper_defaults,
+        )
+        store.replace_carry_paper_positions(
+            [payload for payload in _to_jsonable(report.positions) if isinstance(payload, dict)]
+        )
+        store.append_carry_paper_events(
+            [payload for payload in _to_jsonable(report.events) if isinstance(payload, dict)]
+        )
+        payload = _to_jsonable(report)
+        if isinstance(payload, dict):
+            payload["warning"] = str(sections.get("warning") or "")
+            payload["status"] = _carry_paper_status_payload()
+    return payload if isinstance(payload, dict) else {}
+
+
+def _stat_arb_defaults_payload() -> dict[str, object]:
+    return {
+        "strategy": "pair_stat_arb",
+        "research_only": True,
+        "config": _to_jsonable(PairStatArbConfig()),
+        "input": {
+            "archive_a": "One symbol/interval CSV, ZIP, directory, or glob pattern.",
+            "archive_b": "A second symbol with the same interval and overlapping timestamps.",
+        },
+        "execution_model": "signal at aligned close; fill at next aligned open; no exchange orders",
+    }
+
+
+def _stat_arb_config_from_payload(payload: dict[str, object]) -> PairStatArbConfig:
+    defaults = PairStatArbConfig()
+    return PairStatArbConfig(
+        lookback_bars=int(payload.get("lookback_bars", defaults.lookback_bars)),
+        entry_z=float(payload.get("entry_z", defaults.entry_z)),
+        exit_z=float(payload.get("exit_z", defaults.exit_z)),
+        stop_z=float(payload.get("stop_z", defaults.stop_z)),
+        max_holding_bars=int(payload.get("max_holding_bars", defaults.max_holding_bars)),
+        min_correlation=float(payload.get("min_correlation", defaults.min_correlation)),
+        max_hedge_ratio=float(payload.get("max_hedge_ratio", defaults.max_hedge_ratio)),
+        notional_per_leg=float(payload.get("notional_per_leg", defaults.notional_per_leg)),
+        initial_equity=float(payload.get("initial_equity", defaults.initial_equity)),
+        fee_bps_per_leg=float(payload.get("fee_bps_per_leg", defaults.fee_bps_per_leg)),
+        slippage_bps_per_leg=float(payload.get("slippage_bps_per_leg", defaults.slippage_bps_per_leg)),
+    )
+
+
+def _run_stat_arb_backtest_payload(payload: dict[str, object]) -> dict[str, object]:
+    archive_a = str(payload.get("archive_a") or payload.get("archives_a") or "").strip()
+    archive_b = str(payload.get("archive_b") or payload.get("archives_b") or "").strip()
+    if not archive_a or not archive_b:
+        raise ValueError("配对回测需要同时提供 archive_a 和 archive_b。")
+    config = _stat_arb_config_from_payload(payload)
+    params = {
+        "archive_a": archive_a,
+        "archive_b": archive_b,
+        "config": _to_jsonable(config),
+    }
+    try:
+        report, sources = run_pair_stat_arb_from_archives(
+            archive_a=archive_a,
+            archive_b=archive_b,
+            config=config,
+        )
+    except ValueError as exc:
+        _local_data_store().record_research_backtest_run(
+            strategy="pair_stat_arb",
+            params=params,
+            payload={},
+            error=str(exc),
+        )
+        raise
+    report_payload = _to_jsonable(report)
+    result = {
+        "params": params,
+        "sources": sources,
+        "report": report_payload,
+    }
+    run_uid = _local_data_store().record_research_backtest_run(
+        strategy="pair_stat_arb",
+        params=params,
+        payload=result,
+    )
+    result["run_uid"] = run_uid
+    return result
+
+
+def _mapping_from_request_body(handler: BaseHTTPRequestHandler) -> dict[str, object]:
+    raw = _read_body(handler)
+    if "application/json" in handler.headers.get("Content-Type", ""):
+        try:
+            payload = json.loads(raw or "{}")
+        except json.JSONDecodeError as exc:
+            raise ValueError("JSON 请求体无效。") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("JSON 请求体根节点必须是对象。")
+        return payload
+    return {
+        key: values[0] if len(values) == 1 else values
+        for key, values in parse_qs(raw).items()
+    }
 
 
 def _record_backtest_run(params: dict[str, object], payload: dict[str, object], error: str | None) -> None:
@@ -306,19 +527,57 @@ def _notify_trade_event(
         print(f"Feishu trade notification failed for {event.action} {event.symbol}: {exc}")
 
 
-def _latest_prices_for_open_positions(
-    positions: list[TradingPosition],
-    scanner: object,
-    signal_prices: dict[str, float] | None = None,
-) -> dict[str, float]:
-    latest_prices = {symbol.upper(): price for symbol, price in (signal_prices or {}).items() if price > 0}
-    missing_symbols = {position.symbol.upper() for position in positions if position.symbol.upper() not in latest_prices}
-    if not missing_symbols:
-        return latest_prices
+def _live_prices_for_symbols(scanner: object, symbols: set[str] | list[str] | tuple[str, ...]) -> dict[str, float]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for symbol in symbols:
+        normalized_symbol = str(symbol).upper().strip()
+        if normalized_symbol and normalized_symbol not in seen:
+            normalized.append(normalized_symbol)
+            seen.add(normalized_symbol)
+    if not normalized:
+        return {}
 
     gateway = getattr(scanner, "gateway", None)
+    prices: dict[str, float] = {}
+    ticker_prices = getattr(gateway, "ticker_prices", None)
+    if callable(ticker_prices):
+        try:
+            for symbol, price in (ticker_prices(normalized) or {}).items():
+                normalized_symbol = str(symbol).upper()
+                parsed_price = float(price)
+                if normalized_symbol in seen and parsed_price > 0:
+                    prices[normalized_symbol] = parsed_price
+        except Exception:  # noqa: BLE001
+            prices = {}
+
+    missing_symbols = [symbol for symbol in normalized if symbol not in prices]
+    ticker_price = getattr(gateway, "ticker_price", None)
+    if missing_symbols and callable(ticker_price):
+        for symbol in list(missing_symbols):
+            try:
+                parsed_price = float(ticker_price(symbol))
+            except Exception:  # noqa: BLE001
+                continue
+            if parsed_price > 0:
+                prices[symbol] = parsed_price
+        missing_symbols = [symbol for symbol in normalized if symbol not in prices]
+
+    ticker24hr_symbols = getattr(gateway, "ticker24hr_symbols", None)
+    if missing_symbols and callable(ticker24hr_symbols):
+        try:
+            for row in ticker24hr_symbols(missing_symbols):
+                symbol = str(row.get("symbol", "")).upper()
+                if symbol in missing_symbols:
+                    parsed_price = float(row["lastPrice"])
+                    if parsed_price > 0:
+                        prices[symbol] = parsed_price
+        except Exception:  # noqa: BLE001
+            pass
+        missing_symbols = [symbol for symbol in normalized if symbol not in prices]
+
     cached_ticker24hr = getattr(gateway, "cached_ticker24hr", None)
-    if callable(cached_ticker24hr):
+    if missing_symbols and callable(cached_ticker24hr):
         try:
             cached_rows = cached_ticker24hr() or []
         except Exception:  # noqa: BLE001
@@ -328,19 +587,581 @@ def _latest_prices_for_open_positions(
                 ticker = parse_ticker(row)
             except (KeyError, TypeError, ValueError):
                 continue
-            if ticker.symbol.upper() in missing_symbols:
-                latest_prices[ticker.symbol.upper()] = ticker.last_price
-        missing_symbols = {symbol for symbol in missing_symbols if symbol not in latest_prices}
+            symbol = ticker.symbol.upper()
+            if symbol in missing_symbols and ticker.last_price > 0:
+                prices[symbol] = ticker.last_price
+    return prices
 
+
+def _realtime_market_symbols(query: dict[str, list[str]]) -> list[str]:
+    raw_values = query.get("symbols", [])
+    symbols: list[str] = []
+    seen: set[str] = set()
+    for raw_value in raw_values:
+        for value in str(raw_value).replace("\n", ",").split(","):
+            symbol = value.strip().upper()
+            if not symbol or symbol in seen:
+                continue
+            if not symbol.isalnum():
+                raise ValueError(f"无效实时行情标的：{symbol}")
+            symbols.append(symbol)
+            seen.add(symbol)
+    if not symbols:
+        symbols = list(MARKET_TICKER_SYMBOLS)
+    if len(symbols) > REALTIME_MARKET_MAX_SYMBOLS:
+        raise ValueError(f"实时行情单次最多查询 {REALTIME_MARKET_MAX_SYMBOLS} 个标的。")
+    return symbols
+
+
+def _realtime_market_payload(query: dict[str, list[str]]) -> dict[str, object]:
+    symbols = _realtime_market_symbols(query)
+    _, scanner = APP_STATE.snapshot()
+    gateway = getattr(scanner, "gateway", scanner)
+    prices = _live_prices_for_symbols(scanner, symbols)
+    changes: dict[str, float] = {}
     ticker24hr_symbols = getattr(gateway, "ticker24hr_symbols", None)
-    if missing_symbols and callable(ticker24hr_symbols):
+    if callable(ticker24hr_symbols):
         try:
-            for row in ticker24hr_symbols(sorted(missing_symbols)):
-                symbol = str(row.get("symbol", "")).upper()
-                if symbol in missing_symbols:
-                    latest_prices[symbol] = float(row["lastPrice"])
+            for row in ticker24hr_symbols(symbols):
+                ticker = parse_ticker(row)
+                if ticker.symbol.upper() in symbols:
+                    changes[ticker.symbol.upper()] = ticker.price_change_percent
         except Exception:  # noqa: BLE001
-            return latest_prices
+            changes = {}
+    items = [
+        {
+            "symbol": symbol,
+            "price": prices[symbol],
+            "change_pct": changes.get(symbol),
+        }
+        for symbol in symbols
+        if symbol in prices
+    ]
+    return {
+        "generated_at": now_app_time().isoformat(),
+        "source": "binance_spot_rest",
+        "read_only": True,
+        "requested_symbols": len(symbols),
+        "returned_symbols": len(items),
+        "items": items,
+    }
+
+
+def _live_price_for_symbol(scanner: object, symbol: str, fallback: float = 0.0) -> float:
+    normalized = symbol.upper().strip()
+    live_price = _live_prices_for_symbols(scanner, [normalized]).get(normalized)
+    return live_price if live_price and live_price > 0 else fallback
+
+
+def _build_btc_signal_summary(
+    now: datetime | None = None,
+    *,
+    include_backtests: bool = True,
+) -> dict[str, object]:
+    runtime_config, scanner = APP_STATE.snapshot()
+    return build_btc_signal_summary(
+        cache_root=TRADINGVIEW_CACHE_DIR,
+        exchange=runtime_config.tradingview_exchange or "BINANCE",
+        generated_at=now,
+        include_backtests=include_backtests,
+        market_price=_live_price_for_symbol(scanner, BTC_SYMBOL),
+    )
+
+
+def _notify_btc_signal(
+    notifier: FeishuTradeNotifier | None,
+    *,
+    summary: dict[str, object],
+) -> bool:
+    if notifier is None:
+        return False
+    try:
+        return notifier.notify_btc_signal(summary=summary)
+    except FeishuNotificationError as exc:
+        print(f"Feishu BTC signal notification failed: {exc}")
+        return False
+
+
+def _btc_signal_payload(query: dict[str, list[str]] | None = None) -> dict[str, object]:
+    query = query or {}
+    include_backtests = not _parse_bool_flag(query, "fast")
+    return {"summary": _build_btc_signal_summary(include_backtests=include_backtests)}
+
+
+def _push_btc_signal_payload(query: dict[str, list[str]] | None = None) -> dict[str, object]:
+    runtime_config, _ = APP_STATE.snapshot()
+    notifier = _feishu_trade_notifier(runtime_config)
+    payload = _btc_signal_payload(query)
+    sent = _notify_btc_signal(notifier, summary=payload["summary"])
+    return {**payload, "sent": bool(sent), "reason": "sent" if sent else "not_configured_or_failed"}
+
+
+def _next_feishu_daily_report_at(now: datetime | None = None) -> datetime:
+    current = (now or now_app_time()).astimezone(APP_TIMEZONE)
+    target = current.replace(
+        hour=FEISHU_DAILY_REPORT_HOUR,
+        minute=FEISHU_DAILY_REPORT_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    if current > target:
+        target += timedelta(days=1)
+    return target
+
+
+def _feishu_notification_key(channel: str, report_date: str) -> str:
+    return f"{channel}:{report_date}"
+
+
+def _load_feishu_delivery(channel: str, report_date: str) -> dict[str, object] | None:
+    try:
+        return _local_data_store().load_notification_delivery(_feishu_notification_key(channel, report_date))
+    except Exception as exc:  # noqa: BLE001
+        with _FEISHU_DAILY_REPORT_LOCK:
+            _FEISHU_DAILY_REPORT_STATE["last_error"] = f"调度状态读取失败：{exc}"
+        return None
+
+
+def _record_feishu_delivery(
+    channel: str,
+    report_date: str,
+    *,
+    status: str,
+    error: str = "",
+    metadata: dict[str, object] | None = None,
+) -> dict[str, object]:
+    try:
+        return _local_data_store().record_notification_delivery(
+            notification_key=_feishu_notification_key(channel, report_date),
+            channel=channel,
+            report_date=report_date,
+            status=status,
+            error=error,
+            metadata=metadata,
+        )
+    except Exception as exc:  # noqa: BLE001
+        with _FEISHU_DAILY_REPORT_LOCK:
+            _FEISHU_DAILY_REPORT_STATE["last_error"] = f"调度状态写入失败：{exc}"
+        print(f"Feishu daily scheduler state persistence failed: {exc}", flush=True)
+        return {}
+
+
+def _feishu_delivery_sent(channel: str, report_date: str) -> bool:
+    delivery = _load_feishu_delivery(channel, report_date)
+    if delivery is not None:
+        return delivery.get("status") == "sent"
+    with _FEISHU_DAILY_REPORT_LOCK:
+        state_key = "last_sent_date" if channel == FEISHU_DAILY_SUMMARY_CHANNEL else "last_btc_sent_date"
+        return _FEISHU_DAILY_REPORT_STATE.get(state_key) == report_date
+
+
+def _feishu_report_complete(report_date: str) -> bool:
+    return _feishu_delivery_sent(FEISHU_DAILY_SUMMARY_CHANNEL, report_date) and _feishu_delivery_sent(
+        FEISHU_BTC_SIGNAL_CHANNEL,
+        report_date,
+    )
+
+
+def _pending_feishu_daily_report_at(now: datetime | None = None) -> datetime:
+    current = (now or now_app_time()).astimezone(APP_TIMEZONE)
+    today_target = current.replace(
+        hour=FEISHU_DAILY_REPORT_HOUR,
+        minute=FEISHU_DAILY_REPORT_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    previous_target = today_target - timedelta(days=1)
+
+    candidate: datetime | None = None
+    if current >= today_target:
+        candidate = today_target
+    elif current - previous_target <= FEISHU_DAILY_REPORT_CATCHUP_WINDOW:
+        candidate = previous_target
+
+    if candidate is not None and not _feishu_report_complete(candidate.date().isoformat()):
+        return candidate
+
+    next_target = _next_feishu_daily_report_at(current)
+    if next_target <= current:
+        next_target += timedelta(days=1)
+    return next_target
+
+
+def _feishu_daily_report_status_payload(now: datetime | None = None) -> dict[str, object]:
+    current = (now or now_app_time()).astimezone(APP_TIMEZONE)
+    runtime_config, _ = APP_STATE.snapshot()
+    try:
+        deliveries = _local_data_store().list_notification_deliveries(limit=10)
+        storage_error = ""
+    except Exception as exc:  # noqa: BLE001
+        deliveries = []
+        storage_error = str(exc)
+    with _FEISHU_DAILY_REPORT_LOCK:
+        state = dict(_FEISHU_DAILY_REPORT_STATE)
+        thread_alive = _FEISHU_DAILY_REPORT_THREAD is not None and _FEISHU_DAILY_REPORT_THREAD.is_alive()
+    return {
+        **state,
+        "running": bool(state.get("running") and thread_alive),
+        "thread_alive": thread_alive,
+        "webhook_configured": bool(runtime_config.feishu_webhook_url.strip()),
+        "timezone": "UTC+8",
+        "scheduled_time": f"{FEISHU_DAILY_REPORT_HOUR:02d}:{FEISHU_DAILY_REPORT_MINUTE:02d}",
+        "retry_seconds": FEISHU_DAILY_REPORT_RETRY_SECONDS,
+        "catchup_hours": FEISHU_DAILY_REPORT_CATCHUP_WINDOW.total_seconds() / 3600,
+        "calculated_next_run_at": _pending_feishu_daily_report_at(current).isoformat(),
+        "deliveries": deliveries,
+        "storage_error": storage_error,
+    }
+
+
+def _manual_feishu_report_at(form: dict[str, list[str]]) -> datetime:
+    report_date = _get_first(form, "report_date", "").strip()
+    if report_date:
+        try:
+            parsed = datetime.strptime(report_date, "%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError("report_date 必须使用 YYYY-MM-DD 格式。") from exc
+        return parsed.replace(
+            hour=FEISHU_DAILY_REPORT_HOUR,
+            minute=FEISHU_DAILY_REPORT_MINUTE,
+            second=0,
+            microsecond=0,
+            tzinfo=APP_TIMEZONE,
+        )
+    current = now_app_time()
+    pending = _pending_feishu_daily_report_at(current)
+    return pending if pending <= current else current
+
+
+def _event_in_app_day(event: TradingEvent, start: datetime, end: datetime) -> bool:
+    created_at = event.created_at
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=APP_TIMEZONE)
+    created_at = created_at.astimezone(APP_TIMEZONE)
+    return start <= created_at < end
+
+
+def _build_feishu_daily_summary(now: datetime | None = None) -> dict[str, object]:
+    generated_at = (now or now_app_time()).astimezone(APP_TIMEZONE)
+    day_start = generated_at.replace(hour=0, minute=0, second=0, microsecond=0)
+    runtime_config, scanner = APP_STATE.snapshot()
+    warnings: list[str] = []
+
+    try:
+        scan_payload, _ = scan_handlers._scan_payload(
+            {},
+            runtime_config=runtime_config,
+            scanner=scanner,
+            force_refresh=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        scan_payload = {"summary": {}, "signals": []}
+        warnings.append(f"信号扫描统计失败：{exc}")
+    scan_summary = scan_payload.get("summary") if isinstance(scan_payload.get("summary"), dict) else {}
+    scan_signals = scan_payload.get("signals") if isinstance(scan_payload.get("signals"), list) else []
+
+    try:
+        store = _trading_store()
+        positions = store.load()
+        events = _sort_trading_events_desc(store.load_events())
+        latest_prices = _latest_prices_for_open_positions(positions, scanner)
+        account_metrics = _paper_account_metrics(positions=positions, events=events, latest_prices=latest_prices)
+    except Exception as exc:  # noqa: BLE001
+        positions = []
+        events = []
+        account_metrics = {}
+        warnings.append(f"交易账户统计失败：{exc}")
+    today_events = [event for event in events if _event_in_app_day(event, day_start, generated_at + timedelta(seconds=1))]
+    today_filled = [event for event in today_events if _is_filled_trade_event(event)]
+    today_sells = [event for event in today_filled if event.action == "SELL"]
+    today_realized_pnl = sum(float(event.realized_pnl or 0.0) for event in today_sells)
+
+    try:
+        terminal_payload = _fast_terminal_payload()
+    except Exception as exc:  # noqa: BLE001
+        terminal_payload = {}
+        warnings.append(f"情报与风控统计失败：{exc}")
+    llm_insight = terminal_payload.get("llm_insight") if isinstance(terminal_payload.get("llm_insight"), dict) else {}
+    intel_metrics = llm_insight.get("metrics") if isinstance(llm_insight.get("metrics"), dict) else {}
+    execution_risk = terminal_payload.get("execution_risk") if isinstance(terminal_payload.get("execution_risk"), dict) else {}
+    blocked_symbols = execution_risk.get("blocked_symbols") if isinstance(execution_risk.get("blocked_symbols"), dict) else {}
+    allowed_symbols = execution_risk.get("allowed_symbols") if isinstance(execution_risk.get("allowed_symbols"), list) else []
+
+    return {
+        "date": generated_at.date().isoformat(),
+        "generated_at": generated_at.isoformat(),
+        "scan": {
+            "scanned_symbols": int(float(scan_summary.get("scanned_symbols") or 0)),
+            "returned_signals": int(float(scan_summary.get("returned_signals") or len(scan_signals))),
+            "top_symbols": [str(item.get("symbol") or "").upper() for item in scan_signals if isinstance(item, dict) and item.get("symbol")][:8],
+            "cached": bool(scan_payload.get("cached")),
+            "fallback": bool(scan_payload.get("fallback")),
+        },
+        "trading": {
+            "today_trades": len(today_filled),
+            "today_buys": sum(1 for event in today_filled if event.action == "BUY"),
+            "today_sells": len(today_sells),
+            "today_realized_pnl": round(today_realized_pnl, 8),
+            "total_trades": int(float(account_metrics.get("total_trades") or 0)),
+            "closed_trades": int(float(account_metrics.get("closed_trades") or 0)),
+            "win_rate_pct": float(account_metrics.get("win_rate_pct") or 0.0),
+            "profit_loss_ratio": float(account_metrics.get("profit_loss_ratio") or 0.0),
+            "realized_pnl": float(account_metrics.get("realized_pnl") or 0.0),
+            "unrealized_pnl": float(account_metrics.get("unrealized_pnl") or 0.0),
+            "total_pnl": float(account_metrics.get("total_pnl") or 0.0),
+            "open_positions": len(positions),
+        },
+        "intelligence": {
+            "intel_items": int(float(intel_metrics.get("intel_items") or 0)),
+            "onchain_events": int(float(intel_metrics.get("onchain_events") or 0)),
+            "strategy_hits": int(float(intel_metrics.get("strategy_hits") or 0)),
+            "spreads": int(float(intel_metrics.get("spreads") or 0)),
+            "funding_rates": int(float(intel_metrics.get("funding_rates") or 0)),
+        },
+        "risk": {
+            "status": str(execution_risk.get("status") or "unknown"),
+            "risk_score": float(execution_risk.get("risk_score") or 0.0),
+            "allowed": len(allowed_symbols),
+            "blocked": len(blocked_symbols),
+        },
+        "warnings": warnings,
+    }
+
+
+def _run_feishu_daily_report_once(now: datetime | None = None) -> dict[str, object]:
+    report_at = (now or now_app_time()).astimezone(APP_TIMEZONE)
+    report_date = report_at.date().isoformat()
+    attempted_at = now_app_time()
+    with _FEISHU_DAILY_REPORT_RUN_LOCK:
+        daily_complete = _feishu_delivery_sent(FEISHU_DAILY_SUMMARY_CHANNEL, report_date)
+        btc_complete = _feishu_delivery_sent(FEISHU_BTC_SIGNAL_CHANNEL, report_date)
+        if daily_complete and btc_complete:
+            result = {
+                "sent": False,
+                "daily_sent": False,
+                "btc_sent": False,
+                "complete": True,
+                "date": report_date,
+                "reason": "already_sent",
+                "error": "",
+            }
+            with _FEISHU_DAILY_REPORT_LOCK:
+                _FEISHU_DAILY_REPORT_STATE.update(
+                    {
+                        "last_sent_date": report_date,
+                        "last_btc_sent_date": report_date,
+                        "last_run_at": attempted_at.isoformat(),
+                        "last_error": "",
+                        "last_result": result,
+                    }
+                )
+            return result
+
+        runtime_config, _ = APP_STATE.snapshot()
+        notifier = _feishu_trade_notifier(runtime_config)
+        if notifier is None:
+            error = "飞书 Webhook 未配置"
+            if not daily_complete:
+                _record_feishu_delivery(
+                    FEISHU_DAILY_SUMMARY_CHANNEL,
+                    report_date,
+                    status="not_configured",
+                    error=error,
+                )
+            if not btc_complete:
+                _record_feishu_delivery(
+                    FEISHU_BTC_SIGNAL_CHANNEL,
+                    report_date,
+                    status="not_configured",
+                    error=error,
+                )
+            result = {
+                "sent": False,
+                "daily_sent": False,
+                "btc_sent": False,
+                "complete": False,
+                "date": report_date,
+                "reason": "not_configured",
+                "error": error,
+            }
+            with _FEISHU_DAILY_REPORT_LOCK:
+                _FEISHU_DAILY_REPORT_STATE.update(
+                    {
+                        "last_run_at": attempted_at.isoformat(),
+                        "last_error": error,
+                        "last_result": result,
+                    }
+                )
+            return result
+
+        daily_sent = False
+        btc_sent = False
+        errors: list[str] = []
+        if not daily_complete:
+            try:
+                summary = _build_feishu_daily_summary(now=report_at)
+                daily_sent = bool(notifier.notify_daily_summary(summary=summary))
+                if not daily_sent:
+                    raise FeishuNotificationError("飞书接口未确认日报发送成功")
+                _record_feishu_delivery(
+                    FEISHU_DAILY_SUMMARY_CHANNEL,
+                    report_date,
+                    status="sent",
+                    metadata={
+                        "generated_at": summary.get("generated_at"),
+                        "today_trades": (summary.get("trading") or {}).get("today_trades")
+                        if isinstance(summary.get("trading"), dict)
+                        else 0,
+                        "today_realized_pnl": (summary.get("trading") or {}).get("today_realized_pnl")
+                        if isinstance(summary.get("trading"), dict)
+                        else 0.0,
+                    },
+                )
+                daily_complete = True
+            except Exception as exc:  # noqa: BLE001
+                message = f"每日统计推送失败：{exc}"
+                errors.append(message)
+                _record_feishu_delivery(
+                    FEISHU_DAILY_SUMMARY_CHANNEL,
+                    report_date,
+                    status="failed",
+                    error=str(exc),
+                )
+                print(f"Feishu daily summary notification failed: {exc}", flush=True)
+
+        if not btc_complete:
+            try:
+                btc_summary = _build_btc_signal_summary(now=report_at, include_backtests=True)
+                btc_sent = bool(notifier.notify_btc_signal(summary=btc_summary))
+                if not btc_sent:
+                    raise FeishuNotificationError("飞书接口未确认 BTC 日报发送成功")
+                _record_feishu_delivery(
+                    FEISHU_BTC_SIGNAL_CHANNEL,
+                    report_date,
+                    status="sent",
+                    metadata={
+                        "generated_at": btc_summary.get("generated_at"),
+                        "action": btc_summary.get("action"),
+                        "price": btc_summary.get("price"),
+                    },
+                )
+                btc_complete = True
+            except Exception as exc:  # noqa: BLE001
+                message = f"BTC 专属信号推送失败：{exc}"
+                errors.append(message)
+                _record_feishu_delivery(
+                    FEISHU_BTC_SIGNAL_CHANNEL,
+                    report_date,
+                    status="failed",
+                    error=str(exc),
+                )
+                print(f"Feishu BTC signal notification failed: {exc}", flush=True)
+
+        complete = bool(daily_complete and btc_complete)
+        sent = bool(daily_sent or btc_sent)
+        result = {
+            "sent": sent,
+            "daily_sent": daily_sent,
+            "btc_sent": btc_sent,
+            "complete": complete,
+            "date": report_date,
+            "reason": "sent" if complete and sent else "already_sent" if complete else "partial" if sent else "error",
+            "error": "；".join(errors),
+        }
+        with _FEISHU_DAILY_REPORT_LOCK:
+            _FEISHU_DAILY_REPORT_STATE.update(
+                {
+                    "last_run_at": attempted_at.isoformat(),
+                    "last_error": result["error"],
+                    "last_sent_date": report_date if daily_complete else _FEISHU_DAILY_REPORT_STATE.get("last_sent_date"),
+                    "last_btc_sent_date": report_date if btc_complete else _FEISHU_DAILY_REPORT_STATE.get("last_btc_sent_date"),
+                    "last_result": result,
+                }
+            )
+        return result
+
+
+def _feishu_daily_report_worker(stop_event: Event) -> None:
+    retry_not_before: datetime | None = None
+    while not stop_event.is_set():
+        current = now_app_time()
+        try:
+            target = _pending_feishu_daily_report_at(current)
+            due_at = target
+            if target <= current and retry_not_before is not None and retry_not_before > current:
+                due_at = retry_not_before
+            with _FEISHU_DAILY_REPORT_LOCK:
+                _FEISHU_DAILY_REPORT_STATE["next_run_at"] = due_at.isoformat()
+
+            wait_seconds = max(0.0, (due_at - current).total_seconds())
+            if wait_seconds > 0:
+                if stop_event.wait(min(wait_seconds, FEISHU_DAILY_REPORT_HEARTBEAT_SECONDS)):
+                    break
+                continue
+
+            result = _run_feishu_daily_report_once(now=target)
+            retry_not_before = None if result.get("complete") else now_app_time() + timedelta(seconds=FEISHU_DAILY_REPORT_RETRY_SECONDS)
+        except Exception as exc:  # noqa: BLE001
+            retry_not_before = now_app_time() + timedelta(seconds=FEISHU_DAILY_REPORT_RETRY_SECONDS)
+            with _FEISHU_DAILY_REPORT_LOCK:
+                _FEISHU_DAILY_REPORT_STATE.update(
+                    {
+                        "last_run_at": now_app_time().isoformat(),
+                        "last_error": str(exc),
+                        "next_run_at": retry_not_before.isoformat(),
+                    }
+                )
+            print(f"Feishu daily report scheduler failed: {exc}", flush=True)
+    with _FEISHU_DAILY_REPORT_LOCK:
+        if _FEISHU_DAILY_REPORT_STOP_EVENT is stop_event:
+            _FEISHU_DAILY_REPORT_STATE.update({"running": False, "next_run_at": None})
+
+
+def _start_feishu_daily_report_scheduler() -> dict[str, object]:
+    global _FEISHU_DAILY_REPORT_STOP_EVENT, _FEISHU_DAILY_REPORT_THREAD
+    with _FEISHU_DAILY_REPORT_LOCK:
+        if _FEISHU_DAILY_REPORT_THREAD is not None and _FEISHU_DAILY_REPORT_THREAD.is_alive():
+            return dict(_FEISHU_DAILY_REPORT_STATE)
+        stop_event = Event()
+        _FEISHU_DAILY_REPORT_STOP_EVENT = stop_event
+        _FEISHU_DAILY_REPORT_THREAD = Thread(
+            target=_feishu_daily_report_worker,
+            args=(stop_event,),
+            name="feishu-daily-report",
+            daemon=True,
+        )
+        _FEISHU_DAILY_REPORT_STATE.update(
+            {
+                "running": True,
+                "last_error": "",
+                "next_run_at": _pending_feishu_daily_report_at().isoformat(),
+            }
+        )
+        _FEISHU_DAILY_REPORT_THREAD.start()
+        return dict(_FEISHU_DAILY_REPORT_STATE)
+
+
+def _stop_feishu_daily_report_scheduler() -> dict[str, object]:
+    with _FEISHU_DAILY_REPORT_LOCK:
+        stop_event = _FEISHU_DAILY_REPORT_STOP_EVENT
+        thread = _FEISHU_DAILY_REPORT_THREAD
+        if stop_event is not None:
+            stop_event.set()
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=2)
+    with _FEISHU_DAILY_REPORT_LOCK:
+        _FEISHU_DAILY_REPORT_STATE.update({"running": False, "next_run_at": None})
+        return dict(_FEISHU_DAILY_REPORT_STATE)
+
+
+def _latest_prices_for_open_positions(
+    positions: list[TradingPosition],
+    scanner: object,
+    signal_prices: dict[str, float] | None = None,
+) -> dict[str, float]:
+    latest_prices = {symbol.upper(): price for symbol, price in (signal_prices or {}).items() if price > 0}
+    position_symbols = {position.symbol.upper() for position in positions}
+    latest_prices.update(_live_prices_for_symbols(scanner, sorted(position_symbols)))
     return latest_prices
 
 
@@ -425,10 +1246,15 @@ def _paper_account_metrics(
     positions: list[TradingPosition],
     events: list[TradingEvent],
     latest_prices: dict[str, float] | None = None,
+    symbol: str | None = None,
 ) -> dict[str, object]:
     latest_prices = latest_prices or {}
+    normalized_symbol = symbol.upper() if symbol else None
     paper_positions = [position for position in positions if position.mode == "paper"]
     paper_events = [event for event in events if event.mode == "paper"]
+    if normalized_symbol:
+        paper_positions = [position for position in paper_positions if position.symbol.upper() == normalized_symbol]
+        paper_events = [event for event in paper_events if event.symbol.upper() == normalized_symbol]
     filled_events = [
         event
         for event in paper_events
@@ -456,6 +1282,7 @@ def _paper_account_metrics(
     unrealized_pnl = sum(unrealized_values)
     return {
         "mode": "paper",
+        "symbol": normalized_symbol or "",
         "event_count": len(paper_events),
         "diagnostic_event_count": len(paper_events) - len(filled_events),
         "open_positions": len(paper_positions),
@@ -484,6 +1311,63 @@ def _paper_account_metrics(
         "best_trade_pnl": round(max(realized_values), 8) if realized_values else 0.0,
         "worst_trade_pnl": round(min(realized_values), 8) if realized_values else 0.0,
     }
+
+
+def _btc_account_metrics(
+    *,
+    positions: list[TradingPosition],
+    events: list[TradingEvent],
+    latest_prices: dict[str, float] | None = None,
+) -> dict[str, object]:
+    return _paper_account_metrics(
+        positions=positions,
+        events=events,
+        latest_prices=latest_prices,
+        symbol=BTC_SYMBOL,
+    )
+
+
+def _btc_trading_zone_payload(
+    *,
+    positions: list[TradingPosition],
+    events: list[TradingEvent],
+    latest_prices: dict[str, float] | None = None,
+    include_signal: bool = True,
+) -> dict[str, object]:
+    latest_prices = latest_prices or {}
+    btc_positions = [position for position in positions if position.mode == "paper" and position.symbol.upper() == BTC_SYMBOL]
+    btc_events = [event for event in events if event.mode == "paper" and event.symbol.upper() == BTC_SYMBOL]
+    payload: dict[str, object] = {
+        "symbol": BTC_SYMBOL,
+        "metrics": _btc_account_metrics(positions=positions, events=events, latest_prices=latest_prices),
+        "open_positions": [
+            _serialize_trading_position(position, latest_prices.get(position.symbol.upper()))
+            for position in btc_positions
+        ],
+        "recent_events": [_serialize_trading_event(event) for event in _select_trading_status_events(_sort_trading_events_desc(btc_events))[:20]],
+        "signal": None,
+        "signal_error": "",
+    }
+    if include_signal:
+        try:
+            payload["signal"] = _build_btc_signal_summary(include_backtests=False)
+        except Exception as exc:  # noqa: BLE001
+            payload["signal_error"] = str(exc)
+    return payload
+
+
+def _current_btc_trading_zone_payload(*, include_signal: bool = True) -> dict[str, object]:
+    _, scanner = APP_STATE.snapshot()
+    store = _trading_store()
+    positions = store.load()
+    events = _sort_trading_events_desc(store.load_events())
+    latest_prices = _latest_prices_for_open_positions(positions, scanner)
+    return _btc_trading_zone_payload(
+        positions=positions,
+        events=events,
+        latest_prices=latest_prices,
+        include_signal=include_signal,
+    )
 
 
 def _sort_trading_events_desc(events: list[TradingEvent]) -> list[TradingEvent]:
@@ -541,6 +1425,12 @@ def _serialize_trading_report(report: TradingRunReport, latest_prices: dict[str,
             events=report.events,
             latest_prices=latest_prices,
         ),
+        "btc_trading": _btc_trading_zone_payload(
+            positions=report.open_positions,
+            events=report.events,
+            latest_prices=latest_prices,
+            include_signal=False,
+        ),
         "generated_at": report.generated_at.isoformat(),
     }
 
@@ -569,6 +1459,12 @@ def _trading_status_payload() -> dict[str, object]:
         "event_summary": _trading_event_summary(events, status_events),
         "storage": store.database_status(),
         "account_metrics": account_metrics,
+        "btc_trading": _btc_trading_zone_payload(
+            positions=positions,
+            events=events,
+            latest_prices=latest_prices,
+            include_signal=True,
+        ),
     }
 
 
@@ -636,7 +1532,7 @@ def _trading_readiness_payload(*, check_account: bool | None = None) -> dict[str
         if selected_exchange == "binance"
         else bool(okx_credential_state(runtime_config)["configured"])
     )
-    should_check_account = check_account if check_account is not None else (config.mode == "live" and not config.order_test_only)
+    should_check_account = check_account if check_account is not None else (config.live_enabled and not config.order_test_only)
     if should_check_account:
         exchange_status = (
             scanner.gateway.account_status({runtime_config.scan_defaults.quote_asset})
@@ -651,7 +1547,7 @@ def _trading_readiness_payload(*, check_account: bool | None = None) -> dict[str
     can_trade = bool(exchange_status.get("can_trade"))
     quote_available = float(exchange_status.get("quote_available") or 0.0)
     live_ready = (
-        config.mode == "live"
+        config.live_enabled
         and has_credentials
         and authenticated
         and can_trade
@@ -659,7 +1555,7 @@ def _trading_readiness_payload(*, check_account: bool | None = None) -> dict[str
         and quote_available >= config.quote_order_qty
     )
     blockers = []
-    if config.mode == "live":
+    if config.live_enabled:
         if not has_credentials:
             blockers.append(f"{exchange_label} API 凭据未配置")
         if has_credentials and not authenticated:
@@ -672,6 +1568,8 @@ def _trading_readiness_payload(*, check_account: bool | None = None) -> dict[str
             blockers.append(f"{runtime_config.scan_defaults.quote_asset} 可用余额不足")
     return {
         "mode": config.mode,
+        "paper_enabled": config.paper_enabled,
+        "live_enabled": config.live_enabled,
         "execution_exchange": selected_exchange,
         "enabled": config.enabled,
         "order_test_only": config.order_test_only,
@@ -931,7 +1829,9 @@ def _run_forced_paper_trading_once() -> dict[str, object]:
     scan_payload, _ = _scan_payload(query, force_refresh=True)
     signals = [item for item in scan_payload.get("signals", []) if isinstance(item, dict)]
     store = _trading_store()
-    positions = store.load()
+    all_positions = store.load()
+    non_paper_positions = [position for position in all_positions if position.mode != "paper"]
+    positions = [position for position in all_positions if position.mode == "paper"]
     events: list[TradingEvent] = []
     signal_prices = {
         str(signal.get("symbol", "")).upper(): float(signal.get("last_price") or 0.0)
@@ -960,7 +1860,8 @@ def _run_forced_paper_trading_once() -> dict[str, object]:
     for signal in signals:
         symbol = str(signal.get("symbol") or "").upper()
         score = float(signal.get("score") or 0.0)
-        price = float(signal.get("last_price") or 0.0)
+        signal_price = float(signal.get("last_price") or 0.0)
+        price = _live_price_for_symbol(scanner, symbol, fallback=signal_price)
         if not symbol or price <= 0:
             continue
         if len(positions) >= config.max_open_positions:
@@ -985,6 +1886,21 @@ def _run_forced_paper_trading_once() -> dict[str, object]:
             continue
         if score < config.score_threshold:
             continue
+        volatility_issue = _scan_signal_volatility_entry_reason(signal, config)
+        if volatility_issue:
+            events.append(
+                TradingEvent(
+                    action="SKIP",
+                    symbol=symbol,
+                    mode="paper",
+                    status="wait_volatility",
+                    message=volatility_issue,
+                    score=score,
+                    price=price,
+                    exchange=config.execution_exchange.upper(),
+                )
+            )
+            continue
         anti_chase = _scan_signal_anti_chase_reason(signal, config)
         if anti_chase:
             events.append(
@@ -1000,7 +1916,7 @@ def _run_forced_paper_trading_once() -> dict[str, object]:
                 )
             )
             continue
-        structure_issue = _scan_signal_structure_entry_reason(signal, config)
+        structure_issue = _scan_signal_structure_entry_reason(signal, config, current_price=price)
         if structure_issue:
             events.append(
                 TradingEvent(
@@ -1066,16 +1982,17 @@ def _run_forced_paper_trading_once() -> dict[str, object]:
                 exchange=config.execution_exchange.upper(),
             )
         )
-    store.save(positions)
+    combined_positions = [*non_paper_positions, *positions]
+    store.save(combined_positions)
     store.append_events(events)
-    latest_prices = _latest_prices_for_open_positions(positions, scanner, signal_prices)
+    latest_prices = _latest_prices_for_open_positions(combined_positions, scanner, signal_prices)
     return _serialize_trading_report(
         TradingRunReport(
             enabled=True,
             mode="paper",
             scanned_symbols=int(scan_payload.get("summary", {}).get("scanned_symbols", 0)) if isinstance(scan_payload.get("summary"), dict) else 0,
             returned_signals=int(scan_payload.get("summary", {}).get("returned_signals", len(signals))) if isinstance(scan_payload.get("summary"), dict) else len(signals),
-            open_positions=positions,
+            open_positions=combined_positions,
             events=events,
         ),
         latest_prices=latest_prices,
@@ -1091,14 +2008,32 @@ def _scan_signal_anti_chase_reason(signal: dict[str, object], config: AutoTradeD
     )
 
 
-def _scan_signal_structure_entry_reason(signal: dict[str, object], config: AutoTradeDefaults) -> str:
+def _scan_signal_volatility_entry_reason(signal: dict[str, object], config: AutoTradeDefaults) -> str:
+    return volatility_entry_reason(
+        regime=str(signal.get("volatility_regime") or "normal"),
+        percentile=_float_from_mapping(signal, "volatility_percentile", 50.0),
+        ratio=_float_from_mapping(signal, "volatility_ratio", 1.0),
+        atr_pct=_float_from_mapping(signal, "atr_pct", 0.0),
+        enabled=config.volatility_filter_enabled,
+        block_extreme=config.block_extreme_volatility,
+        max_percentile=config.max_entry_volatility_percentile,
+        max_ratio=config.max_entry_volatility_ratio,
+    )
+
+
+def _scan_signal_structure_entry_reason(
+    signal: dict[str, object],
+    config: AutoTradeDefaults,
+    *,
+    current_price: float | None = None,
+) -> str:
     community_score = signal.get("community_score")
     try:
         parsed_community_score = float(community_score) if community_score is not None else None
     except (TypeError, ValueError):
         parsed_community_score = None
     return structure_entry_reason_from_config(
-        close_price=_float_from_mapping(signal, "last_price"),
+        close_price=current_price if current_price and current_price > 0 else _float_from_mapping(signal, "last_price"),
         support_level=_float_from_mapping(signal, "support_level"),
         resistance_level=_float_from_mapping(signal, "resistance_level"),
         support_distance_pct=_float_from_mapping(signal, "support_distance_pct"),
@@ -1129,46 +2064,118 @@ def _scan_signal_structured_exit_prices(
     )
 
 
+def _active_autotrade_modes(config: AutoTradeDefaults) -> list[str]:
+    modes: list[str] = []
+    if config.paper_enabled:
+        modes.append("paper")
+    if config.live_enabled:
+        modes.append("live")
+    if not modes and config.enabled:
+        mode = str(config.mode or "paper").strip() or "paper"
+        if mode in {"paper", "live"}:
+            modes.append(mode)
+    return modes
+
+
+def _combined_trading_report(
+    *,
+    config: AutoTradeDefaults,
+    mode_label: str,
+    reports: list[TradingRunReport],
+    extra_events: list[TradingEvent] | None = None,
+) -> TradingRunReport:
+    events = [*(extra_events or [])]
+    for report in reports:
+        events.extend(report.events)
+    positions = _trading_store().load()
+    return TradingRunReport(
+        enabled=config.enabled or config.paper_enabled or config.live_enabled,
+        mode=mode_label,
+        scanned_symbols=sum(report.scanned_symbols for report in reports),
+        returned_signals=sum(report.returned_signals for report in reports),
+        open_positions=positions,
+        events=events,
+    )
+
+
 def _run_trading_once(*, force_paper: bool = False) -> dict[str, object]:
     runtime_config, scanner = APP_STATE.snapshot()
     autotrade_config = runtime_config.autotrade_defaults
     if force_paper:
         return _run_forced_paper_trading_once()
-    elif autotrade_config.enabled and autotrade_config.mode == "live" and not autotrade_config.order_test_only:
-        readiness = _trading_readiness_payload()
+    active_modes = _active_autotrade_modes(autotrade_config)
+    if not active_modes:
+        risk_snapshot = IntelligenceHub(scanner=scanner, runtime_config=runtime_config, settings=SETTINGS).snapshot()
+        trader = AutoTrader(
+            scanner=scanner,
+            state_store=_trading_store(),
+            blocked_symbols=risk_snapshot.execution_risk.blocked_symbols,
+            trade_notifier=_feishu_trade_notifier(runtime_config),
+        )
+        trader.set_execution_gateway(_execution_gateway(runtime_config, scanner))
+        report = trader.run_once(autotrade_config)
+        latest_prices = _latest_prices_for_open_positions(report.open_positions, scanner)
+        return _serialize_trading_report(report, latest_prices=latest_prices)
+
+    extra_events: list[TradingEvent] = []
+    mode_label = "+".join(active_modes)
+    runnable_modes = list(active_modes)
+    if "live" in runnable_modes and not autotrade_config.order_test_only:
+        try:
+            readiness = _trading_readiness_payload()
+        except Exception as exc:  # noqa: BLE001
+            readiness = {
+                "live_ready": False,
+                "blockers": [f"实盘就绪检查异常：{exc}"],
+            }
         if not readiness["live_ready"]:
             positions = _trading_store().load()
+            blockers = readiness.get("blockers") if isinstance(readiness.get("blockers"), list) else []
+            blocker_message = "；".join(str(item) for item in blockers) or "未知原因"
             event = TradingEvent(
                 action="SKIP",
                 symbol="*",
                 mode="live",
                 status="blocked",
-                message="实盘自动交易未就绪：" + "；".join(str(item) for item in readiness["blockers"]),
+                message="实盘自动交易未就绪：" + blocker_message,
                 exchange=autotrade_config.execution_exchange.upper(),
             )
             _trading_store().append_events([event])
-            latest_prices = _latest_prices_for_open_positions(positions, scanner)
-            return _serialize_trading_report(
-                TradingRunReport(
-                    enabled=autotrade_config.enabled,
-                    mode=autotrade_config.mode,
-                    scanned_symbols=0,
-                    returned_signals=0,
-                    open_positions=positions,
-                    events=[event],
-                ),
-                latest_prices=latest_prices,
-            )
+            extra_events.append(event)
+            runnable_modes = [mode for mode in runnable_modes if mode != "live"]
+            if not runnable_modes:
+                latest_prices = _latest_prices_for_open_positions(positions, scanner)
+                return _serialize_trading_report(
+                    TradingRunReport(
+                        enabled=autotrade_config.enabled or autotrade_config.paper_enabled or autotrade_config.live_enabled,
+                        mode=mode_label,
+                        scanned_symbols=0,
+                        returned_signals=0,
+                        open_positions=positions,
+                        events=extra_events,
+                    ),
+                    latest_prices=latest_prices,
+                )
     risk_snapshot = IntelligenceHub(scanner=scanner, runtime_config=runtime_config, settings=SETTINGS).snapshot()
     blocked_symbols = risk_snapshot.execution_risk.blocked_symbols
-    trader = AutoTrader(
-        scanner=scanner,
-        state_store=_trading_store(),
-        blocked_symbols=blocked_symbols,
-        trade_notifier=_feishu_trade_notifier(runtime_config),
+    reports: list[TradingRunReport] = []
+    mode_isolated = autotrade_config.paper_enabled or autotrade_config.live_enabled or len(active_modes) > 1
+    for mode in runnable_modes:
+        trader = AutoTrader(
+            scanner=scanner,
+            state_store=_trading_store(),
+            blocked_symbols=blocked_symbols,
+            trade_notifier=_feishu_trade_notifier(runtime_config),
+            isolate_mode=mode_isolated,
+        )
+        trader.set_execution_gateway(_execution_gateway(runtime_config, scanner))
+        reports.append(trader.run_once(replace(autotrade_config, enabled=True, mode=mode)))
+    report = _combined_trading_report(
+        config=autotrade_config,
+        mode_label=mode_label,
+        reports=reports,
+        extra_events=extra_events,
     )
-    trader.set_execution_gateway(_execution_gateway(runtime_config, scanner))
-    report = trader.run_once(autotrade_config)
     latest_prices = _latest_prices_for_open_positions(report.open_positions, scanner)
     return _serialize_trading_report(report, latest_prices=latest_prices)
 
@@ -1184,14 +2191,20 @@ def _paper_auto_status_payload() -> dict[str, object]:
         return _to_jsonable(payload)
 
 
-def _run_paper_auto_once(interval_seconds: int) -> None:
+def _auto_loop_mode_label(force_paper: bool) -> str:
+    return "paper_only" if force_paper else "configured_paper_live"
+
+
+def _run_paper_auto_once(interval_seconds: int, *, force_paper: bool = True) -> None:
     try:
-        result = _run_trading_once(force_paper=True)
+        result = _run_trading_once(force_paper=force_paper)
         with _PAPER_AUTO_LOCK:
             _PAPER_AUTO_STATE.update(
                 {
                     "running": True,
                     "interval_seconds": interval_seconds,
+                    "force_paper": force_paper,
+                    "mode_label": _auto_loop_mode_label(force_paper),
                     "last_run_at": now_app_time().isoformat(),
                     "last_error": "",
                     "run_count": int(_PAPER_AUTO_STATE.get("run_count") or 0) + 1,
@@ -1208,11 +2221,11 @@ def _run_paper_auto_once(interval_seconds: int) -> None:
             )
 
 
-def _paper_auto_worker(stop_event: Event, interval_seconds: int, initial_delay: bool = True) -> None:
+def _paper_auto_worker(stop_event: Event, interval_seconds: int, initial_delay: bool = True, force_paper: bool = True) -> None:
     if initial_delay and stop_event.wait(interval_seconds):
         return
     while not stop_event.is_set():
-        _run_paper_auto_once(interval_seconds)
+        _run_paper_auto_once(interval_seconds, force_paper=force_paper)
         if stop_event.wait(interval_seconds):
             break
     with _PAPER_AUTO_LOCK:
@@ -1225,12 +2238,32 @@ def _paper_auto_worker(stop_event: Event, interval_seconds: int, initial_delay: 
             )
 
 
-def _start_paper_auto_trading(interval_seconds: int = PAPER_AUTO_DEFAULT_INTERVAL_SECONDS) -> dict[str, object]:
+def _start_paper_auto_trading(
+    interval_seconds: int = PAPER_AUTO_DEFAULT_INTERVAL_SECONDS,
+    *,
+    force_paper: bool = True,
+) -> dict[str, object]:
     interval_seconds = max(PAPER_AUTO_MIN_INTERVAL_SECONDS, int(interval_seconds))
     global _PAPER_AUTO_STOP_EVENT, _PAPER_AUTO_THREAD
+    previous_stop_event: Event | None = None
+    previous_thread: Thread | None = None
+    with _PAPER_AUTO_LOCK:
+        if _PAPER_AUTO_THREAD is not None and _PAPER_AUTO_THREAD.is_alive():
+            if bool(_PAPER_AUTO_STATE.get("force_paper", True)) != force_paper:
+                previous_stop_event = _PAPER_AUTO_STOP_EVENT
+                previous_thread = _PAPER_AUTO_THREAD
+            else:
+                _PAPER_AUTO_STATE["interval_seconds"] = interval_seconds
+                _PAPER_AUTO_STATE["mode_label"] = _auto_loop_mode_label(force_paper)
+                return _paper_auto_status_payload()
+    if previous_stop_event is not None:
+        previous_stop_event.set()
+    if previous_thread is not None and previous_thread.is_alive():
+        previous_thread.join(timeout=2)
     with _PAPER_AUTO_LOCK:
         if _PAPER_AUTO_THREAD is not None and _PAPER_AUTO_THREAD.is_alive():
             _PAPER_AUTO_STATE["interval_seconds"] = interval_seconds
+            _PAPER_AUTO_STATE["mode_label"] = _auto_loop_mode_label(force_paper)
             return _paper_auto_status_payload()
         stop_event = Event()
         _PAPER_AUTO_STOP_EVENT = stop_event
@@ -1241,14 +2274,16 @@ def _start_paper_auto_trading(interval_seconds: int = PAPER_AUTO_DEFAULT_INTERVA
                 "started_at": now_app_time().isoformat(),
                 "stopped_at": None,
                 "last_error": "",
+                "force_paper": force_paper,
+                "mode_label": _auto_loop_mode_label(force_paper),
             }
         )
-    _run_paper_auto_once(interval_seconds)
+    _run_paper_auto_once(interval_seconds, force_paper=force_paper)
     with _PAPER_AUTO_LOCK:
         _PAPER_AUTO_THREAD = Thread(
             target=_paper_auto_worker,
-            args=(stop_event, interval_seconds, True),
-            name="paper-auto-trading",
+            args=(stop_event, interval_seconds, True, force_paper),
+            name="paper-auto-trading" if force_paper else "strategy-auto-trading",
             daemon=True,
         )
         _PAPER_AUTO_THREAD.start()
@@ -1293,6 +2328,7 @@ def _terminal_cache_key(runtime_config: RuntimeConfig) -> tuple[object, ...]:
     scan = runtime_config.scan_defaults
     intelligence = runtime_config.intelligence_defaults
     autotrade = runtime_config.autotrade_defaults
+    carry = runtime_config.carry_paper_defaults
     return (
         scan.quote_asset,
         scan.interval,
@@ -1309,6 +2345,9 @@ def _terminal_cache_key(runtime_config: RuntimeConfig) -> tuple[object, ...]:
         tuple(runtime_config.x_tracked_accounts),
         autotrade.enabled,
         autotrade.score_threshold,
+        carry.enabled,
+        carry.min_basis_bps,
+        carry.min_funding_bps,
     )
 
 
@@ -1348,6 +2387,8 @@ def _build_terminal_payload_for_cache(cache_key: tuple[object, ...]) -> dict[str
     payload = {
         **_serialize_intelligence_snapshot(hub.snapshot()),
         "platform": _platform_payload(),
+        "btc_trading": _current_btc_trading_zone_payload(include_signal=True),
+        "carry_paper": _carry_paper_status_payload(),
     }
     if isinstance(payload.get("onchain_events"), list):
         payload["onchain_events"] = _annotate_onchain_event_sources(payload["onchain_events"])  # type: ignore[arg-type]
@@ -1547,6 +2588,7 @@ def _basis_only_module_payload() -> dict[str, object]:
         "module": "basis",
         "spreads": sections["spreads"],
         "funding_rates": sections["funding_rates"],
+        "carry_paper": _carry_paper_status_payload(),
         "risk_rules": _platform_payload()["risk_rules"],
         "market_sources": sections["market_sources"],
         "warning": sections.get("warning", ""),
@@ -1664,6 +2706,7 @@ def _strategy_hits_from_signal_rows(
             recent_change_pct=recent_change,
             config=runtime_config.autotrade_defaults,
         )
+        volatility_issue = _scan_signal_volatility_entry_reason(signal, runtime_config.autotrade_defaults)
         structure_issue = _scan_signal_structure_entry_reason(signal, runtime_config.autotrade_defaults)
 
         if score >= threshold:
@@ -1673,14 +2716,18 @@ def _strategy_hits_from_signal_rows(
                     strategy="auto_score_breakout",
                     score=score,
                     grade=grade,
-                    action="wait_pullback"
+                    action="wait_volatility"
+                    if volatility_issue
+                    else "wait_pullback"
                     if anti_chase
                     else "wait_support"
                     if structure_issue
                     else "candidate_buy"
                     if runtime_config.autotrade_defaults.enabled
                     else "watch",
-                    reasons=[anti_chase, *reasons[:4]]
+                    reasons=[volatility_issue, *reasons[:4]]
+                    if volatility_issue
+                    else [anti_chase, *reasons[:4]]
                     if anti_chase
                     else [structure_issue, *reasons[:4]]
                     if structure_issue
@@ -1791,6 +2838,7 @@ def _fast_strategies_module_payload(market_payload: dict[str, object] | None = N
         "module": "strategies",
         "strategy_hits": strategy_hits,
         "strategies": platform["strategies"],
+        "strategy_templates": list_strategy_templates(),
         "cached": cached is not None or strategies_payload["cached"],
         "warning": "" if cached is not None and cached.get("strategy_hits") else str(strategies_payload.get("warning") or ""),
     }
@@ -2344,6 +3392,7 @@ def _fast_terminal_payload(
     basis = basis_payload or {
         "spreads": market.get("spreads", []),
         "funding_rates": market.get("funding_rates", []),
+        "carry_paper": _carry_paper_status_payload(),
     }
     strategies = _fast_strategies_module_payload(market_payload=market)
     risk = _fast_risk_module_payload(
@@ -2366,8 +3415,10 @@ def _fast_terminal_payload(
         "onchain_sources": onchain.get("onchain_sources", []),
         "spreads": spreads,
         "funding_rates": funding_rates,
+        "carry_paper": basis.get("carry_paper", _carry_paper_status_payload()),
         "market_sources": market.get("market_sources", []),
         "strategy_hits": strategy_hits,
+        "strategy_templates": strategies.get("strategy_templates", list_strategy_templates()),
         "llm_insight": _fast_llm_insight_payload(
             runtime_config=APP_STATE.snapshot()[0],
             intel_items=intel_items,
@@ -2379,6 +3430,7 @@ def _fast_terminal_payload(
         ),
         "execution_risk": risk,
         "platform": platform,
+        "btc_trading": _current_btc_trading_zone_payload(include_signal=True),
         "cached": False,
         "warning": "快速页面快照：避免浏览器首屏阻塞，完整扫描结果会通过缓存刷新。",
     }
@@ -2455,11 +3507,13 @@ def _terminal_module_payload(module: str) -> dict[str, object]:
         return _basis_only_module_payload()
     if module == "trading":
         platform = _platform_payload()
+        trading = _trading_status_payload()
         return {
             "module": module,
-            "trading": _trading_status_payload(),
+            "trading": trading,
             "accounts": platform["accounts"],
             "recent_events": platform["recent_events"],
+            "btc_trading": trading.get("btc_trading") if isinstance(trading.get("btc_trading"), dict) else {},
         }
     if module == "strategies":
         return _fast_strategies_module_payload()
@@ -2540,6 +3594,29 @@ def _compile_strategy_payload(description: str) -> dict[str, object]:
     return payload
 
 
+def _compile_strategy_template_payload(template_id: str) -> dict[str, object]:
+    runtime_config, _ = APP_STATE.snapshot()
+    template = get_strategy_template(template_id)
+    compiled = compile_strategy_template(template.template_id, runtime_config)
+    payload = _to_jsonable(compiled)
+    payload["template"] = {
+        "template_id": template.template_id,
+        "label": template.label,
+        "preset_id": template.preset_id,
+        "risk_level": template.risk_level,
+        "validation_status": template.validation_status,
+        "recommended_intervals": list(template.recommended_intervals),
+        "market_regimes": list(template.market_regimes),
+        "paper_only": template.paper_only,
+    }
+    payload["run_urls"] = {
+        "backtest": _compiled_strategy_backtest_url(payload["backtest_defaults"]),
+        "paper_trading": "/terminal/trading",
+        "settings": "/settings",
+    }
+    return payload
+
+
 def _compiled_strategy_backtest_url(defaults: object) -> str:
     if not isinstance(defaults, dict):
         return "/backtest"
@@ -2576,6 +3653,10 @@ def _compiled_strategy_backtest_url(defaults: object) -> str:
         "min_rsi",
         "max_rsi",
         "no_kdj_confirmation",
+        "volatility_filter_enabled",
+        "block_extreme_volatility",
+        "max_entry_volatility_percentile",
+        "max_entry_volatility_ratio",
     )
     query: dict[str, str] = {}
     for key in allowed_keys:
@@ -2636,6 +3717,7 @@ _path_with_lang = backtest_handlers._path_with_lang
 _split_archives = backtest_handlers._split_archives
 _empty_backtest_payload = backtest_handlers._empty_backtest_payload
 _backtest_export_csv = backtest_handlers._backtest_export_csv
+_backtest_export_html = backtest_handlers._backtest_export_html
 
 
 def _tradingview_fetch_result(form: dict[str, list[str]]) -> dict[str, object]:
@@ -2657,7 +3739,126 @@ def _tradingview_backtest_redirect(form: dict[str, list[str]], lang: str) -> str
     )
 
 
+def _backtest_job_query_key(query: dict[str, list[str]]) -> str:
+    normalized = {key: [str(value) for value in values] for key, values in sorted(query.items()) if key != "job_id"}
+    return json.dumps(normalized, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def _backtest_job_redirect(query: dict[str, list[str]], job_id: str) -> str:
+    redirect_query = {key: list(values) for key, values in query.items() if key != "job_id"}
+    redirect_query["job_id"] = [job_id]
+    return f"/backtest?{urlencode(redirect_query, doseq=True)}"
+
+
+def _run_backtest_job(job_id: str, query: dict[str, list[str]]) -> None:
+    with _BACKTEST_JOB_LOCK:
+        job = _BACKTEST_JOBS.get(job_id)
+        if job is None:
+            return
+        job["status"] = "running"
+        job["started_at"] = now_app_time().isoformat()
+        job["_started_monotonic"] = monotonic()
+    try:
+        runtime_config, scanner = APP_STATE.snapshot()
+        result = backtest_handlers._backtest_payload(
+            query,
+            runtime_config=runtime_config,
+            scanner=scanner,
+            resolve_execution_config=resolve_execution_config_from_binance,
+        )
+        payload, params, error = result
+        _record_backtest_run(params, payload, error)
+        with _BACKTEST_JOB_LOCK:
+            _BACKTEST_JOB_RESULTS[job_id] = deepcopy(result)
+            job = _BACKTEST_JOBS.get(job_id)
+            if job is not None:
+                job["result_available"] = True
+                job["status"] = "failed" if error else "completed"
+                job["error"] = error or ""
+                job["performance"] = deepcopy(payload.get("performance") or {})
+    except Exception as exc:  # noqa: BLE001
+        with _BACKTEST_JOB_LOCK:
+            job = _BACKTEST_JOBS.get(job_id)
+            if job is not None:
+                job["status"] = "failed"
+                job["error"] = str(exc)
+    finally:
+        with _BACKTEST_JOB_LOCK:
+            job = _BACKTEST_JOBS.get(job_id)
+            if job is not None:
+                started = float(job.get("_started_monotonic") or monotonic())
+                job["elapsed_seconds"] = round(monotonic() - started, 3)
+                job["completed_at"] = now_app_time().isoformat()
+
+
+def _start_backtest_job(query: dict[str, list[str]]) -> dict[str, object]:
+    query_copy = {key: [str(value) for value in values] for key, values in query.items() if key != "job_id"}
+    query_key = _backtest_job_query_key(query_copy)
+    with _BACKTEST_JOB_LOCK:
+        for existing in reversed(list(_BACKTEST_JOBS.values())):
+            if existing.get("_query_key") == query_key and existing.get("status") in {"queued", "running"}:
+                return _public_backtest_job(existing)
+        active_jobs = sum(1 for item in _BACKTEST_JOBS.values() if item.get("status") in {"queued", "running"})
+        if active_jobs >= BACKTEST_JOB_ACTIVE_LIMIT:
+            raise ValueError(f"已有 {active_jobs} 个回测任务正在执行或排队，请等待任务完成后再提交。")
+        job_id = uuid4().hex
+        job = {
+            "job_id": job_id,
+            "status": "queued",
+            "created_at": now_app_time().isoformat(),
+            "started_at": None,
+            "completed_at": None,
+            "elapsed_seconds": 0.0,
+            "error": "",
+            "result_available": False,
+            "performance": {},
+            "redirect_url": _backtest_job_redirect(query_copy, job_id),
+            "_query_key": query_key,
+        }
+        _BACKTEST_JOBS[job_id] = job
+        while len(_BACKTEST_JOBS) > BACKTEST_JOB_HISTORY_LIMIT:
+            expired_job_id = next(
+                (
+                    candidate_id
+                    for candidate_id, candidate in _BACKTEST_JOBS.items()
+                    if candidate_id != job_id and candidate.get("status") in {"completed", "failed"}
+                ),
+                "",
+            )
+            if not expired_job_id:
+                break
+            _BACKTEST_JOBS.pop(expired_job_id, None)
+            _BACKTEST_JOB_RESULTS.pop(expired_job_id, None)
+        _BACKTEST_JOB_EXECUTOR.submit(_run_backtest_job, job_id, query_copy)
+        return _public_backtest_job(job)
+
+
+def _public_backtest_job(job: dict[str, object]) -> dict[str, object]:
+    payload = {key: deepcopy(value) for key, value in job.items() if not key.startswith("_")}
+    if job.get("status") == "running":
+        started = float(job.get("_started_monotonic") or monotonic())
+        payload["elapsed_seconds"] = round(monotonic() - started, 3)
+    return payload
+
+
+def _backtest_job_status(job_id: str) -> dict[str, object] | None:
+    with _BACKTEST_JOB_LOCK:
+        job = _BACKTEST_JOBS.get(str(job_id).strip())
+        return _public_backtest_job(job) if job is not None else None
+
+
+def _backtest_job_result(job_id: str) -> tuple[dict[str, object], dict[str, object], str | None] | None:
+    with _BACKTEST_JOB_LOCK:
+        result = _BACKTEST_JOB_RESULTS.get(str(job_id).strip())
+        return deepcopy(result) if result is not None else None
+
+
 def _backtest_payload(query: dict[str, list[str]]) -> tuple[dict[str, object], dict[str, object], str | None]:
+    job_id = _get_first(query, "job_id", "").strip()
+    if job_id:
+        result = _backtest_job_result(job_id)
+        if result is not None:
+            return result
     runtime_config, scanner = APP_STATE.snapshot()
     return backtest_handlers._backtest_payload(
         query,
@@ -2785,12 +3986,37 @@ class RequestHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            if parsed.path == "/api/market/realtime":
+                self._send_text(
+                    json.dumps(_realtime_market_payload(query), ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
             if parsed.path == "/api/scan":
                 payload, _ = _scan_payload(query, force_refresh=_parse_bool_flag(query, "refresh"))
                 self._send_text(
                     json.dumps(payload, ensure_ascii=False),
                     content_type="application/json; charset=utf-8",
                 )
+                return
+
+            if parsed.path == "/api/btc/signal":
+                self._send_text(
+                    json.dumps(_to_jsonable(_btc_signal_payload(query)), ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            if parsed.path == "/btc/signal":
+                payload = _btc_signal_payload(query)
+                html = render_btc_signal_page(
+                    summary=payload["summary"],
+                    fast=_parse_bool_flag(query, "fast"),
+                    lang=lang,
+                    layout_context=_layout_context(),
+                )
+                self._send_text(html, content_type="text/html; charset=utf-8")
                 return
 
             if parsed.path == "/backtest":
@@ -2801,7 +4027,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                     series_reports=payload["series_reports"],
                     portfolio_reports=payload["portfolio_reports"],
                     rebalance_reports=payload["rebalance_reports"],
+                    parameter_sweep=payload["parameter_sweep"],
                     strategy_explanation=payload["strategy_explanation"],
+                    performance=payload["performance"],
                     error=error,
                     presets=list_backtest_presets(),
                     lang=lang,
@@ -2819,6 +4047,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     events=payload["events"],
                     event_summary=payload["event_summary"],
                     account_metrics=payload["account_metrics"],
+                    btc_trading=payload.get("btc_trading") if isinstance(payload.get("btc_trading"), dict) else None,
                     lang=lang,
                     layout_context=_layout_context(payload["readiness"]),
                 )
@@ -2835,6 +4064,27 @@ class RequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/storage/status":
                 self._send_text(
                     json.dumps(_local_data_store().status(), ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            if parsed.path == "/api/research/carry/paper/status":
+                self._send_text(
+                    json.dumps(_carry_paper_status_payload(), ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            if parsed.path == "/api/research/stat-arb/defaults":
+                self._send_text(
+                    json.dumps(_stat_arb_defaults_payload(), ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            if parsed.path == "/api/notifications/feishu/daily/status":
+                self._send_text(
+                    json.dumps(_feishu_daily_report_status_payload(), ensure_ascii=False, indent=2),
                     content_type="application/json; charset=utf-8",
                 )
                 return
@@ -2860,6 +4110,29 @@ class RequestHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            if parsed.path.startswith("/api/backtest/jobs/"):
+                job_id = parsed.path.rsplit("/", 1)[-1]
+                job = _backtest_job_status(job_id)
+                if job is None:
+                    self._send_text(
+                        json.dumps({"error": "回测任务不存在或已过期。"}, ensure_ascii=False),
+                        status=HTTPStatus.NOT_FOUND,
+                        content_type="application/json; charset=utf-8",
+                    )
+                    return
+                self._send_text(
+                    json.dumps(job, ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            if parsed.path == "/api/strategy/templates":
+                self._send_text(
+                    json.dumps({"templates": list_strategy_templates()}, ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
             if parsed.path == "/api/backtest/tradingview/fetch":
                 payload = _tradingview_fetch_result(query)
                 self._send_text(
@@ -2881,6 +4154,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                                     "series_reports": payload["series_reports"],
                                     "portfolio_reports": payload["portfolio_reports"],
                                     "rebalance_reports": payload["rebalance_reports"],
+                                    "parameter_sweep": payload["parameter_sweep"],
+                                    "performance": payload["performance"],
                                     "strategy_explanation": payload["strategy_explanation"],
                                     "error": error,
                                 }
@@ -2889,12 +4164,21 @@ class RequestHandler(BaseHTTPRequestHandler):
                             indent=2,
                         ),
                         content_type="application/json; charset=utf-8",
+                        headers={"Content-Disposition": 'attachment; filename="ai-trade-backtest.json"'},
                     )
                     return
                 if export_format == "csv":
                     self._send_text(
                         _backtest_export_csv(payload, params, error),
                         content_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": 'attachment; filename="ai-trade-backtest.csv"'},
+                    )
+                    return
+                if export_format == "html":
+                    self._send_text(
+                        _backtest_export_html(payload, params, error),
+                        content_type="text/html; charset=utf-8",
+                        headers={"Content-Disposition": 'attachment; filename="ai-trade-backtest.html"'},
                     )
                     return
                 self._send_text(
@@ -2942,6 +4226,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                                 "series_reports": payload["series_reports"],
                                 "portfolio_reports": payload["portfolio_reports"],
                                 "rebalance_reports": payload["rebalance_reports"],
+                                "parameter_sweep": payload["parameter_sweep"],
+                                "performance": payload["performance"],
                                 "strategy_explanation": payload["strategy_explanation"],
                                 "error": error,
                             }
@@ -2955,6 +4241,16 @@ class RequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/static/styles.css":
                 css = (BASE_DIR / "static" / "styles.css").read_text(encoding="utf-8")
                 self._send_text(css, content_type="text/css; charset=utf-8")
+                return
+
+            if parsed.path == "/static/scan_live.js":
+                script = (BASE_DIR / "static" / "scan_live.js").read_text(encoding="utf-8")
+                self._send_text(script, content_type="text/javascript; charset=utf-8")
+                return
+
+            if parsed.path == "/static/backtest.js":
+                script = (BASE_DIR / "static" / "backtest.js").read_text(encoding="utf-8")
+                self._send_text(script, content_type="text/javascript; charset=utf-8")
                 return
 
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -2982,6 +4278,36 @@ class RequestHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         lang = self._request_lang(query)
         try:
+            if parsed.path == "/api/backtest/jobs":
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length).decode("utf-8")
+                form = parse_qs(body, keep_blank_values=True)
+                job = _start_backtest_job(form)
+                self._send_text(
+                    json.dumps(job, ensure_ascii=False, indent=2),
+                    status=HTTPStatus.ACCEPTED,
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            if parsed.path == "/api/strategy/templates/compile":
+                request_payload = _mapping_from_request_body(self)
+                template_id = str(request_payload.get("template_id") or "").strip()
+                try:
+                    payload = _compile_strategy_template_payload(template_id)
+                except ValueError as exc:
+                    self._send_text(
+                        json.dumps({"error": str(exc)}, ensure_ascii=False, indent=2),
+                        status=HTTPStatus.BAD_REQUEST,
+                        content_type="application/json; charset=utf-8",
+                    )
+                    return
+                self._send_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
             if parsed.path == "/api/strategy/compile":
                 try:
                     description, _ = _strategy_description_from_body(self)
@@ -3025,6 +4351,77 @@ class RequestHandler(BaseHTTPRequestHandler):
                     html,
                     content_type="text/html; charset=utf-8",
                     status=HTTPStatus.BAD_REQUEST if error else HTTPStatus.OK,
+                )
+                return
+
+            if parsed.path == "/terminal/strategies/templates/compile":
+                request_payload = _mapping_from_request_body(self)
+                lang = normalize_language(str(request_payload.get("lang") or lang))
+                self._active_lang = lang
+                template_id = str(request_payload.get("template_id") or "").strip()
+                try:
+                    payload = _compile_strategy_template_payload(template_id)
+                    template = payload.get("template") if isinstance(payload.get("template"), dict) else {}
+                    label = str(template.get("label") or template_id)
+                    message = (
+                        f"策略模板“{label}”已生成回测和 paper 参数，执行开关保持关闭。"
+                        if lang == "zh"
+                        else f'Strategy template "{label}" compiled; all execution switches remain off.'
+                    )
+                    error = None
+                except ValueError as exc:
+                    payload = None
+                    message = None
+                    error = str(exc)
+                html = render_terminal_module_page(
+                    snapshot=_terminal_page_snapshot("strategies"),
+                    module="strategies",
+                    strategy_builder_result=payload,
+                    strategy_builder_text="",
+                    message=message,
+                    error=error,
+                    lang=lang,
+                    layout_context=_layout_context(),
+                )
+                self._send_text(
+                    html,
+                    content_type="text/html; charset=utf-8",
+                    status=HTTPStatus.BAD_REQUEST if error else HTTPStatus.OK,
+                )
+                return
+
+            if parsed.path == "/terminal/strategies/stat-arb/run":
+                request_payload = _mapping_from_request_body(self)
+                lang = normalize_language(str(request_payload.get("lang") or lang))
+                self._active_lang = lang
+                try:
+                    stat_arb_result = _run_stat_arb_backtest_payload(request_payload)
+                    report = stat_arb_result.get("report") if isinstance(stat_arb_result.get("report"), dict) else {}
+                    metrics = report.get("metrics") if isinstance(report.get("metrics"), dict) else {}
+                    stat_arb_message = (
+                        f"配对回测完成：{int(metrics.get('trade_count') or 0)} 笔，净收益 {float(metrics.get('net_pnl') or 0):+.4f}。"
+                        if lang == "zh"
+                        else f"Pair backtest completed: {int(metrics.get('trade_count') or 0)} trades, net PnL {float(metrics.get('net_pnl') or 0):+.4f}."
+                    )
+                    stat_arb_error = None
+                except ValueError as exc:
+                    stat_arb_result = None
+                    stat_arb_message = None
+                    stat_arb_error = str(exc)
+                html = render_terminal_module_page(
+                    snapshot=_terminal_page_snapshot("strategies"),
+                    module="strategies",
+                    stat_arb_result=stat_arb_result,
+                    stat_arb_params=request_payload,
+                    stat_arb_message=stat_arb_message,
+                    stat_arb_error=stat_arb_error,
+                    lang=lang,
+                    layout_context=_layout_context(),
+                )
+                self._send_text(
+                    html,
+                    content_type="text/html; charset=utf-8",
+                    status=HTTPStatus.BAD_REQUEST if stat_arb_error else HTTPStatus.OK,
                 )
                 return
 
@@ -3079,7 +4476,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                         series_reports=backtest_payload["series_reports"],
                         portfolio_reports=backtest_payload["portfolio_reports"],
                         rebalance_reports=backtest_payload["rebalance_reports"],
+                        parameter_sweep=backtest_payload["parameter_sweep"],
                         strategy_explanation=backtest_payload["strategy_explanation"],
+                        performance=backtest_payload["performance"],
                         error=str(exc),
                         presets=list_backtest_presets(),
                         lang=lang,
@@ -3103,6 +4502,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     events=status_payload["events"],
                     event_summary=status_payload["event_summary"],
                     account_metrics=status_payload["account_metrics"],
+                    btc_trading=status_payload.get("btc_trading") if isinstance(status_payload.get("btc_trading"), dict) else None,
                     lang=lang,
                     layout_context=_layout_context(readiness),
                 )
@@ -3138,11 +4538,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                     _get_first(form, "interval_seconds", str(PAPER_AUTO_DEFAULT_INTERVAL_SECONDS)),
                     "Paper Auto Interval",
                 )
-                status = _start_paper_auto_trading(interval_seconds)
+                status = _start_paper_auto_trading(interval_seconds, force_paper=False)
                 message = (
-                    f"模拟策略自动交易已启动：每 {int(status['interval_seconds'])} 秒运行一轮。"
+                    f"策略自动轮询已启动：每 {int(status['interval_seconds'])} 秒按当前模拟/实盘开关运行一轮。"
                     if lang == "zh"
-                    else f"Paper strategy auto trading started: one run every {int(status['interval_seconds'])} seconds."
+                    else f"Strategy auto polling started: one run every {int(status['interval_seconds'])} seconds using current paper/live switches."
                 )
                 html = render_terminal_module_page(
                     snapshot=_fast_terminal_payload(),
@@ -3161,7 +4561,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 lang = normalize_language(_get_first(form, "lang", lang))
                 self._active_lang = lang
                 status = _stop_paper_auto_trading()
-                message = "模拟策略自动交易已停止。" if lang == "zh" else "Paper strategy auto trading stopped."
+                message = "策略自动轮询已停止。" if lang == "zh" else "Strategy auto polling stopped."
                 html = render_terminal_module_page(
                     snapshot=_fast_terminal_payload(),
                     module="trading",
@@ -3190,6 +4590,50 @@ class RequestHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            if parsed.path == "/api/research/carry/paper/run":
+                self._send_text(
+                    json.dumps(_run_carry_paper_once(), ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            if parsed.path == "/api/research/stat-arb/backtest":
+                try:
+                    stat_arb_payload = _run_stat_arb_backtest_payload(_mapping_from_request_body(self))
+                except ValueError as exc:
+                    self._send_text(
+                        json.dumps({"error": str(exc)}, ensure_ascii=False, indent=2),
+                        status=HTTPStatus.BAD_REQUEST,
+                        content_type="application/json; charset=utf-8",
+                    )
+                    return
+                self._send_text(
+                    json.dumps(
+                        stat_arb_payload,
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            if parsed.path == "/terminal/basis/carry/run":
+                result = _run_carry_paper_once()
+                message = (
+                    f"Carry 模拟轮询完成：新开 {int(result.get('opened_count') or 0)}，平仓 {int(result.get('closed_count') or 0)}。"
+                    if lang == "zh"
+                    else f"Carry paper cycle completed: {int(result.get('opened_count') or 0)} opened, {int(result.get('closed_count') or 0)} closed."
+                )
+                html = render_terminal_module_page(
+                    snapshot=_terminal_page_snapshot("basis"),
+                    module="basis",
+                    message=message,
+                    lang=lang,
+                    layout_context=_layout_context(),
+                )
+                self._send_text(html, content_type="text/html; charset=utf-8")
+                return
+
             if parsed.path == "/api/trading/paper/auto/start":
                 form = parse_qs(_read_body(self))
                 interval_seconds = _parse_int_value(
@@ -3202,9 +4646,49 @@ class RequestHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            if parsed.path == "/api/trading/auto/start":
+                form = parse_qs(_read_body(self))
+                interval_seconds = _parse_int_value(
+                    _get_first(form, "interval_seconds", str(PAPER_AUTO_DEFAULT_INTERVAL_SECONDS)),
+                    "Auto Trade Interval",
+                )
+                self._send_text(
+                    json.dumps(_start_paper_auto_trading(interval_seconds, force_paper=False), ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            if parsed.path == "/api/trading/auto/stop":
+                self._send_text(
+                    json.dumps(_stop_paper_auto_trading(), ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
             if parsed.path == "/api/trading/paper/auto/stop":
                 self._send_text(
                     json.dumps(_stop_paper_auto_trading(), ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            if parsed.path == "/api/notifications/feishu/daily/run":
+                form = parse_qs(_read_body(self))
+                result = _run_feishu_daily_report_once(now=_manual_feishu_report_at(form))
+                self._send_text(
+                    json.dumps(
+                        {"result": result, "status": _feishu_daily_report_status_payload()},
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            if parsed.path == "/api/btc/signal/push":
+                form = parse_qs(_read_body(self))
+                self._send_text(
+                    json.dumps(_to_jsonable(_push_btc_signal_payload(form)), ensure_ascii=False, indent=2),
                     content_type="application/json; charset=utf-8",
                 )
                 return
@@ -3238,15 +4722,26 @@ class RequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:  # noqa: A003
         return
 
-    def _send_text(self, body: str, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+    def _send_text(
+        self,
+        body: str,
+        content_type: str,
+        status: HTTPStatus = HTTPStatus.OK,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         payload = body.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(payload)))
-        if hasattr(self, "_active_lang"):
-            self.send_header("Set-Cookie", f"ai_trade_lang={self._active_lang}; Path=/; SameSite=Lax")
-        self.end_headers()
-        self.wfile.write(payload)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(payload)))
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
+            if hasattr(self, "_active_lang"):
+                self.send_header("Set-Cookie", f"ai_trade_lang={self._active_lang}; Path=/; SameSite=Lax")
+            self.end_headers()
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def _redirect(self, location: str) -> None:
         self.send_response(HTTPStatus.SEE_OTHER)
@@ -3268,8 +4763,12 @@ def run(*, host: str | None = None, port: int | None = None) -> None:
     resolved_host = host or SETTINGS.server_host
     resolved_port = port if port is not None else SETTINGS.server_port
     server = ThreadingHTTPServer((resolved_host, resolved_port), RequestHandler)
-    print(f"Serving on http://{resolved_host}:{resolved_port}")
-    server.serve_forever()
+    _start_feishu_daily_report_scheduler()
+    print(f"Serving on http://{resolved_host}:{resolved_port}", flush=True)
+    try:
+        server.serve_forever()
+    finally:
+        _stop_feishu_daily_report_scheduler()
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from unittest.mock import patch
 import zipfile
 
 from trade_signal_app import __version__
@@ -173,6 +174,36 @@ class BacktestTests(unittest.TestCase):
         self.assertGreater(len(report.buy_hold_equity_curve), 0)
         self.assertGreater(report.buy_hold_equity_curve[-1].equity, 1.0)
         self.assertTrue(all(event.exit_reason is not None for event in report.events))
+
+    def test_run_backtest_reuses_indicator_analysis_cache(self) -> None:
+        candles = _make_backtest_candles()
+        analysis_cache = {}
+        kwargs = {
+            "symbol": "TESTUSDT",
+            "interval": "4h",
+            "candles": candles,
+            "lookback_bars": 80,
+            "score_threshold": 60.0,
+            "holding_periods": [3, 6, 12],
+            "entry_config": EntryRuleConfig(
+                min_score=60.0,
+                min_volume_ratio=1.0,
+                min_buy_pressure_ratio=0.5,
+                max_rsi=99.0,
+                require_kdj_confirmation=False,
+            ),
+            "execution_config": ExecutionConfig(fee_bps=0.0, slippage_bps=0.0),
+            "cooldown_bars": 6,
+            "analysis_cache": analysis_cache,
+        }
+
+        first = run_backtest_for_series(**kwargs)
+        with patch("trade_signal_app.backtest.build_indicator_snapshot", side_effect=AssertionError("cache miss")):
+            second = run_backtest_for_series(**kwargs)
+
+        self.assertGreater(len(analysis_cache), 0)
+        self.assertEqual(first.events, second.events)
+        self.assertEqual(first.equity_curve, second.equity_curve)
 
     def test_simulate_long_trade_hits_take_profit(self) -> None:
         candles = _make_backtest_candles()[:80]

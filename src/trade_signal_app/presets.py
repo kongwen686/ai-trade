@@ -9,6 +9,29 @@ class BacktestPreset:
     label: str
     description: str
     values: dict[str, object]
+    category: str = "general"
+    risk_level: str = "medium"
+    validation_status: str = "baseline"
+    recommended_intervals: tuple[str, ...] = ()
+    market_regimes: tuple[str, ...] = ()
+    paper_only: bool = True
+
+
+@dataclass(frozen=True)
+class StrategyTemplate:
+    template_id: str
+    label: str
+    description: str
+    style: str
+    preset_id: str
+    compiler_prompt: str
+    risk_level: str
+    validation_status: str
+    recommended_intervals: tuple[str, ...]
+    market_regimes: tuple[str, ...]
+    symbols: tuple[str, ...] = ()
+    autotrade_values: tuple[tuple[str, object], ...] = ()
+    paper_only: bool = True
 
 
 BACKTEST_PRESETS: tuple[BacktestPreset, ...] = (
@@ -17,6 +40,10 @@ BACKTEST_PRESETS: tuple[BacktestPreset, ...] = (
         label="Custom",
         description="保留当前手动参数，适合按任务临时微调。",
         values={},
+        category="custom",
+        risk_level="custom",
+        validation_status="unvalidated",
+        market_regimes=("manual",),
     ),
     BacktestPreset(
         preset_id="balanced_swing",
@@ -40,6 +67,11 @@ BACKTEST_PRESETS: tuple[BacktestPreset, ...] = (
             "max_rsi": 72.0,
             "no_kdj_confirmation": False,
         },
+        category="swing",
+        risk_level="medium",
+        validation_status="baseline",
+        recommended_intervals=("1h", "2h", "4h"),
+        market_regimes=("trend", "range"),
     ),
     BacktestPreset(
         preset_id="breakout_aggressive",
@@ -63,6 +95,11 @@ BACKTEST_PRESETS: tuple[BacktestPreset, ...] = (
             "max_rsi": 78.0,
             "no_kdj_confirmation": True,
         },
+        category="breakout",
+        risk_level="high",
+        validation_status="baseline",
+        recommended_intervals=("15m", "1h", "4h"),
+        market_regimes=("expansion", "strong_trend"),
     ),
     BacktestPreset(
         preset_id="portfolio_rotation",
@@ -89,6 +126,151 @@ BACKTEST_PRESETS: tuple[BacktestPreset, ...] = (
             "max_rsi": 70.0,
             "no_kdj_confirmation": False,
         },
+        category="rotation",
+        risk_level="medium",
+        validation_status="baseline",
+        recommended_intervals=("1h", "4h", "1d"),
+        market_regimes=("rotation", "broad_trend"),
+    ),
+    BacktestPreset(
+        preset_id="trend_pullback_conservative",
+        label="Trend Pullback Conservative",
+        description="等待趋势回踩、量价恢复和波动率回落后再入场，减少追涨与高位接力。",
+        values={
+            "lookback_bars": 300,
+            "score_threshold": 74.0,
+            "holding_periods": "3,6,12",
+            "portfolio_top_n": 1,
+            "cooldown_bars": 3,
+            "stop_loss_pct": 3.2,
+            "take_profit_pct": 7.2,
+            "max_holding_bars": 12,
+            "capital_fraction_pct": 45.0,
+            "max_portfolio_exposure_pct": 55.0,
+            "max_concurrent_positions": 1,
+            "slippage_model": "dynamic",
+            "min_slippage_bps": 1.5,
+            "max_slippage_bps": 18.0,
+            "min_volume_ratio": 1.05,
+            "min_buy_pressure": 0.53,
+            "min_rsi": 44.0,
+            "max_rsi": 68.0,
+            "no_kdj_confirmation": False,
+            "volatility_filter_enabled": True,
+            "block_extreme_volatility": True,
+            "max_entry_volatility_percentile": 82.0,
+            "max_entry_volatility_ratio": 1.55,
+        },
+        category="trend",
+        risk_level="low",
+        validation_status="paper_candidate",
+        recommended_intervals=("1h", "2h", "4h"),
+        market_regimes=("trend_pullback", "orderly_trend"),
+    ),
+    BacktestPreset(
+        preset_id="breakout_confirmed",
+        label="Confirmed Breakout",
+        description="只接受评分、量能、买压和波动率共同确认的突破，降低假突破和冲高回落风险。",
+        values={
+            "lookback_bars": 240,
+            "score_threshold": 80.0,
+            "holding_periods": "2,4,8",
+            "portfolio_top_n": 1,
+            "cooldown_bars": 3,
+            "stop_loss_pct": 3.8,
+            "take_profit_pct": 10.0,
+            "max_holding_bars": 8,
+            "capital_fraction_pct": 40.0,
+            "max_portfolio_exposure_pct": 50.0,
+            "max_concurrent_positions": 1,
+            "slippage_model": "dynamic",
+            "min_slippage_bps": 2.0,
+            "max_slippage_bps": 22.0,
+            "min_volume_ratio": 1.45,
+            "min_buy_pressure": 0.60,
+            "min_rsi": 52.0,
+            "max_rsi": 76.0,
+            "no_kdj_confirmation": False,
+            "volatility_filter_enabled": True,
+            "block_extreme_volatility": True,
+            "max_entry_volatility_percentile": 90.0,
+            "max_entry_volatility_ratio": 2.0,
+        },
+        category="breakout",
+        risk_level="medium_high",
+        validation_status="paper_candidate",
+        recommended_intervals=("15m", "1h", "4h"),
+        market_regimes=("confirmed_expansion", "strong_trend"),
+    ),
+    BacktestPreset(
+        preset_id="mean_reversion_guarded",
+        label="Guarded Mean Reversion",
+        description="超卖后等待量能、买压与 KDJ 恢复确认，采用短持仓和严格冷却避免连续接飞刀。",
+        values={
+            "lookback_bars": 260,
+            "score_threshold": 64.0,
+            "holding_periods": "2,4,6",
+            "portfolio_top_n": 1,
+            "cooldown_bars": 3,
+            "stop_loss_pct": 2.8,
+            "take_profit_pct": 5.5,
+            "max_holding_bars": 6,
+            "capital_fraction_pct": 35.0,
+            "max_portfolio_exposure_pct": 45.0,
+            "max_concurrent_positions": 1,
+            "slippage_model": "dynamic",
+            "min_slippage_bps": 1.5,
+            "max_slippage_bps": 20.0,
+            "min_volume_ratio": 1.05,
+            "min_buy_pressure": 0.51,
+            "min_rsi": 20.0,
+            "max_rsi": 38.0,
+            "no_kdj_confirmation": False,
+            "volatility_filter_enabled": True,
+            "block_extreme_volatility": True,
+            "max_entry_volatility_percentile": 85.0,
+            "max_entry_volatility_ratio": 1.65,
+        },
+        category="mean_reversion",
+        risk_level="medium",
+        validation_status="research",
+        recommended_intervals=("15m", "1h", "2h"),
+        market_regimes=("range", "oversold_recovery"),
+    ),
+    BacktestPreset(
+        preset_id="quality_rotation",
+        label="Quality Rotation",
+        description="多标的质量轮动模板，优先选择评分、流动性和量价质量一致的前排候选。",
+        values={
+            "lookback_bars": 320,
+            "score_threshold": 74.0,
+            "holding_periods": "3,6,9",
+            "portfolio_top_n": 3,
+            "cooldown_bars": 3,
+            "stop_loss_pct": 3.5,
+            "take_profit_pct": 8.0,
+            "max_holding_bars": 9,
+            "capital_fraction_pct": 55.0,
+            "max_portfolio_exposure_pct": 70.0,
+            "max_concurrent_positions": 3,
+            "slippage_model": "dynamic",
+            "min_slippage_bps": 1.5,
+            "max_slippage_bps": 18.0,
+            "min_volume_ratio": 1.12,
+            "min_buy_pressure": 0.54,
+            "min_rsi": 48.0,
+            "max_rsi": 72.0,
+            "no_kdj_confirmation": False,
+            "volatility_filter_enabled": True,
+            "block_extreme_volatility": True,
+            "max_entry_volatility_percentile": 88.0,
+            "max_entry_volatility_ratio": 1.75,
+        },
+        category="rotation",
+        risk_level="medium",
+        validation_status="paper_candidate",
+        recommended_intervals=("1h", "4h", "1d"),
+        market_regimes=("rotation", "broad_trend"),
     ),
     BacktestPreset(
         preset_id="crypto_rebalance_premium",
@@ -115,6 +297,11 @@ BACKTEST_PRESETS: tuple[BacktestPreset, ...] = (
             "max_rsi": 85.0,
             "no_kdj_confirmation": True,
         },
+        category="rebalance",
+        risk_level="medium",
+        validation_status="research",
+        recommended_intervals=("4h", "1d"),
+        market_regimes=("rotation", "diversified"),
     ),
     BacktestPreset(
         preset_id="btc_overnight_seasonality",
@@ -141,6 +328,11 @@ BACKTEST_PRESETS: tuple[BacktestPreset, ...] = (
             "max_rsi": 100.0,
             "no_kdj_confirmation": True,
         },
+        category="seasonality",
+        risk_level="medium_high",
+        validation_status="historical_validated",
+        recommended_intervals=("1h",),
+        market_regimes=("time_window",),
     ),
     BacktestPreset(
         preset_id="btc_cycle_trend",
@@ -167,6 +359,11 @@ BACKTEST_PRESETS: tuple[BacktestPreset, ...] = (
             "max_rsi": 74.0,
             "no_kdj_confirmation": False,
         },
+        category="btc",
+        risk_level="medium",
+        validation_status="historical_validated",
+        recommended_intervals=("1h", "4h", "1d"),
+        market_regimes=("btc_bull_cycle", "btc_orderly_trend"),
     ),
     BacktestPreset(
         preset_id="btc_core_trading",
@@ -193,6 +390,11 @@ BACKTEST_PRESETS: tuple[BacktestPreset, ...] = (
             "max_rsi": 74.0,
             "no_kdj_confirmation": True,
         },
+        category="btc",
+        risk_level="medium_high",
+        validation_status="historical_validated",
+        recommended_intervals=("1h", "4h"),
+        market_regimes=("btc_trend", "btc_range"),
     ),
     BacktestPreset(
         preset_id="btc_compounding_risk_off",
@@ -219,6 +421,186 @@ BACKTEST_PRESETS: tuple[BacktestPreset, ...] = (
             "max_rsi": 70.0,
             "no_kdj_confirmation": False,
         },
+        category="btc",
+        risk_level="low",
+        validation_status="historical_validated",
+        recommended_intervals=("4h", "1d"),
+        market_regimes=("btc_risk_off", "btc_orderly_trend"),
+    ),
+)
+
+
+STRATEGY_TEMPLATES: tuple[StrategyTemplate, ...] = (
+    StrategyTemplate(
+        template_id="quality_trend_pullback",
+        label="趋势回踩确认",
+        description="面向 1h/2h/4h 顺势回踩场景，过滤极端波动、追涨和弱支撑入场。",
+        style="trend_following",
+        preset_id="trend_pullback_conservative",
+        compiler_prompt="BTC ETH SOL 4h 趋势回踩确认，EMA 多头后等待回踩支撑、量能和买压恢复再买入",
+        risk_level="low",
+        validation_status="paper_candidate",
+        recommended_intervals=("1h", "2h", "4h"),
+        market_regimes=("trend_pullback", "orderly_trend"),
+        symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT"),
+        autotrade_values=(
+            ("score_threshold", 74.0),
+            ("max_open_positions", 1),
+            ("stop_loss_pct", 3.2),
+            ("take_profit_pct", 7.2),
+            ("min_volume_ratio", 1.05),
+            ("min_buy_pressure", 0.53),
+        ),
+    ),
+    StrategyTemplate(
+        template_id="confirmed_breakout",
+        label="量价确认突破",
+        description="只有量能、买压、评分和波动率同时确认时才生成候选，避免单根 K 线冲高追入。",
+        style="breakout",
+        preset_id="breakout_confirmed",
+        compiler_prompt="BTC ETH SOL 1h 区间突破策略，放量且买压确认后入场，过滤极端波动和假突破",
+        risk_level="medium_high",
+        validation_status="paper_candidate",
+        recommended_intervals=("15m", "1h", "4h"),
+        market_regimes=("confirmed_expansion", "strong_trend"),
+        symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT"),
+        autotrade_values=(
+            ("score_threshold", 80.0),
+            ("max_open_positions", 1),
+            ("stop_loss_pct", 3.8),
+            ("take_profit_pct", 10.0),
+            ("min_volume_ratio", 1.45),
+            ("min_buy_pressure", 0.60),
+        ),
+    ),
+    StrategyTemplate(
+        template_id="guarded_mean_reversion",
+        label="受控超卖反弹",
+        description="超卖后等待反弹结构确认，采用小暴露、短持仓和冷却期限制连续接飞刀。",
+        style="mean_reversion",
+        preset_id="mean_reversion_guarded",
+        compiler_prompt=(
+            "BTC ETH 1h RSI 超卖反弹，等待 KDJ、量能和买压恢复确认，"
+            "止损2.8%，止盈5.5%，最多持有6根K线"
+        ),
+        risk_level="medium",
+        validation_status="research",
+        recommended_intervals=("15m", "1h", "2h"),
+        market_regimes=("range", "oversold_recovery"),
+        symbols=("BTCUSDT", "ETHUSDT"),
+        autotrade_values=(
+            ("score_threshold", 68.0),
+            ("max_open_positions", 1),
+            ("stop_loss_pct", 2.8),
+            ("take_profit_pct", 5.5),
+            ("min_volume_ratio", 1.05),
+            ("min_buy_pressure", 0.51),
+        ),
+    ),
+    StrategyTemplate(
+        template_id="quality_asset_rotation",
+        label="高质量动量轮动",
+        description="在主流高流动性标的中选择评分和相对强弱前排，控制总暴露与并发。",
+        style="momentum",
+        preset_id="quality_rotation",
+        compiler_prompt="BTC ETH SOL BNB 4h 动量轮动，选择评分、流动性和相对强弱排名靠前的三个币",
+        risk_level="medium",
+        validation_status="paper_candidate",
+        recommended_intervals=("1h", "4h", "1d"),
+        market_regimes=("rotation", "broad_trend"),
+        symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"),
+        autotrade_values=(
+            ("score_threshold", 74.0),
+            ("max_open_positions", 3),
+            ("stop_loss_pct", 3.5),
+            ("take_profit_pct", 8.0),
+            ("min_volume_ratio", 1.12),
+            ("min_buy_pressure", 0.54),
+        ),
+    ),
+    StrategyTemplate(
+        template_id="btc_cycle_trend",
+        label="BTC 周期趋势",
+        description="BTC 大周期顺势模板，强调趋势确认、适度持仓与单标的风险控制。",
+        style="trend_following",
+        preset_id="btc_cycle_trend",
+        compiler_prompt="BTC 4h 周期趋势跟随，EMA 20/50 多头并由量价确认后入场",
+        risk_level="medium",
+        validation_status="historical_validated",
+        recommended_intervals=("1h", "4h", "1d"),
+        market_regimes=("btc_bull_cycle", "btc_orderly_trend"),
+        symbols=("BTCUSDT",),
+        autotrade_values=(
+            ("score_threshold", 72.0),
+            ("max_open_positions", 1),
+            ("stop_loss_pct", 4.2),
+            ("take_profit_pct", 9.5),
+            ("min_volume_ratio", 1.10),
+            ("min_buy_pressure", 0.52),
+        ),
+    ),
+    StrategyTemplate(
+        template_id="btc_core_trading",
+        label="BTC 核心交易仓",
+        description="围绕 BTC 主趋势研究核心仓与交易仓的分层管理，当前只输出单仓回测与 paper 参数。",
+        style="balanced",
+        preset_id="btc_core_trading",
+        compiler_prompt="BTC 4h 综合评分策略，主趋势中使用核心仓和交易仓分层调整，严格限制总暴露",
+        risk_level="medium_high",
+        validation_status="historical_validated",
+        recommended_intervals=("1h", "4h"),
+        market_regimes=("btc_trend", "btc_range"),
+        symbols=("BTCUSDT",),
+        autotrade_values=(
+            ("score_threshold", 72.0),
+            ("max_open_positions", 1),
+            ("stop_loss_pct", 3.6),
+            ("take_profit_pct", 8.0),
+            ("min_volume_ratio", 1.08),
+            ("min_buy_pressure", 0.56),
+        ),
+    ),
+    StrategyTemplate(
+        template_id="equal_weight_rebalance",
+        label="主流币等权再平衡",
+        description="研究主流币定期等权再平衡相对自然漂移组合的收益与成本差异。",
+        style="rebalance",
+        preset_id="crypto_rebalance_premium",
+        compiler_prompt="BTC ETH SOL BNB 4h 等权再平衡，比较定期调仓和自然漂移组合",
+        risk_level="medium",
+        validation_status="research",
+        recommended_intervals=("4h", "1d"),
+        market_regimes=("rotation", "diversified"),
+        symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"),
+        autotrade_values=(
+            ("score_threshold", 68.0),
+            ("max_open_positions", 4),
+            ("stop_loss_pct", 6.0),
+            ("take_profit_pct", 12.0),
+            ("min_volume_ratio", 1.0),
+            ("min_buy_pressure", 0.5),
+        ),
+    ),
+    StrategyTemplate(
+        template_id="btc_overnight_window",
+        label="BTC 隔夜时间窗口",
+        description="研究 BTC UTC 22:00 时间窗口的历史季节性，仅用于历史验证和 paper 观察。",
+        style="seasonality",
+        preset_id="btc_overnight_seasonality",
+        compiler_prompt="BTC 1h UTC 22:00 隔夜季节性策略，持有2小时",
+        risk_level="medium_high",
+        validation_status="historical_validated",
+        recommended_intervals=("1h",),
+        market_regimes=("time_window",),
+        symbols=("BTCUSDT",),
+        autotrade_values=(
+            ("score_threshold", 0.0),
+            ("max_open_positions", 1),
+            ("stop_loss_pct", 20.0),
+            ("take_profit_pct", 20.0),
+            ("min_volume_ratio", 1.0),
+            ("min_buy_pressure", 0.0),
+        ),
     ),
 )
 
@@ -229,6 +611,18 @@ def get_backtest_preset(preset_id: str) -> BacktestPreset:
         if preset.preset_id == normalized:
             return preset
     return BACKTEST_PRESETS[0]
+
+
+def backtest_preset_ids() -> set[str]:
+    return {preset.preset_id for preset in BACKTEST_PRESETS}
+
+
+def get_strategy_template(template_id: str) -> StrategyTemplate:
+    normalized = (template_id or "").strip().lower()
+    for template in STRATEGY_TEMPLATES:
+        if template.template_id == normalized:
+            return template
+    raise ValueError("未知策略模板。")
 
 
 def apply_backtest_preset(params: dict[str, object], preset_id: str) -> dict[str, object]:
@@ -243,6 +637,31 @@ def list_backtest_presets() -> list[dict[str, object]]:
             "label": preset.label,
             "description": preset.description,
             "values": dict(preset.values),
+            "category": preset.category,
+            "risk_level": preset.risk_level,
+            "validation_status": preset.validation_status,
+            "recommended_intervals": list(preset.recommended_intervals),
+            "market_regimes": list(preset.market_regimes),
+            "paper_only": preset.paper_only,
         }
         for preset in BACKTEST_PRESETS
+    ]
+
+
+def list_strategy_templates() -> list[dict[str, object]]:
+    return [
+        {
+            "template_id": template.template_id,
+            "label": template.label,
+            "description": template.description,
+            "style": template.style,
+            "preset_id": template.preset_id,
+            "risk_level": template.risk_level,
+            "validation_status": template.validation_status,
+            "recommended_intervals": list(template.recommended_intervals),
+            "market_regimes": list(template.market_regimes),
+            "symbols": list(template.symbols),
+            "paper_only": template.paper_only,
+        }
+        for template in STRATEGY_TEMPLATES
     ]
