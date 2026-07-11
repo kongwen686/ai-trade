@@ -119,6 +119,8 @@ class ScanSummary:
     eligible_symbols: int = 0
     candidate_symbols: int = 0
     candidate_pool: int = 0
+    liquidity_profiles: dict[str, dict[str, float | int]] = field(default_factory=dict)
+    liquidity_tier_stats: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

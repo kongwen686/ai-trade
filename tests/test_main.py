@@ -1616,16 +1616,41 @@ class MainTests(unittest.TestCase):
                     "max_drawdown_pct": -4.0,
                     "signal_count": 12,
                     "trade_stat": {"trade_count": 12, "win_rate_pct": 58.0, "profit_factor": 1.4},
+                },
+                {
+                    "symbol": "ETHUSDT",
+                    "interval": "4h",
+                    "final_equity": 0.96,
+                    "max_drawdown_pct": -7.5,
+                    "signal_count": 8,
+                    "trade_stat": {"trade_count": 8, "win_rate_pct": 37.5, "profit_factor": 0.8},
                 }
             ],
-            [],
+            [
+                {
+                    "top_n": 2,
+                    "interval": "4h",
+                    "final_equity": 1.08,
+                    "max_drawdown_pct": -3.0,
+                    "batch_count": 6,
+                    "trade_stat": {"trade_count": 6, "win_rate_pct": 66.7, "profit_factor": 1.6},
+                }
+            ],
         )
 
         self.assertIn("parameter-heatmap", heatmap)
         self.assertIn("base-cell", heatmap)
         self.assertIn("+11.00%", heatmap)
         self.assertIn("risk-return-chart", scatter)
-        self.assertIn("Return +12.00%", scatter)
+        self.assertIn("chart-opportunity-zone", scatter)
+        self.assertIn("chart-grid-line", scatter)
+        self.assertIn("risk-return-summary", scatter)
+        self.assertIn("risk-return-results", scatter)
+        self.assertIn("横向滑动查看完整风险区间", scatter)
+        self.assertIn("风险效率最佳", scatter)
+        self.assertIn("收益 +12.00%", scatter)
+        self.assertIn("portfolio", scatter)
+        self.assertIn("交易 / PF", scatter)
 
     def test_render_settings_page_includes_runtime_controls(self) -> None:
         html = render_settings_page(
@@ -1665,6 +1690,18 @@ class MainTests(unittest.TestCase):
                 "scan_candidate_pool": 18,
                 "scan_min_quote_volume": 10_000_000,
                 "scan_min_trade_count": 3000,
+                "scan_btc_min_quote_volume": 100_000_000,
+                "scan_btc_min_trade_count": 50_000,
+                "scan_eth_min_quote_volume": 80_000_000,
+                "scan_eth_min_trade_count": 40_000,
+                "scan_xrp_min_quote_volume": 30_000_000,
+                "scan_xrp_min_trade_count": 15_000,
+                "scan_sol_min_quote_volume": 50_000_000,
+                "scan_sol_min_trade_count": 25_000,
+                "scan_bnb_min_quote_volume": 30_000_000,
+                "scan_bnb_min_trade_count": 15_000,
+                "scan_top30_min_quote_volume": 15_000_000,
+                "scan_top30_min_trade_count": 5000,
                 "autotrade_enabled": False,
                 "autotrade_mode": "paper",
                 "autotrade_paper_enabled": False,
@@ -1828,6 +1865,10 @@ class MainTests(unittest.TestCase):
         self.assertIn("均衡波段 · balanced_swing", html)
         self.assertIn("加密资产等权再平衡 · crypto_rebalance_premium", html)
         self.assertIn("Auto Trade Defaults", html)
+        self.assertIn("分类流动性门槛", html)
+        self.assertIn('name="scan_btc_min_quote_volume" value="100000000"', html)
+        self.assertIn('name="scan_top30_min_trade_count" value="5000"', html)
+        self.assertIn("其他山寨币最低24H成交额", html)
         self.assertIn("Intelligence & LLM", html)
         self.assertIn("settings-section-form", html)
         self.assertIn("保存访问凭据", html)
@@ -3337,6 +3378,18 @@ class MainTests(unittest.TestCase):
                     "scan_candidate_pool": ["12"],
                     "scan_min_quote_volume": ["2000000"],
                     "scan_min_trade_count": ["800"],
+                    "scan_btc_min_quote_volume": ["101000000"],
+                    "scan_btc_min_trade_count": ["51000"],
+                    "scan_eth_min_quote_volume": ["81000000"],
+                    "scan_eth_min_trade_count": ["41000"],
+                    "scan_xrp_min_quote_volume": ["31000000"],
+                    "scan_xrp_min_trade_count": ["16000"],
+                    "scan_sol_min_quote_volume": ["51000000"],
+                    "scan_sol_min_trade_count": ["26000"],
+                    "scan_bnb_min_quote_volume": ["31000000"],
+                    "scan_bnb_min_trade_count": ["16000"],
+                    "scan_top30_min_quote_volume": ["16000000"],
+                    "scan_top30_min_trade_count": ["6000"],
                     "autotrade_enabled": ["on"],
                     "autotrade_mode": ["paper"],
                     "autotrade_paper_enabled": ["on"],
@@ -3546,10 +3599,28 @@ class MainTests(unittest.TestCase):
                     "scan_candidate_pool": ["12"],
                     "scan_min_quote_volume": ["2000000"],
                     "scan_min_trade_count": ["800"],
+                    "scan_btc_min_quote_volume": ["101000000"],
+                    "scan_btc_min_trade_count": ["51000"],
+                    "scan_eth_min_quote_volume": ["81000000"],
+                    "scan_eth_min_trade_count": ["41000"],
+                    "scan_xrp_min_quote_volume": ["31000000"],
+                    "scan_xrp_min_trade_count": ["16000"],
+                    "scan_sol_min_quote_volume": ["51000000"],
+                    "scan_sol_min_trade_count": ["26000"],
+                    "scan_bnb_min_quote_volume": ["31000000"],
+                    "scan_bnb_min_trade_count": ["16000"],
+                    "scan_top30_min_quote_volume": ["16000000"],
+                    "scan_top30_min_trade_count": ["6000"],
                 }
             )
 
         self.assertEqual(scan_config.scan_defaults.quote_asset, "FDUSD")
+        self.assertEqual(scan_config.scan_defaults.btc_min_quote_volume, 101_000_000)
+        self.assertEqual(scan_config.scan_defaults.eth_min_trade_count, 41_000)
+        self.assertEqual(scan_config.scan_defaults.xrp_min_quote_volume, 31_000_000)
+        self.assertEqual(scan_config.scan_defaults.sol_min_trade_count, 26_000)
+        self.assertEqual(scan_config.scan_defaults.bnb_min_quote_volume, 31_000_000)
+        self.assertEqual(scan_config.scan_defaults.top30_min_trade_count, 6000)
         self.assertTrue(scan_config.tradingview_cache_enabled)
         self.assertTrue(scan_config.autotrade_defaults.enabled)
         self.assertTrue(scan_config.autotrade_defaults.paper_enabled)

@@ -119,6 +119,16 @@ def _validate_runtime_config(config: RuntimeConfig) -> None:
     _validate_range(scan.candidate_pool, "Candidate Pool", minimum=5, maximum=40)
     _validate_range(scan.min_quote_volume, "Min Quote Volume", minimum=0)
     _validate_range(scan.min_trade_count, "Min Trade Count", minimum=0)
+    for symbol, min_quote_volume, min_trade_count in (
+        ("BTC", scan.btc_min_quote_volume, scan.btc_min_trade_count),
+        ("ETH", scan.eth_min_quote_volume, scan.eth_min_trade_count),
+        ("XRP", scan.xrp_min_quote_volume, scan.xrp_min_trade_count),
+        ("SOL", scan.sol_min_quote_volume, scan.sol_min_trade_count),
+        ("BNB", scan.bnb_min_quote_volume, scan.bnb_min_trade_count),
+        ("Top 30", scan.top30_min_quote_volume, scan.top30_min_trade_count),
+    ):
+        _validate_range(min_quote_volume, f"{symbol} Min Quote Volume", minimum=0)
+        _validate_range(min_trade_count, f"{symbol} Min Trade Count", minimum=0)
     if not scan.quote_asset.strip().isalnum():
         raise ValueError("Quote Asset 只能包含字母和数字。")
 
@@ -214,6 +224,13 @@ def _scan_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "candidate_pool": config.scan_defaults.candidate_pool,
         "min_quote_volume": int(config.scan_defaults.min_quote_volume),
         "min_trade_count": config.scan_defaults.min_trade_count,
+        "liquidity_profiles": {
+            symbol: {
+                "min_quote_volume": getattr(config.scan_defaults, f"{symbol.lower()}_min_quote_volume"),
+                "min_trade_count": getattr(config.scan_defaults, f"{symbol.lower()}_min_trade_count"),
+            }
+            for symbol in ("BTC", "ETH", "XRP", "SOL", "BNB", "TOP30")
+        },
     }
 
 
@@ -307,6 +324,18 @@ def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "scan_candidate_pool": config.scan_defaults.candidate_pool,
         "scan_min_quote_volume": int(config.scan_defaults.min_quote_volume),
         "scan_min_trade_count": config.scan_defaults.min_trade_count,
+        "scan_btc_min_quote_volume": int(config.scan_defaults.btc_min_quote_volume),
+        "scan_btc_min_trade_count": config.scan_defaults.btc_min_trade_count,
+        "scan_eth_min_quote_volume": int(config.scan_defaults.eth_min_quote_volume),
+        "scan_eth_min_trade_count": config.scan_defaults.eth_min_trade_count,
+        "scan_xrp_min_quote_volume": int(config.scan_defaults.xrp_min_quote_volume),
+        "scan_xrp_min_trade_count": config.scan_defaults.xrp_min_trade_count,
+        "scan_sol_min_quote_volume": int(config.scan_defaults.sol_min_quote_volume),
+        "scan_sol_min_trade_count": config.scan_defaults.sol_min_trade_count,
+        "scan_bnb_min_quote_volume": int(config.scan_defaults.bnb_min_quote_volume),
+        "scan_bnb_min_trade_count": config.scan_defaults.bnb_min_trade_count,
+        "scan_top30_min_quote_volume": int(config.scan_defaults.top30_min_quote_volume),
+        "scan_top30_min_trade_count": config.scan_defaults.top30_min_trade_count,
         "autotrade_enabled": autotrade.enabled,
         "autotrade_mode": autotrade.mode,
         "autotrade_paper_enabled": autotrade.paper_enabled,
@@ -583,6 +612,18 @@ def _build_runtime_config(form: dict[str, list[str]], *, current_config: Runtime
             candidate_pool=_parse_int_value(_get_first(form, "scan_candidate_pool", str(current_config.scan_defaults.candidate_pool)), "Candidate Pool"),
             min_quote_volume=_parse_float_value(_get_first(form, "scan_min_quote_volume", str(current_config.scan_defaults.min_quote_volume)), "Min Quote Volume"),
             min_trade_count=_parse_int_value(_get_first(form, "scan_min_trade_count", str(current_config.scan_defaults.min_trade_count)), "Min Trade Count"),
+            btc_min_quote_volume=_parse_float_value(_get_first(form, "scan_btc_min_quote_volume", str(current_config.scan_defaults.btc_min_quote_volume)), "BTC Min Quote Volume"),
+            btc_min_trade_count=_parse_int_value(_get_first(form, "scan_btc_min_trade_count", str(current_config.scan_defaults.btc_min_trade_count)), "BTC Min Trade Count"),
+            eth_min_quote_volume=_parse_float_value(_get_first(form, "scan_eth_min_quote_volume", str(current_config.scan_defaults.eth_min_quote_volume)), "ETH Min Quote Volume"),
+            eth_min_trade_count=_parse_int_value(_get_first(form, "scan_eth_min_trade_count", str(current_config.scan_defaults.eth_min_trade_count)), "ETH Min Trade Count"),
+            xrp_min_quote_volume=_parse_float_value(_get_first(form, "scan_xrp_min_quote_volume", str(current_config.scan_defaults.xrp_min_quote_volume)), "XRP Min Quote Volume"),
+            xrp_min_trade_count=_parse_int_value(_get_first(form, "scan_xrp_min_trade_count", str(current_config.scan_defaults.xrp_min_trade_count)), "XRP Min Trade Count"),
+            sol_min_quote_volume=_parse_float_value(_get_first(form, "scan_sol_min_quote_volume", str(current_config.scan_defaults.sol_min_quote_volume)), "SOL Min Quote Volume"),
+            sol_min_trade_count=_parse_int_value(_get_first(form, "scan_sol_min_trade_count", str(current_config.scan_defaults.sol_min_trade_count)), "SOL Min Trade Count"),
+            bnb_min_quote_volume=_parse_float_value(_get_first(form, "scan_bnb_min_quote_volume", str(current_config.scan_defaults.bnb_min_quote_volume)), "BNB Min Quote Volume"),
+            bnb_min_trade_count=_parse_int_value(_get_first(form, "scan_bnb_min_trade_count", str(current_config.scan_defaults.bnb_min_trade_count)), "BNB Min Trade Count"),
+            top30_min_quote_volume=_parse_float_value(_get_first(form, "scan_top30_min_quote_volume", str(current_config.scan_defaults.top30_min_quote_volume)), "Top 30 Min Quote Volume"),
+            top30_min_trade_count=_parse_int_value(_get_first(form, "scan_top30_min_trade_count", str(current_config.scan_defaults.top30_min_trade_count)), "Top 30 Min Trade Count"),
         ),
         autotrade_defaults=AutoTradeDefaults(
             enabled=autotrade_enabled,

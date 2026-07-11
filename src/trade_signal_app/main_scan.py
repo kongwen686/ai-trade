@@ -7,8 +7,13 @@ from threading import RLock
 from .binance_client import parse_ticker
 from .config import SETTINGS
 from .main_settings import _get_first, _parse_int_value, _parse_float_value, _validate_choice, _validate_range
-from .runtime_config import RuntimeConfig
-from .service import FALLBACK_SCAN_BASES, LEVERAGED_SUFFIXES, STABLELIKE_BASES
+from .runtime_config import RuntimeConfig, SCAN_TIER_THRESHOLD_FIELDS
+from .service import (
+    FALLBACK_SCAN_BASES,
+    LEVERAGED_SUFFIXES,
+    STABLELIKE_BASES,
+    filter_tickers_by_liquidity_tier,
+)
 from .time_utils import now_app_time
 from .ui import format_signal_row
 
@@ -50,6 +55,7 @@ def _scan_cache_key(params: dict[str, object]) -> tuple[object, ...]:
         params["candidate_pool"],
         params["min_quote_volume"],
         params["min_trade_count"],
+        *(params.get(key) for key in SCAN_TIER_THRESHOLD_FIELDS),
         params.get("community_provider", ""),
         params.get("x_provider", ""),
         params.get("x_account_mode", ""),
@@ -245,14 +251,18 @@ def _fallback_scan_payload(params: dict[str, object], warning: str, *, scanner: 
             ticker = parse_ticker(row)
         except (KeyError, TypeError, ValueError):
             continue
-        if (
-            _is_fallback_ticker_eligible(ticker.symbol.upper(), quote_asset)
-            and ticker.quote_volume >= float(params["min_quote_volume"])
-            and ticker.trade_count >= int(params["min_trade_count"])
-        ):
+        if _is_fallback_ticker_eligible(ticker.symbol.upper(), quote_asset):
             tickers.append(ticker)
-    tickers.sort(key=lambda item: item.quote_volume, reverse=True)
-    selected_tickers = tickers[: int(params["candidate_pool"])]
+    eligible_symbols = {ticker.symbol for ticker in tickers}
+    filtered_tickers, liquidity_profiles, liquidity_tier_stats = filter_tickers_by_liquidity_tier(
+        tickers,
+        eligible_symbols=eligible_symbols,
+        quote_asset=quote_asset,
+        profile_source=params,
+        alt_min_quote_volume=float(params["min_quote_volume"]),
+        alt_min_trade_count=int(params["min_trade_count"]),
+    )
+    selected_tickers = filtered_tickers[: int(params["candidate_pool"])]
     signals = []
     for ticker in selected_tickers:
         score = min(82.0, 50.0 + abs(ticker.price_change_percent) * 3 + min(ticker.quote_volume / 1_000_000_000, 10.0))
@@ -311,9 +321,11 @@ def _fallback_scan_payload(params: dict[str, object], warning: str, *, scanner: 
             "min_quote_volume": float(params["min_quote_volume"]),
             "min_trade_count": int(params["min_trade_count"]),
             "fetched_at": now_app_time().isoformat(),
-            "eligible_symbols": len(tickers),
+            "eligible_symbols": len(filtered_tickers),
             "candidate_symbols": len(selected_tickers),
             "candidate_pool": int(params["candidate_pool"]),
+            "liquidity_profiles": liquidity_profiles,
+            "liquidity_tier_stats": liquidity_tier_stats,
         },
         "signals": signals,
         "cached": False,
@@ -348,6 +360,7 @@ def _scan_payload(
         "candidate_pool": candidate_pool,
         "min_quote_volume": int(min_quote_volume),
         "min_trade_count": min_trade_count,
+        **{key: getattr(scan_defaults, key) for key in SCAN_TIER_THRESHOLD_FIELDS},
         "view_mode": view_mode,
         "community_provider": runtime_config.community_provider,
         "x_provider": runtime_config.x_provider,

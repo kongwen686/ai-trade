@@ -112,6 +112,47 @@ class ScanDefaults:
     candidate_pool: int = 18
     min_quote_volume: float = 10_000_000
     min_trade_count: int = 3000
+    btc_min_quote_volume: float = 100_000_000
+    btc_min_trade_count: int = 50_000
+    eth_min_quote_volume: float = 80_000_000
+    eth_min_trade_count: int = 40_000
+    xrp_min_quote_volume: float = 30_000_000
+    xrp_min_trade_count: int = 15_000
+    sol_min_quote_volume: float = 50_000_000
+    sol_min_trade_count: int = 25_000
+    bnb_min_quote_volume: float = 30_000_000
+    bnb_min_trade_count: int = 15_000
+    top30_min_quote_volume: float = 15_000_000
+    top30_min_trade_count: int = 5000
+
+
+SCAN_TIER_THRESHOLD_FIELDS = (
+    "btc_min_quote_volume",
+    "btc_min_trade_count",
+    "eth_min_quote_volume",
+    "eth_min_trade_count",
+    "xrp_min_quote_volume",
+    "xrp_min_trade_count",
+    "sol_min_quote_volume",
+    "sol_min_trade_count",
+    "bnb_min_quote_volume",
+    "bnb_min_trade_count",
+    "top30_min_quote_volume",
+    "top30_min_trade_count",
+)
+
+
+def _scan_defaults_from_payload(defaults: ScanDefaults, payload: object) -> ScanDefaults:
+    values = asdict(defaults)
+    if not isinstance(payload, dict):
+        return ScanDefaults(**values)
+    values.update({key: value for key, value in payload.items() if key in values})
+    if not any(key in payload for key in SCAN_TIER_THRESHOLD_FIELDS):
+        legacy_quote_volume = float(values["min_quote_volume"])
+        legacy_trade_count = int(values["min_trade_count"])
+        for key in SCAN_TIER_THRESHOLD_FIELDS:
+            values[key] = legacy_quote_volume if key.endswith("quote_volume") else legacy_trade_count
+    return ScanDefaults(**values)
 
 
 @dataclass
@@ -366,6 +407,18 @@ class RuntimeConfig:
                 candidate_pool=settings.candidate_pool,
                 min_quote_volume=settings.min_quote_volume,
                 min_trade_count=settings.min_trade_count,
+                btc_min_quote_volume=settings.btc_min_quote_volume,
+                btc_min_trade_count=settings.btc_min_trade_count,
+                eth_min_quote_volume=settings.eth_min_quote_volume,
+                eth_min_trade_count=settings.eth_min_trade_count,
+                xrp_min_quote_volume=settings.xrp_min_quote_volume,
+                xrp_min_trade_count=settings.xrp_min_trade_count,
+                sol_min_quote_volume=settings.sol_min_quote_volume,
+                sol_min_trade_count=settings.sol_min_trade_count,
+                bnb_min_quote_volume=settings.bnb_min_quote_volume,
+                bnb_min_trade_count=settings.bnb_min_trade_count,
+                top30_min_quote_volume=settings.top30_min_quote_volume,
+                top30_min_trade_count=settings.top30_min_trade_count,
             ),
         )
 
@@ -440,12 +493,7 @@ class RuntimeConfig:
             openai_api_key=str(payload.get("openai_api_key", defaults.openai_api_key)),
             openai_model=str(payload.get("openai_model", defaults.openai_model)),
             feishu_webhook_url=str(payload.get("feishu_webhook_url", defaults.feishu_webhook_url)),
-            scan_defaults=ScanDefaults(
-                **{
-                    **asdict(defaults.scan_defaults),
-                    **(scan_payload if isinstance(scan_payload, dict) else {}),
-                }
-            ),
+            scan_defaults=_scan_defaults_from_payload(defaults.scan_defaults, scan_payload),
             backtest_defaults=BacktestDefaults(
                 **{
                     **asdict(defaults.backtest_defaults),

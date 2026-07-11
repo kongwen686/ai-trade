@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from html import escape
+from math import ceil, floor, log10
 from urllib.parse import urlencode
 
 from .presets import get_backtest_preset
@@ -486,46 +487,147 @@ def _risk_return_scatter(
     rows = _backtest_result_rows(series_reports, portfolio_reports)[:10]
     if not rows:
         return '<div class="sensitivity-empty"><strong>等待风险收益样本</strong><span>运行回测后才会绘制真实散点。</span></div>'
-    width = 720.0
-    height = 300.0
-    left = 58.0
-    right = 24.0
-    top = 28.0
-    bottom = 46.0
+
+    def nice_step(span: float, target_ticks: int = 5) -> float:
+        rough_step = max(span / target_ticks, 0.01)
+        magnitude = 10 ** floor(log10(rough_step))
+        normalized = rough_step / magnitude
+        factor = 1.0 if normalized <= 1 else 2.0 if normalized <= 2 else 5.0 if normalized <= 5 else 10.0
+        return factor * magnitude
+
+    width = 760.0
+    height = 360.0
+    left = 72.0
+    right = 26.0
+    top = 44.0
+    bottom = 62.0
     plot_width = width - left - right
     plot_height = height - top - bottom
-    max_risk = max(abs(float(item["max_drawdown_pct"])) for item in rows) or 1.0
+    risks = [abs(float(item["max_drawdown_pct"])) for item in rows]
     returns = [float(item["return_pct"]) for item in rows]
-    min_return = min([0.0, *returns])
-    max_return = max([0.0, *returns])
-    return_span = max_return - min_return or 1.0
-    zero_y = top + ((max_return - 0.0) / return_span) * plot_height
+    max_risk = max(risks) or 1.0
+    risk_step = nice_step(max_risk * 1.08, 4)
+    risk_max = max(risk_step * 4, ceil(max_risk / risk_step) * risk_step)
+    risk_tick_count = max(4, int(round(risk_max / risk_step)))
+
+    raw_min_return = min([0.0, *returns])
+    raw_max_return = max([0.0, *returns])
+    raw_return_span = max(raw_max_return - raw_min_return, 1.0)
+    return_padding = max(raw_return_span * 0.12, 0.5)
+    return_min = raw_min_return - return_padding if raw_min_return < 0 else 0.0
+    return_max = raw_max_return + return_padding if raw_max_return > 0 else 0.0
+    if return_min == return_max:
+        return_max = 1.0
+    return_step = nice_step(return_max - return_min, 5)
+    return_min = floor(return_min / return_step) * return_step
+    return_max = ceil(return_max / return_step) * return_step
+    return_span = return_max - return_min or 1.0
+    zero_y = top + ((return_max - 0.0) / return_span) * plot_height
+
+    risk_ticks = [index * risk_step for index in range(risk_tick_count + 1)]
+    return_tick_count = int(round(return_span / return_step))
+    return_ticks = [return_min + index * return_step for index in range(return_tick_count + 1)]
+    best_index = max(
+        range(len(rows)),
+        key=lambda index: float(rows[index]["return_pct"]) / max(abs(float(rows[index]["max_drawdown_pct"])), 0.5),
+    )
+    max_trades = max(int(item["trade_count"]) for item in rows) or 1
+    positive_count = sum(1 for value in returns if value >= 0)
+    lowest_risk_item = min(rows, key=lambda item: abs(float(item["max_drawdown_pct"])))
+    best_item = rows[best_index]
+
+    x_grid = []
+    for value in risk_ticks:
+        x = left + (value / risk_max) * plot_width
+        x_grid.append(
+            f'<path class="chart-grid-line" d="M{x:.2f} {top:.0f}V{height - bottom:.0f}" />'
+            f'<text class="chart-tick" x="{x:.2f}" y="{height - bottom + 24:.0f}" text-anchor="middle">{value:.1f}%</text>'
+        )
+    y_grid = []
+    for value in return_ticks:
+        y = top + ((return_max - value) / return_span) * plot_height
+        y_grid.append(
+            f'<path class="chart-grid-line" d="M{left:.0f} {y:.2f}H{width - right:.0f}" />'
+            f'<text class="chart-tick" x="{left - 12:.0f}" y="{y + 4:.2f}" text-anchor="end">{value:+.1f}%</text>'
+        )
+
     points = []
-    legend = []
-    for item in rows:
+    result_cards = []
+    placed_points: list[tuple[float, float]] = []
+    overlap_offsets = ((0.0, 0.0), (13.0, -13.0), (-13.0, 13.0), (13.0, 13.0), (-13.0, -13.0), (20.0, 0.0), (0.0, -20.0))
+    for index, item in enumerate(rows):
         risk = abs(float(item["max_drawdown_pct"]))
         return_pct = float(item["return_pct"])
-        x = left + max(0.02, risk / max_risk) * plot_width
-        y = top + ((max_return - return_pct) / return_span) * plot_height
+        base_x = left + (risk / risk_max) * plot_width
+        base_y = top + ((return_max - return_pct) / return_span) * plot_height
+        x, y = base_x, base_y
+        for offset_x, offset_y in overlap_offsets:
+            candidate_x = min(max(base_x + offset_x, left + 10), width - right - 10)
+            candidate_y = min(max(base_y + offset_y, top + 10), height - bottom - 10)
+            if all((candidate_x - px) ** 2 + (candidate_y - py) ** 2 >= 20 ** 2 for px, py in placed_points):
+                x, y = candidate_x, candidate_y
+                break
+        placed_points.append((x, y))
         tone = "positive" if return_pct >= 0 else "negative"
+        kind_class = "portfolio" if item["kind"] == "组合" else "series"
+        best_class = " best" if index == best_index else ""
         label = f'{item["label"]} {item["interval"]}'
-        points.append(
-            f'<g class="risk-point {tone}"><circle cx="{x:.2f}" cy="{y:.2f}" r="7"><title>{escape(label)} · Return {return_pct:+.2f}% · DD {float(item["max_drawdown_pct"]):+.2f}%</title></circle>'
-            f'<text x="{min(x + 10, width - 110):.2f}" y="{(y + 22 if y < top + 24 else y - 10):.2f}">{escape(str(item["label"]))}</text></g>'
+        point_radius = 7.0 + min(3.5, int(item["trade_count"]) / max_trades * 3.5)
+        title = escape(
+            f'{label} · 收益 {return_pct:+.2f}% · 最大回撤 {float(item["max_drawdown_pct"]):+.2f}% · '
+            f'胜率 {float(item["win_rate_pct"]):.1f}% · PF {float(item["profit_factor"]):.2f} · {int(item["trade_count"])} 笔'
         )
-        legend.append(
-            f'<span><i class="{tone}"></i><strong>{escape(label)}</strong> {return_pct:+.2f}% / DD {float(item["max_drawdown_pct"]):+.2f}%</span>'
+        leader = (
+            f'<path class="point-leader" d="M{base_x:.2f} {base_y:.2f}L{x:.2f} {y:.2f}" />'
+            if abs(x - base_x) + abs(y - base_y) > 1
+            else ""
+        )
+        marker = (
+            f'<rect class="point-marker" x="{-point_radius:.2f}" y="{-point_radius:.2f}" width="{point_radius * 2:.2f}" height="{point_radius * 2:.2f}" rx="3" transform="rotate(45)" />'
+            if kind_class == "portfolio"
+            else f'<circle class="point-marker" cx="0" cy="0" r="{point_radius:.2f}" />'
+        )
+        points.append(
+            f'{leader}<g class="risk-point {tone} {kind_class}{best_class}" transform="translate({x:.2f} {y:.2f})">'
+            f'<title>{title}</title>{marker}<text class="point-index" text-anchor="middle" y="4">{index + 1}</text></g>'
+        )
+        result_cards.append(
+            f'<article class="risk-return-item {tone}{best_class}">'
+            f'<header><span class="risk-item-index">{index + 1:02d}</span><div><strong>{escape(str(item["label"]))}</strong>'
+            f'<small>{escape(str(item["kind"]))} · {escape(str(item["interval"]))}</small></div>'
+            f'{"<em>风险效率最佳</em>" if index == best_index else ""}</header>'
+            f'<div class="risk-item-metrics"><span>收益<strong>{return_pct:+.2f}%</strong></span>'
+            f'<span>最大回撤<strong>{float(item["max_drawdown_pct"]):+.2f}%</strong></span>'
+            f'<span>胜率<strong>{float(item["win_rate_pct"]):.1f}%</strong></span>'
+            f'<span>交易 / PF<strong>{int(item["trade_count"])} / {float(item["profit_factor"]):.2f}</strong></span></div></article>'
         )
     return f"""
       <div class="risk-return-chart">
-        <svg viewBox="0 0 {width:.0f} {height:.0f}" role="img" aria-label="风险收益散点图">
-          <path class="chart-grid" d="M{left:.0f} {top:.0f}V{height - bottom:.0f}H{width - right:.0f}" />
+        <div class="risk-return-summary">
+          <span><small>风险效率最佳</small><strong>{escape(str(best_item['label']))}</strong><em>{float(best_item['return_pct']):+.2f}% / DD {float(best_item['max_drawdown_pct']):+.2f}%</em></span>
+          <span><small>最低回撤</small><strong>{escape(str(lowest_risk_item['label']))}</strong><em>{float(lowest_risk_item['max_drawdown_pct']):+.2f}%</em></span>
+          <span><small>正收益结果</small><strong>{positive_count} / {len(rows)}</strong><em>共比较 {len(rows)} 组</em></span>
+        </div>
+        <small class="risk-chart-mobile-hint">横向滑动查看完整风险区间与全部点位</small>
+        <div class="risk-return-plot">
+        <svg viewBox="0 0 {width:.0f} {height:.0f}" role="img" aria-label="风险收益散点图，横轴为最大回撤，纵轴为收益率">
+          <defs>
+            <linearGradient id="riskPlotBackground" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#10243b"/><stop offset="1" stop-color="#07111f"/></linearGradient>
+            <linearGradient id="opportunityZone" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#34d399" stop-opacity=".2"/><stop offset="1" stop-color="#34d399" stop-opacity="0"/></linearGradient>
+          </defs>
+          <rect class="chart-surface" x="0" y="0" width="{width:.0f}" height="{height:.0f}" rx="18" />
+          <rect class="chart-opportunity-zone" x="{left:.0f}" y="{top:.0f}" width="{plot_width * 0.46:.2f}" height="{plot_height * 0.42:.2f}" rx="12" />
+          <text class="chart-zone-label" x="{left + 14:.0f}" y="{top + 22:.0f}">优先观察区 · 高收益 / 低回撤</text>
+          {''.join(x_grid)}{''.join(y_grid)}
+          <path class="chart-axis" d="M{left:.0f} {top:.0f}V{height - bottom:.0f}H{width - right:.0f}" />
           <path class="chart-zero" d="M{left:.0f} {zero_y:.2f}H{width - right:.0f}" />
-          <text class="axis-label" x="{left:.0f}" y="18">收益 ↑</text>
-          <text class="axis-label" x="{width - 190:.0f}" y="{height - 12:.0f}">最大回撤越大越靠右</text>
+          <text class="axis-label" x="{left:.0f}" y="24">策略收益率 ↑</text>
+          <text class="axis-label" x="{width - right:.0f}" y="{height - 16:.0f}" text-anchor="end">最大回撤 → 风险增加</text>
           {''.join(points)}
         </svg>
-        <div class="risk-return-legend">{''.join(legend)}</div>
+        <div class="risk-encoding"><span><i class="shape series"></i>单币种</span><span><i class="shape portfolio"></i>组合</span><span><i class="size-dot small"></i><i class="size-dot large"></i>点径 = 交易样本</span><span><i class="best-dot"></i>风险效率最佳</span></div>
+        </div>
+        <div class="risk-return-results">{''.join(result_cards)}</div>
       </div>
     """
 

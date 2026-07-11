@@ -422,7 +422,7 @@ def render_index_page(
         <small>{escape(str(summary["interval"]))} {t("周期", "interval")} · ≤ {candidate_symbols}</small>
       </div>
       <div class="ant-statistic-card stat-card">
-        <span>{t("最小成交额", "Min Quote Volume")}</span>
+        <span>{t("山寨币最小成交额", "Alt Min Quote Volume")}</span>
         <strong>{float(summary["min_quote_volume"]) / 1_000_000:.0f}M</strong>
         <small>Quote Volume</small>
       </div>
@@ -447,17 +447,17 @@ def render_index_page(
             <input type="number" name="candidate_pool" min="5" max="40" value="{int(params["candidate_pool"])}" />
           </label>
           <label>
-            <span>{t("最小成交额", "Min Quote Volume")}</span>
+            <span>{t("其他山寨币最小成交额", "Alt Min Quote Volume")}</span>
             <input type="number" name="min_quote_volume" min="1000000" step="1000000" value="{int(params["min_quote_volume"])}" />
           </label>
           <label>
-            <span>{t("最小成交笔数", "Min Trades")}</span>
+            <span>{t("其他山寨币最小成交笔数", "Alt Min Trades")}</span>
             <input type="number" name="min_trade_count" min="100" step="100" value="{int(params["min_trade_count"])}" />
           </label>
           <button type="submit">{t("刷新信号", "Refresh Signals")}</button>
         </form>
         <p class="helper-text">
-          {t("数据来自 Binance Spot 市场接口。社区热度支持 Binance/OKX 官方热点、X/Twitter、Reddit 和本地", "Market data comes from Binance Spot APIs. Community heat supports Binance/OKX official trends, X/Twitter, Reddit, and local")} <code>data/community_scores.csv</code>{t("，未配置时会自动忽略不可用来源。", "; unavailable sources are skipped automatically.")}
+          {t("BTC、ETH、XRP、SOL、BNB 与 Top 30 使用系统配置中的分类流动性门槛；此处仅临时覆盖其他山寨币门槛。数据来自 Binance Spot 市场接口。社区热度支持 Binance/OKX 官方热点、X/Twitter、Reddit 和本地", "BTC, ETH, XRP, SOL, BNB, and Top 30 use tiered liquidity thresholds from system settings; these controls only override other altcoins. Market data comes from Binance Spot APIs. Community heat supports Binance/OKX official trends, X/Twitter, Reddit, and local")} <code>data/community_scores.csv</code>{t("，未配置时会自动忽略不可用来源。", "; unavailable sources are skipped automatically.")}
         </p>
         {_community_operation_panel(params, ordered_signals, active_lang)}
         <div class="scan-view-bar">

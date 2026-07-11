@@ -30,6 +30,8 @@ class RuntimeConfigTests(unittest.TestCase):
             config.reddit_user_agent = "trade-signal-app/test"
             config.backtest_defaults.preset = "balanced_swing"
             config.scan_defaults.quote_asset = "FDUSD"
+            config.scan_defaults.btc_min_quote_volume = 123_000_000
+            config.scan_defaults.top30_min_trade_count = 6789
             config.backtest_defaults.score_threshold = 74.5
             config.carry_paper_defaults.enabled = True
             config.carry_paper_defaults.min_basis_bps = 32.0
@@ -42,9 +44,26 @@ class RuntimeConfigTests(unittest.TestCase):
             self.assertEqual(loaded.reddit_user_agent, "trade-signal-app/test")
             self.assertEqual(loaded.backtest_defaults.preset, "balanced_swing")
             self.assertEqual(loaded.scan_defaults.quote_asset, "FDUSD")
+            self.assertEqual(loaded.scan_defaults.btc_min_quote_volume, 123_000_000)
+            self.assertEqual(loaded.scan_defaults.top30_min_trade_count, 6789)
             self.assertEqual(loaded.backtest_defaults.score_threshold, 74.5)
             self.assertTrue(loaded.carry_paper_defaults.enabled)
             self.assertEqual(loaded.carry_paper_defaults.min_basis_bps, 32.0)
+
+    def test_legacy_scan_thresholds_migrate_to_every_liquidity_tier(self) -> None:
+        config = RuntimeConfig.from_dict(
+            {
+                "scan_defaults": {
+                    "min_quote_volume": 12_000_000,
+                    "min_trade_count": 4321,
+                }
+            },
+            AppSettings(),
+        )
+
+        for tier in ("btc", "eth", "xrp", "sol", "bnb", "top30"):
+            self.assertEqual(getattr(config.scan_defaults, f"{tier}_min_quote_volume"), 12_000_000)
+            self.assertEqual(getattr(config.scan_defaults, f"{tier}_min_trade_count"), 4321)
 
     def test_store_encrypts_when_passphrase_is_set(self) -> None:
         settings = AppSettings()
