@@ -21,6 +21,8 @@ EMERGENCY_DRAWDOWN_STATUS = "emergency_drawdown"
 FILLED_TRADE_STATUSES = {"filled", "paper_filled"}
 TRADE_EVENT_ACTIONS = {"BUY", "SELL"}
 TRADING_EVENT_RETENTION_LIMIT = 5000
+NO_ELIGIBLE_SIGNAL_STATUS = "no_eligible_signal"
+NO_ELIGIBLE_SIGNAL_LOG_COOLDOWN_MINUTES = 60
 
 
 @dataclass
@@ -297,6 +299,7 @@ class AutoTrader:
         blocked_symbols: dict[str, str] | None = None,
         trade_notifier: FeishuTradeNotifier | None = None,
         isolate_mode: bool = False,
+        scan_result: tuple[object, list[object]] | None = None,
     ) -> None:
         self.scanner = scanner
         self.execution_gateway = getattr(scanner, "gateway", None)
@@ -304,6 +307,7 @@ class AutoTrader:
         self.blocked_symbols = blocked_symbols or {}
         self.trade_notifier = trade_notifier
         self.isolate_mode = isolate_mode
+        self.scan_result = scan_result
 
     def set_execution_gateway(self, gateway: object) -> None:
         self.execution_gateway = gateway
@@ -318,8 +322,15 @@ class AutoTrader:
             passthrough_positions = []
         recent_events = self.state_store.load_events()
         events: list[TradingEvent] = []
-        summary, signals = self.scanner.scan()
+        summary, signals = self.scan_result if self.scan_result is not None else self.scanner.scan()
         now = now_app_time()
+        filter_counts = {
+            "score": 0,
+            "volume": 0,
+            "buy_pressure": 0,
+            "position_limit": 0,
+            "exposure_limit": 0,
+        }
 
         signal_prices = {signal.symbol: signal.ticker.last_price for signal in signals}
         latest_prices = self._latest_prices_for_positions(positions, signal_prices)
@@ -388,10 +399,12 @@ class AutoTrader:
             if position.opened_at > cooldown_after
         }
 
-        for signal in signals:
+        for signal_index, signal in enumerate(signals):
             if len(positions) >= config.max_open_positions:
+                filter_counts["position_limit"] = len(signals) - signal_index
                 break
             if exposure + config.quote_order_qty > config.max_total_quote_exposure:
+                filter_counts["exposure_limit"] = len(signals) - signal_index
                 break
             if signal.symbol in open_symbols or signal.symbol in recent_symbols:
                 continue
@@ -410,10 +423,13 @@ class AutoTrader:
                 )
                 continue
             if signal.score < config.score_threshold:
+                filter_counts["score"] += 1
                 continue
             if signal.indicators.volume_ratio < config.min_volume_ratio:
+                filter_counts["volume"] += 1
                 continue
             if signal.indicators.buy_pressure_ratio < config.min_buy_pressure:
+                filter_counts["buy_pressure"] += 1
                 continue
             volatility_issue = self._volatility_entry_reason(signal, config)
             if volatility_issue:
@@ -470,9 +486,31 @@ class AutoTrader:
                 open_symbols.add(position.symbol)
                 exposure += self._position_margin_notional(position)
 
+        summary_event: TradingEvent | None = None
+        if not events:
+            summary_event = TradingEvent(
+                action="SKIP",
+                symbol="*",
+                mode=config.mode,
+                status=NO_ELIGIBLE_SIGNAL_STATUS,
+                message=(
+                    f"本轮扫描 {summary.returned_signals} 个候选，未产生订单："
+                    f"评分低于 {config.score_threshold:.1f} 的 {filter_counts['score']} 个，"
+                    f"量比低于 {config.min_volume_ratio:.2f} 的 {filter_counts['volume']} 个，"
+                    f"买压低于 {config.min_buy_pressure:.2f} 的 {filter_counts['buy_pressure']} 个，"
+                    f"持仓上限阻断 {filter_counts['position_limit']} 个，"
+                    f"敞口上限阻断 {filter_counts['exposure_limit']} 个。"
+                ),
+                exchange=config.execution_exchange.upper(),
+            )
+            events.append(summary_event)
+
         combined_positions = [*passthrough_positions, *positions]
         self.state_store.save(combined_positions)
-        self.state_store.append_events(events)
+        persist_events = events
+        if summary_event is not None and self._has_recent_no_eligible_summary(recent_events, config.mode, now):
+            persist_events = [event for event in events if event is not summary_event]
+        self.state_store.append_events(persist_events)
         return TradingRunReport(
             enabled=True,
             mode=config.mode,
@@ -480,6 +518,20 @@ class AutoTrader:
             returned_signals=summary.returned_signals,
             open_positions=combined_positions,
             events=events,
+        )
+
+    @staticmethod
+    def _has_recent_no_eligible_summary(
+        recent_events: list[TradingEvent],
+        mode: str,
+        now: datetime,
+    ) -> bool:
+        cutoff = now - timedelta(minutes=NO_ELIGIBLE_SIGNAL_LOG_COOLDOWN_MINUTES)
+        return any(
+            event.status == NO_ELIGIBLE_SIGNAL_STATUS
+            and event.mode == mode
+            and event.created_at >= cutoff
+            for event in recent_events
         )
 
     def _evaluate_exits(

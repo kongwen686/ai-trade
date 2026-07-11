@@ -2091,8 +2091,8 @@ def _combined_trading_report(
     return TradingRunReport(
         enabled=config.enabled or config.paper_enabled or config.live_enabled,
         mode=mode_label,
-        scanned_symbols=sum(report.scanned_symbols for report in reports),
-        returned_signals=sum(report.returned_signals for report in reports),
+        scanned_symbols=max((report.scanned_symbols for report in reports), default=0),
+        returned_signals=max((report.returned_signals for report in reports), default=0),
         open_positions=positions,
         events=events,
     )
@@ -2158,6 +2158,7 @@ def _run_trading_once(*, force_paper: bool = False) -> dict[str, object]:
                 )
     risk_snapshot = IntelligenceHub(scanner=scanner, runtime_config=runtime_config, settings=SETTINGS).snapshot()
     blocked_symbols = risk_snapshot.execution_risk.blocked_symbols
+    shared_scan_result = scanner.scan()
     reports: list[TradingRunReport] = []
     mode_isolated = autotrade_config.paper_enabled or autotrade_config.live_enabled or len(active_modes) > 1
     for mode in runnable_modes:
@@ -2167,6 +2168,7 @@ def _run_trading_once(*, force_paper: bool = False) -> dict[str, object]:
             blocked_symbols=blocked_symbols,
             trade_notifier=_feishu_trade_notifier(runtime_config),
             isolate_mode=mode_isolated,
+            scan_result=shared_scan_result,
         )
         trader.set_execution_gateway(_execution_gateway(runtime_config, scanner))
         reports.append(trader.run_once(replace(autotrade_config, enabled=True, mode=mode)))

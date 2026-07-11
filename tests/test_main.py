@@ -2940,13 +2940,16 @@ class MainTests(unittest.TestCase):
         config.autotrade_defaults.paper_enabled = True
         config.autotrade_defaults.live_enabled = True
         config.autotrade_defaults.order_test_only = True
-        scanner = SimpleNamespace(gateway=object())
+        shared_scan_result = (SimpleNamespace(scanned_symbols=1, returned_signals=1), [])
+        scanner = SimpleNamespace(gateway=object(), scan=Mock(return_value=shared_scan_result))
         calls: list[tuple[str, bool]] = []
         isolate_flags: list[bool] = []
+        scan_results: list[object] = []
 
         class FakeAutoTrader:
             def __init__(self, **kwargs):
                 isolate_flags.append(bool(kwargs.get("isolate_mode")))
+                scan_results.append(kwargs.get("scan_result"))
 
             def set_execution_gateway(self, gateway):
                 return None
@@ -2987,8 +2990,10 @@ class MainTests(unittest.TestCase):
 
         self.assertEqual(calls, [("paper", True), ("live", True)])
         self.assertEqual(isolate_flags, [True, True])
+        self.assertEqual(scan_results, [shared_scan_result, shared_scan_result])
+        scanner.scan.assert_called_once_with()
         self.assertEqual(payload["mode"], "paper+live")
-        self.assertEqual(payload["scanned_symbols"], 2)
+        self.assertEqual(payload["scanned_symbols"], 1)
         self.assertEqual({event["status"] for event in payload["events"]}, {"paper_done", "live_done"})
 
     def test_live_insufficient_balance_does_not_block_paper_fill(self) -> None:
@@ -3058,7 +3063,10 @@ class MainTests(unittest.TestCase):
         config.autotrade_defaults.paper_enabled = True
         config.autotrade_defaults.live_enabled = True
         config.autotrade_defaults.order_test_only = False
-        scanner = SimpleNamespace(gateway=object())
+        scanner = SimpleNamespace(
+            gateway=object(),
+            scan=Mock(return_value=(SimpleNamespace(scanned_symbols=1, returned_signals=1), [])),
+        )
         calls: list[str] = []
 
         class FakeAutoTrader:

@@ -32,6 +32,8 @@ def _signal(
     volatility_percentile: float = 50.0,
     volatility_ratio: float = 1.0,
     atr_pct: float = 1.0,
+    volume_ratio: float = 1.4,
+    buy_pressure_ratio: float = 0.62,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         symbol=symbol,
@@ -39,8 +41,8 @@ def _signal(
         grade="A",
         ticker=SimpleNamespace(last_price=price, quote_volume=quote_volume),
         indicators=SimpleNamespace(
-            volume_ratio=1.4,
-            buy_pressure_ratio=0.62,
+            volume_ratio=volume_ratio,
+            buy_pressure_ratio=buy_pressure_ratio,
             rsi_14=rsi,
             price_vs_ema20_pct=price_vs_ema20_pct,
             recent_change_pct=recent_change_pct,
@@ -185,6 +187,37 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(stored_events[0].status, "paper_filled")
         self.assertEqual(scanner.gateway.buy_calls, [])
         self.assertEqual(notifier.calls, [("BUY", "BTCUSDT", "BTCUSDT")])
+
+    def test_filtered_candidates_return_limited_chinese_summary_log(self) -> None:
+        signals = [
+            _signal(symbol="LOWUSDT", score=70.0),
+            _signal(symbol="VOLUMEUSDT", score=82.0, volume_ratio=0.8),
+            _signal(symbol="PRESSUREUSDT", score=82.0, buy_pressure_ratio=0.4),
+        ]
+        config = AutoTradeDefaults(
+            enabled=True,
+            mode="paper",
+            score_threshold=75.0,
+            min_volume_ratio=1.1,
+            min_buy_pressure=0.52,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            trader = AutoTrader(scanner=FakeScanner(signals), state_store=store)
+
+            first = trader.run_once(config)
+            first_persisted = store.load_events()
+            second = trader.run_once(config)
+            second_persisted = store.load_events()
+
+        self.assertEqual(first.events[0].status, "no_eligible_signal")
+        self.assertIn("本轮扫描 3 个候选，未产生订单", first.events[0].message)
+        self.assertIn("评分低于 75.0 的 1 个", first.events[0].message)
+        self.assertIn("量比低于 1.10 的 1 个", first.events[0].message)
+        self.assertIn("买压低于 0.52 的 1 个", first.events[0].message)
+        self.assertEqual(second.events[0].status, "no_eligible_signal")
+        self.assertEqual(len(first_persisted), 1)
+        self.assertEqual(len(second_persisted), 1)
 
     def test_isolated_paper_mode_can_open_same_symbol_as_live_position(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -437,7 +470,8 @@ class TradingTests(unittest.TestCase):
             )
 
         self.assertEqual(report.open_positions[0].symbol, "BTCUSDT")
-        self.assertEqual(report.events, [])
+        self.assertEqual([event.status for event in report.events], ["no_eligible_signal"])
+        self.assertIn("敞口上限阻断 1 个", report.events[0].message)
         self.assertEqual(notifier.calls, [])
 
     def test_emergency_drawdown_alert_respects_global_cooldown_across_symbols(self) -> None:
@@ -485,7 +519,8 @@ class TradingTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(report.events, [])
+        self.assertEqual([event.status for event in report.events], ["no_eligible_signal"])
+        self.assertNotIn("emergency_drawdown", {event.status for event in report.events})
 
     def test_low_liquidity_emergency_drawdown_requires_clear_signal(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -527,7 +562,8 @@ class TradingTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(report.events, [])
+        self.assertEqual([event.status for event in report.events], ["no_eligible_signal"])
+        self.assertNotIn("emergency_drawdown", {event.status for event in report.events})
         self.assertEqual(notifier.calls, [])
 
     def test_low_liquidity_emergency_drawdown_allows_strong_deep_signal(self) -> None:
