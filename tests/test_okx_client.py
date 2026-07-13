@@ -67,6 +67,23 @@ class OKXClientTests(unittest.TestCase):
         self.assertEqual(status["quote_available"], 45.5)
         self.assertEqual(len(status["balances"]), 2)
 
+    def test_asset_balance_reads_fresh_requested_currency(self) -> None:
+        payload = {
+            "code": "0",
+            "data": [{"details": [{"ccy": "TREE", "availBal": "448.3", "frozenBal": "0.1"}]}],
+        }
+        with patch.object(OKXSpotGateway, "_request_json", return_value=payload) as request_json:
+            gateway = OKXSpotGateway(api_key="okx-key", api_secret="okx-secret", passphrase="okx-pass")
+            balance = gateway.asset_balance("tree")
+
+        self.assertEqual(balance, {"asset": "TREE", "free": 448.3, "locked": 0.1})
+        request_json.assert_called_once_with(
+            "GET",
+            "/api/v5/account/balance",
+            params={"ccy": "TREE"},
+            signed=True,
+        )
+
     def test_market_buy_uses_order_precheck_when_test_enabled(self) -> None:
         response = {"code": "0", "data": [{"sCode": "0", "ordId": "123"}]}
         with patch("trade_signal_app.okx_client.urlopen", return_value=FakeResponse(json.dumps(response))) as mock_urlopen:

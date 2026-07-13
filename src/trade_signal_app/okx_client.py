@@ -156,6 +156,30 @@ class OKXSpotGateway:
         data = self._request_json("GET", "/api/v5/account/balance", params=params, signed=True)
         return self._cache_set(cache_key, data)  # type: ignore[return-value]
 
+    def asset_balance(self, asset: str) -> dict[str, float | str]:
+        normalized = asset.upper().strip()
+        if not normalized:
+            raise ValueError("资产代码不能为空。")
+        payload = self._request_json(
+            "GET",
+            "/api/v5/account/balance",
+            params={"ccy": normalized},
+            signed=True,
+        )
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            raise OKXAPIError("OKX 账户余额响应格式异常。")
+        for account in payload["data"]:
+            if not isinstance(account, dict):
+                continue
+            for item in account.get("details", []):
+                if isinstance(item, dict) and str(item.get("ccy", "")).upper() == normalized:
+                    return {
+                        "asset": normalized,
+                        "free": float(item.get("availBal") or item.get("availEq") or item.get("cashBal") or 0.0),
+                        "locked": float(item.get("frozenBal") or 0.0),
+                    }
+        return {"asset": normalized, "free": 0.0, "locked": 0.0}
+
     def account_status(self, quote_assets: set[str] | None = None) -> dict[str, object]:
         quote_assets = {asset.upper() for asset in (quote_assets or {"USDT", "USDC", "FDUSD", "BUSD"})}
         if not self.has_user_data_auth():

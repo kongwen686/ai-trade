@@ -184,6 +184,14 @@ class BinanceClientTests(unittest.TestCase):
         self.assertIn("暂时不可用", status["message"])
         self.assertEqual(mock_urlopen.call_count, 3)
 
+    def test_asset_balance_bypasses_cached_account_snapshot(self) -> None:
+        response = {"balances": [{"asset": "TREE", "free": "448.3", "locked": "0.1"}]}
+        with patch("trade_signal_app.binance_client.urlopen", return_value=FakeResponse(json.dumps(response))):
+            gateway = BinanceSpotGateway(api_key="test-key", api_secret="test-secret")
+            balance = gateway.asset_balance("tree")
+
+        self.assertEqual(balance, {"asset": "TREE", "free": 448.3, "locked": 0.1})
+
     def test_market_buy_uses_signed_post_body(self) -> None:
         with patch("trade_signal_app.binance_client.time.time", return_value=1_700_000_000.0):
             with patch(

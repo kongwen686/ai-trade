@@ -1172,6 +1172,153 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(gateway.sell_calls[0]["symbol"], "BTCUSDT")
         self.assertAlmostEqual(report.events[0].realized_pnl, 5.0)
 
+    def test_live_close_caps_sell_to_exchange_free_balance(self) -> None:
+        class BalanceGateway(FakeGateway):
+            def asset_balance(self, asset):
+                return {"asset": asset, "free": 0.49, "locked": 0.0}
+
+            def exchange_info(self):
+                return {
+                    "symbols": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "baseAsset": "BTC",
+                            "filters": [
+                                {"filterType": "LOT_SIZE", "stepSize": "0.01000000", "minQty": "0.01000000"},
+                                {"filterType": "NOTIONAL", "minNotional": "5.00000000"},
+                            ],
+                        }
+                    ]
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            store.save(
+                [
+                    TradingPosition(
+                        symbol="BTCUSDT",
+                        quantity=0.5,
+                        entry_price=100.0,
+                        quote_notional=50.0,
+                        score=82.0,
+                        grade="A",
+                        opened_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                        stop_price=96.0,
+                        take_profit_price=109.0,
+                        mode="live",
+                    )
+                ]
+            )
+            gateway = BalanceGateway()
+            trader = AutoTrader(scanner=FakeScanner([_signal(price=110.0)], gateway=gateway), state_store=store)
+
+            with patch.dict("os.environ", {"AI_TRADE_LIVE_CONFIRM": LIVE_CONFIRM_VALUE}):
+                report = trader.run_once(
+                    AutoTradeDefaults(enabled=True, mode="live", order_test_only=False, score_threshold=99.0)
+                )
+
+        self.assertEqual(report.open_positions, [])
+        self.assertEqual(report.events[0].status, "filled")
+        self.assertEqual(gateway.sell_calls[0]["quantity"], 0.49)
+
+    def test_live_close_reconciles_position_when_exchange_only_has_dust(self) -> None:
+        class DustBalanceGateway(FakeGateway):
+            def asset_balance(self, asset):
+                return {"asset": asset, "free": 0.001, "locked": 0.0}
+
+            def exchange_info(self):
+                return {
+                    "symbols": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "baseAsset": "BTC",
+                            "filters": [
+                                {"filterType": "LOT_SIZE", "stepSize": "0.01000000", "minQty": "0.01000000"},
+                                {"filterType": "MIN_NOTIONAL", "minNotional": "5.00000000"},
+                            ],
+                        }
+                    ]
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            store.save(
+                [
+                    TradingPosition(
+                        symbol="BTCUSDT",
+                        quantity=0.5,
+                        entry_price=100.0,
+                        quote_notional=50.0,
+                        score=82.0,
+                        grade="A",
+                        opened_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                        stop_price=96.0,
+                        take_profit_price=109.0,
+                        mode="live",
+                    )
+                ]
+            )
+            gateway = DustBalanceGateway()
+            trader = AutoTrader(scanner=FakeScanner([_signal(price=110.0)], gateway=gateway), state_store=store)
+
+            with patch.dict("os.environ", {"AI_TRADE_LIVE_CONFIRM": LIVE_CONFIRM_VALUE}):
+                report = trader.run_once(
+                    AutoTradeDefaults(enabled=True, mode="live", order_test_only=False, score_threshold=99.0)
+                )
+
+        self.assertEqual(report.open_positions, [])
+        self.assertEqual(report.events[0].action, "SYNC")
+        self.assertEqual(report.events[0].status, "external_closed")
+        self.assertEqual(gateway.sell_calls, [])
+
+    def test_live_close_keeps_position_when_exchange_balance_is_locked(self) -> None:
+        class LockedBalanceGateway(FakeGateway):
+            def asset_balance(self, asset):
+                return {"asset": asset, "free": 0.0, "locked": 0.5}
+
+            def exchange_info(self):
+                return {
+                    "symbols": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "baseAsset": "BTC",
+                            "filters": [
+                                {"filterType": "LOT_SIZE", "stepSize": "0.01000000", "minQty": "0.01000000"},
+                                {"filterType": "MIN_NOTIONAL", "minNotional": "5.00000000"},
+                            ],
+                        }
+                    ]
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            position = TradingPosition(
+                symbol="BTCUSDT",
+                quantity=0.5,
+                entry_price=100.0,
+                quote_notional=50.0,
+                score=82.0,
+                grade="A",
+                opened_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                stop_price=96.0,
+                take_profit_price=109.0,
+                mode="live",
+            )
+            store.save([position])
+            gateway = LockedBalanceGateway()
+            trader = AutoTrader(scanner=FakeScanner([_signal(price=110.0)], gateway=gateway), state_store=store)
+
+            with patch.dict("os.environ", {"AI_TRADE_LIVE_CONFIRM": LIVE_CONFIRM_VALUE}):
+                report = trader.run_once(
+                    AutoTradeDefaults(enabled=True, mode="live", order_test_only=False, score_threshold=99.0)
+                )
+
+        self.assertEqual(len(report.open_positions), 1)
+        self.assertEqual(report.open_positions[0].symbol, position.symbol)
+        self.assertEqual(report.open_positions[0].quantity, position.quantity)
+        self.assertEqual(report.events[0].status, "balance_locked")
+        self.assertEqual(gateway.sell_calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

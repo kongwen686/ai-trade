@@ -275,6 +275,25 @@ class BinanceSpotGateway:
         )
         return self._cache_set(cache_key, data)  # type: ignore[return-value]
 
+    def asset_balance(self, asset: str) -> dict[str, float | str]:
+        normalized = asset.upper().strip()
+        if not normalized:
+            raise ValueError("资产代码不能为空。")
+        account = self._signed_get_json(
+            "/api/v3/account",
+            {"omitZeroBalances": "true"},
+        )
+        if not isinstance(account, dict) or not isinstance(account.get("balances"), list):
+            raise BinanceSignedAPIError("Binance 账户余额响应格式异常。", authentication_failure=False)
+        for item in account["balances"]:
+            if isinstance(item, dict) and str(item.get("asset", "")).upper() == normalized:
+                return {
+                    "asset": normalized,
+                    "free": float(item.get("free") or 0.0),
+                    "locked": float(item.get("locked") or 0.0),
+                }
+        return {"asset": normalized, "free": 0.0, "locked": 0.0}
+
     def account_status(self, quote_assets: set[str] | None = None) -> dict[str, object]:
         quote_assets = {asset.upper() for asset in (quote_assets or {"USDT", "USDC", "FDUSD", "BUSD"})}
         if not self.has_user_data_auth():

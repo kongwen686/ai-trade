@@ -19,6 +19,7 @@ LIVE_CONFIRM_VALUE = "I_UNDERSTAND_REAL_ORDERS"
 MIN_EMERGENCY_ALERT_COOLDOWN_MINUTES = 30
 EMERGENCY_DRAWDOWN_STATUS = "emergency_drawdown"
 FILLED_TRADE_STATUSES = {"filled", "paper_filled"}
+EXTERNAL_POSITION_CLOSED_STATUS = "external_closed"
 TRADE_EVENT_ACTIONS = {"BUY", "SELL"}
 TRADING_EVENT_RETENTION_LIMIT = 5000
 NO_ELIGIBLE_SIGNAL_STATUS = "no_eligible_signal"
@@ -596,6 +597,8 @@ class AutoTrader:
             if event.status in {"filled", "paper_filled"}:
                 self._notify_trade_event(event=event, position=position)
                 continue
+            if event.status == EXTERNAL_POSITION_CLOSED_STATUS:
+                continue
             remaining.append(position)
         return remaining
 
@@ -1100,10 +1103,15 @@ class AutoTrader:
                 exit_reason=exit_reason,
                 exchange=position.exchange,
             )
+        reconciled_quantity = self._reconciled_live_sell_quantity(position, price)
+        if isinstance(reconciled_quantity, TradingEvent):
+            reconciled_quantity.exit_reason = exit_reason
+            return reconciled_quantity
+        sell_quantity = reconciled_quantity or self._floor_quantity_for_symbol(position.symbol, position.quantity)
         try:
             response = self.execution_gateway.order_market_sell(
                 symbol=position.symbol,
-                quantity=self._floor_quantity_for_symbol(position.symbol, position.quantity),
+                quantity=sell_quantity,
                 test=config.order_test_only,
                 client_order_id=self._client_order_id("sell", position.symbol, now_app_time()),
             )
@@ -1115,8 +1123,8 @@ class AutoTrader:
                 status="rejected",
                 message=str(exc),
                 price=price,
-                quantity=position.quantity,
-                quote_notional=position.quantity * price,
+                quantity=sell_quantity,
+                quote_notional=sell_quantity * price,
                 exit_reason=exit_reason,
                 exchange=position.exchange,
             )
@@ -1143,6 +1151,68 @@ class AutoTrader:
             exit_reason=exit_reason,
             response=response_payload,
             exchange=position.exchange,
+        )
+
+    def _reconciled_live_sell_quantity(
+        self,
+        position: TradingPosition,
+        price: float,
+    ) -> float | TradingEvent | None:
+        asset_balance = getattr(self.execution_gateway, "asset_balance", None)
+        if not callable(asset_balance):
+            return None
+        base_asset, step_size, min_quantity, min_notional = self._symbol_trade_rules(position.symbol)
+        try:
+            balance = asset_balance(base_asset)
+            free_balance = max(0.0, float(balance.get("free") or 0.0))
+            locked_balance = max(0.0, float(balance.get("locked") or 0.0))
+        except Exception:  # noqa: BLE001
+            return None
+
+        sell_quantity = self._floor_quantity(min(position.quantity, free_balance), step_size)
+        quantity_too_small = sell_quantity <= 0 or (min_quantity > 0 and sell_quantity < min_quantity)
+        notional_too_small = min_notional > 0 and sell_quantity * price < min_notional
+        if not quantity_too_small and not notional_too_small:
+            return sell_quantity
+
+        locked_quantity = self._floor_quantity(min(position.quantity, locked_balance), step_size)
+        locked_is_material = locked_quantity > 0 and (
+            (min_quantity <= 0 or locked_quantity >= min_quantity)
+            and (min_notional <= 0 or locked_quantity * price >= min_notional)
+        )
+        if locked_is_material:
+            return TradingEvent(
+                action="SELL",
+                symbol=position.symbol,
+                mode=position.mode,
+                status="balance_locked",
+                message=f"{base_asset} 余额当前被其他订单占用，暂不重复提交卖出。",
+                price=price,
+                quantity=locked_quantity,
+                quote_notional=locked_quantity * price,
+                exchange=position.exchange,
+                response={"free_balance": free_balance, "locked_balance": locked_balance},
+            )
+        return TradingEvent(
+            action="SYNC",
+            symbol=position.symbol,
+            mode=position.mode,
+            status=EXTERNAL_POSITION_CLOSED_STATUS,
+            message=(
+                f"交易所可用 {base_asset} 余额 {free_balance:.8g} 已低于最小可交易量，"
+                "判定仓位已在系统外卖出、划转或转换，本地仓位已完成对账。"
+            ),
+            price=price,
+            quantity=free_balance,
+            quote_notional=free_balance * price,
+            exchange=position.exchange,
+            response={
+                "local_quantity": position.quantity,
+                "free_balance": free_balance,
+                "locked_balance": locked_balance,
+                "min_quantity": min_quantity,
+                "min_notional": min_notional,
+            },
         )
 
     @staticmethod
@@ -1209,17 +1279,38 @@ class AutoTrader:
         return f"aitrade-{side}-{symbol.lower()}-{int(now.timestamp())}"
 
     def _floor_quantity_for_symbol(self, symbol: str, quantity: float) -> float:
+        _, step_size, _, _ = self._symbol_trade_rules(symbol)
+        return self._floor_quantity(quantity, step_size)
+
+    def _symbol_trade_rules(self, symbol: str) -> tuple[str, str, float, float]:
+        normalized = symbol.upper().strip()
+        base_asset = self._base_asset_from_symbol(normalized)
+        step_size = "0.00000001"
+        min_quantity = 0.0
+        min_notional = 0.0
         try:
             exchange_info = self.execution_gateway.exchange_info()
             for item in exchange_info.get("symbols", []):
-                if item.get("symbol") != symbol:
+                if item.get("symbol") != normalized:
                     continue
+                base_asset = str(item.get("baseAsset") or base_asset).upper()
                 for filter_item in item.get("filters", []):
                     if filter_item.get("filterType") == "LOT_SIZE":
-                        return self._floor_quantity(quantity, str(filter_item["stepSize"]))
+                        step_size = str(filter_item.get("stepSize") or step_size)
+                        min_quantity = float(filter_item.get("minQty") or 0.0)
+                    elif filter_item.get("filterType") in {"MIN_NOTIONAL", "NOTIONAL"}:
+                        min_notional = float(filter_item.get("minNotional") or 0.0)
+                break
         except Exception:  # noqa: BLE001
             pass
-        return self._floor_quantity(quantity, "0.00000001")
+        return base_asset, step_size, min_quantity, min_notional
+
+    @staticmethod
+    def _base_asset_from_symbol(symbol: str) -> str:
+        for quote_asset in ("FDUSD", "USDT", "USDC", "BUSD", "BTC", "ETH"):
+            if symbol.endswith(quote_asset) and len(symbol) > len(quote_asset):
+                return symbol[: -len(quote_asset)]
+        return symbol
 
     @staticmethod
     def _floor_quantity(quantity: float, step_size: str) -> float:
