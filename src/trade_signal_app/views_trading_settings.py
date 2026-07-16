@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from html import escape
 
-from .runtime_config import TRADINGVIEW_BARS_DEFAULT, TRADINGVIEW_BARS_MAX, TRADINGVIEW_BARS_MIN
+from .runtime_config import (
+    SCAN_LIQUIDITY_RECOMMENDED_PROFILE,
+    TRADINGVIEW_BARS_DEFAULT,
+    TRADINGVIEW_BARS_MAX,
+    TRADINGVIEW_BARS_MIN,
+)
 from .views_common import _backtest_preset_options, _display_value, _hidden_lang_input, _layout, _module_tabs, _option, _option_with_label, _text, _url, normalize_language
 from .views_components import _btc_trading_zone, _trading_account_metric_cards, _trading_event_rows, _trading_position_rows
 
@@ -354,6 +359,11 @@ def render_settings_page(
             ("min_trade_count", "min_trade_count"),
         )
     }
+    recommended = SCAN_LIQUIDITY_RECOMMENDED_PROFILE
+    recommended_liquidity_text = t(
+        "防守均衡推荐（成交额/成交笔数）：BTC 150M/150K、ETH 100M/120K、SOL 60M/80K、XRP 40M/60K、BNB 30M/50K、Top 30 10M/30K、其他山寨币 5M/30K。",
+        "Defensive balanced preset (quote volume/trades): BTC 150M/150K, ETH 100M/120K, SOL 60M/80K, XRP 40M/60K, BNB 30M/50K, Top 30 10M/30K, other altcoins 5M/30K.",
+    )
     public_presets = status.get("public_data_presets") if isinstance(status.get("public_data_presets"), list) else []
     llm_presets = status.get("llm_provider_presets") if isinstance(status.get("llm_provider_presets"), list) else []
     market_options = "".join(
@@ -605,9 +615,13 @@ def render_settings_page(
           </div>
           <div class="settings-group">
           <div class="settings-group-head"><h3>分类流动性门槛</h3><p>Top 30 按全部可交易标的的 24H 成交额动态排名；BTC、ETH、XRP、SOL、BNB 始终使用各自独立配置。</p></div>
+          <div class="notice full-span">
+            <strong>{recommended_liquidity_text}</strong>
+            <p>{t("成交额使用 USDT 计价。门槛只决定信号能否进入自动交易，实际买入仍需通过评分、量比、买压、反追高、支撑结构与波动率过滤。", "Quote volume is denominated in USDT. These gates only determine execution eligibility; entries still require score, volume ratio, buy pressure, anti-chase, support structure, and volatility checks.")}</p>
+          </div>
           <div class="settings-grid">
-          <label><span>BTC 最低24H成交额</span><input type="number" min="0" step="1000000" name="scan_btc_min_quote_volume" value="{scan_tier_params['btc_min_quote_volume']}" /></label>
-          <label><span>BTC 最低24H成交笔数</span><input type="number" min="0" step="100" name="scan_btc_min_trade_count" value="{scan_tier_params['btc_min_trade_count']}" /></label>
+          <label><span>BTC 最低24H成交额</span><input type="number" min="0" step="1000000" name="scan_btc_min_quote_volume" value="{scan_tier_params['btc_min_quote_volume']}" placeholder="{recommended['btc_min_quote_volume']}" /></label>
+          <label><span>BTC 最低24H成交笔数</span><input type="number" min="0" step="100" name="scan_btc_min_trade_count" value="{scan_tier_params['btc_min_trade_count']}" placeholder="{recommended['btc_min_trade_count']}" /></label>
           <label><span>ETH 最低24H成交额</span><input type="number" min="0" step="1000000" name="scan_eth_min_quote_volume" value="{scan_tier_params['eth_min_quote_volume']}" /></label>
           <label><span>ETH 最低24H成交笔数</span><input type="number" min="0" step="100" name="scan_eth_min_trade_count" value="{scan_tier_params['eth_min_trade_count']}" /></label>
           <label><span>XRP 最低24H成交额</span><input type="number" min="0" step="1000000" name="scan_xrp_min_quote_volume" value="{scan_tier_params['xrp_min_quote_volume']}" /></label>
@@ -618,8 +632,8 @@ def render_settings_page(
           <label><span>BNB 最低24H成交笔数</span><input type="number" min="0" step="100" name="scan_bnb_min_trade_count" value="{scan_tier_params['bnb_min_trade_count']}" /></label>
           <label><span>Top 30 最低24H成交额</span><input type="number" min="0" step="1000000" name="scan_top30_min_quote_volume" value="{scan_tier_params['top30_min_quote_volume']}" /></label>
           <label><span>Top 30 最低24H成交笔数</span><input type="number" min="0" step="100" name="scan_top30_min_trade_count" value="{scan_tier_params['top30_min_trade_count']}" /></label>
-          <label><span>其他山寨币最低24H成交额</span><input type="number" min="0" step="1000000" name="scan_min_quote_volume" value="{int(params['scan_min_quote_volume'])}" /></label>
-          <label><span>其他山寨币最低24H成交笔数</span><input type="number" min="0" step="100" name="scan_min_trade_count" value="{int(params['scan_min_trade_count'])}" /></label>
+          <label><span>其他山寨币最低24H成交额</span><input type="number" min="0" step="1000000" name="scan_min_quote_volume" value="{int(params['scan_min_quote_volume'])}" placeholder="{recommended['min_quote_volume']}" /></label>
+          <label><span>其他山寨币最低24H成交笔数</span><input type="number" min="0" step="100" name="scan_min_trade_count" value="{int(params['scan_min_trade_count'])}" placeholder="{recommended['min_trade_count']}" /></label>
           </div>
           </div>
           <div class="settings-submit-bar">

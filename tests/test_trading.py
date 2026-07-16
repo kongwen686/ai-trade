@@ -195,7 +195,7 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(scanner.gateway.buy_calls, [])
         self.assertEqual(notifier.calls, [("BUY", "BTCUSDT", "BTCUSDT")])
 
-    def test_filtered_candidates_return_limited_chinese_summary_log(self) -> None:
+    def test_filtered_high_score_candidates_record_specific_confirmation_reasons(self) -> None:
         signals = [
             _signal(symbol="LOWUSDT", score=70.0),
             _signal(symbol="VOLUMEUSDT", score=82.0, volume_ratio=0.8),
@@ -217,14 +217,41 @@ class TradingTests(unittest.TestCase):
             second = trader.run_once(config)
             second_persisted = store.load_events()
 
-        self.assertEqual(first.events[0].status, "no_eligible_signal")
-        self.assertIn("本轮扫描 3 个候选，未产生订单", first.events[0].message)
-        self.assertIn("评分低于 75.0 的 1 个", first.events[0].message)
-        self.assertIn("量比低于 1.10 的 1 个", first.events[0].message)
-        self.assertIn("买压低于 0.52 的 1 个", first.events[0].message)
-        self.assertEqual(second.events[0].status, "no_eligible_signal")
-        self.assertEqual(len(first_persisted), 1)
-        self.assertEqual(len(second_persisted), 1)
+        self.assertEqual([event.status for event in first.events], ["wait_volume", "wait_buy_pressure"])
+        self.assertIn("当前量比 0.80x", first.events[0].message)
+        self.assertIn("当前买压 40.0%", first.events[1].message)
+        self.assertEqual([event.status for event in second.events], ["wait_volume", "wait_buy_pressure"])
+        self.assertEqual(len(first_persisted), 2)
+        self.assertEqual(len(second_persisted), 4)
+
+    def test_paper_run_uses_fixed_target_when_no_reliable_resistance_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            scanner = FakeScanner(
+                [
+                    _signal(
+                        support_level=98.0,
+                        resistance_level=0.0,
+                        support_distance_pct=2.0,
+                        support_strength=3.0,
+                        structure_risk_reward=0.0,
+                    )
+                ]
+            )
+            trader = AutoTrader(scanner=scanner, state_store=store)
+
+            report = trader.run_once(
+                AutoTradeDefaults(
+                    enabled=True,
+                    mode="paper",
+                    quote_order_qty=50.0,
+                    score_threshold=75.0,
+                    take_profit_pct=9.0,
+                )
+            )
+
+        self.assertEqual(report.events[0].status, "paper_filled")
+        self.assertEqual(len(report.open_positions), 1)
 
     def test_liquidity_observation_candidate_cannot_open_paper_position(self) -> None:
         signal = _signal(symbol="THINUSDT", score=95.0, liquidity_eligible=False)

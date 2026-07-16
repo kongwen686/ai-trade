@@ -6,7 +6,7 @@ import unittest
 import zipfile
 
 from trade_signal_app.archive_loader import load_public_data_klines
-from trade_signal_app.indicators import build_indicator_snapshot
+from trade_signal_app.indicators import _nearest_structure_levels, build_indicator_snapshot
 from trade_signal_app.models import Candlestick, MarketTicker
 from trade_signal_app.scoring import LIQUIDITY_SCORE_FLOOR, build_subscores, composite_score, compute_liquidity_score
 
@@ -39,6 +39,32 @@ def _make_candles() -> list[Candlestick]:
 
 
 class IndicatorTests(unittest.TestCase):
+    def test_structure_levels_ignore_single_nearby_wicks(self) -> None:
+        closes = [100.0] * 48
+        highs = [100.8 + ((index % 3) * 0.05) for index in range(48)]
+        lows = [99.2 - ((index % 3) * 0.05) for index in range(48)]
+        for index in (10, 30):
+            highs[index] = 106.0
+        for index in (15, 35):
+            lows[index] = 97.0
+
+        levels = _nearest_structure_levels(highs=highs, lows=lows, closes=closes)
+
+        self.assertAlmostEqual(levels["support_level"], 97.0)
+        self.assertAlmostEqual(levels["resistance_level"], 106.0)
+        self.assertGreaterEqual(levels["support_strength"], 2.0)
+        self.assertGreaterEqual(levels["resistance_strength"], 2.0)
+
+    def test_structure_levels_treat_missing_swing_high_as_open_upside(self) -> None:
+        closes = [100.0 + index for index in range(48)]
+        highs = [close + 0.8 for close in closes]
+        lows = [close - 0.8 for close in closes]
+
+        levels = _nearest_structure_levels(highs=highs, lows=lows, closes=closes)
+
+        self.assertEqual(levels["resistance_level"], 0.0)
+        self.assertGreater(levels["structure_risk_reward"], 0.0)
+
     def test_indicator_snapshot_detects_bullish_profile(self) -> None:
         snapshot = build_indicator_snapshot(_make_candles())
         self.assertGreater(snapshot.ema_20, snapshot.ema_50)

@@ -7,7 +7,13 @@ import math
 import os
 from pathlib import Path
 
-from .entry_filters import anti_chase_reason_from_config, structure_adjusted_exit_prices, structure_entry_reason_from_config
+from .entry_filters import (
+    anti_chase_reason_from_config,
+    buy_pressure_entry_reason_from_config,
+    structure_adjusted_exit_prices,
+    structure_entry_reason_from_config,
+    volume_entry_reason_from_config,
+)
 from .feishu import FeishuTradeNotifier
 from .runtime_config import AutoTradeDefaults
 from .service import SignalScanner
@@ -438,11 +444,43 @@ class AutoTrader:
             if signal.score < config.score_threshold:
                 filter_counts["score"] += 1
                 continue
-            if signal.indicators.volume_ratio < config.min_volume_ratio:
+            volume_issue = volume_entry_reason_from_config(
+                volume_ratio=signal.indicators.volume_ratio,
+                config=config,
+            )
+            if volume_issue:
                 filter_counts["volume"] += 1
+                events.append(
+                    TradingEvent(
+                        action="SKIP",
+                        symbol=signal.symbol,
+                        mode=config.mode,
+                        status="wait_volume",
+                        message=volume_issue,
+                        score=signal.score,
+                        price=signal.ticker.last_price,
+                        exchange=config.execution_exchange.upper(),
+                    )
+                )
                 continue
-            if signal.indicators.buy_pressure_ratio < config.min_buy_pressure:
+            buy_pressure_issue = buy_pressure_entry_reason_from_config(
+                buy_pressure_ratio=signal.indicators.buy_pressure_ratio,
+                config=config,
+            )
+            if buy_pressure_issue:
                 filter_counts["buy_pressure"] += 1
+                events.append(
+                    TradingEvent(
+                        action="SKIP",
+                        symbol=signal.symbol,
+                        mode=config.mode,
+                        status="wait_buy_pressure",
+                        message=buy_pressure_issue,
+                        score=signal.score,
+                        price=signal.ticker.last_price,
+                        exchange=config.execution_exchange.upper(),
+                    )
+                )
                 continue
             volatility_issue = self._volatility_entry_reason(signal, config)
             if volatility_issue:

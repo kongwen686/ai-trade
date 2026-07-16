@@ -69,6 +69,21 @@ class IntelligenceTests(unittest.TestCase):
         self.assertEqual(snapshot.llm_insight.provider, "local")
         self.assertIn("BTCUSDT", snapshot.execution_risk.allowed_symbols)
 
+    def test_high_score_without_volume_confirmation_is_not_execution_ready(self) -> None:
+        config = RuntimeConfig()
+        config.autotrade_defaults.enabled = True
+        hub = IntelligenceHub(
+            scanner=FakeScanner([_signal("BTCUSDT", 86.0, 68000.0, volume_ratio=0.8)]),
+            runtime_config=config,
+            settings=AppSettings(),
+        )
+
+        snapshot = hub.snapshot()
+
+        score_hit = next(hit for hit in snapshot.strategy_hits if hit.strategy == "auto_score_breakout")
+        self.assertEqual(score_hit.action, "wait_volume")
+        self.assertNotIn("BTCUSDT", snapshot.execution_risk.allowed_symbols)
+
     def test_snapshot_loads_csv_sources(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

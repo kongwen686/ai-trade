@@ -68,6 +68,20 @@ def anti_chase_reason_from_config(
     )
 
 
+def volume_entry_reason_from_config(*, volume_ratio: float, config: object) -> str:
+    minimum = _safe_float(getattr(config, "min_volume_ratio", 1.1), 1.1)
+    if volume_ratio >= minimum:
+        return ""
+    return f"量能确认不足：当前量比 {volume_ratio:.2f}x，低于 {minimum:.2f}x"
+
+
+def buy_pressure_entry_reason_from_config(*, buy_pressure_ratio: float, config: object) -> str:
+    minimum = _safe_float(getattr(config, "min_buy_pressure", 0.52), 0.52)
+    if buy_pressure_ratio >= minimum:
+        return ""
+    return f"主动买盘确认不足：当前买压 {buy_pressure_ratio * 100:.1f}%，低于 {minimum * 100:.1f}%"
+
+
 def structure_entry_reason(
     *,
     close_price: float,
@@ -85,6 +99,9 @@ def structure_entry_reason(
     min_support_strength: float = STRUCTURE_DEFAULT_MIN_SUPPORT_STRENGTH,
     min_risk_reward_ratio: float = STRUCTURE_DEFAULT_MIN_RISK_REWARD_RATIO,
     min_resistance_distance_pct: float = STRUCTURE_DEFAULT_MIN_RESISTANCE_DISTANCE_PCT,
+    take_profit_pct: float = 9.0,
+    support_stop_buffer_pct: float = STRUCTURE_DEFAULT_SUPPORT_STOP_BUFFER_PCT,
+    resistance_take_profit_buffer_pct: float = STRUCTURE_DEFAULT_RESISTANCE_TAKE_PROFIT_BUFFER_PCT,
 ) -> str:
     if not enabled or close_price <= 0 or support_level <= 0:
         return ""
@@ -103,14 +120,32 @@ def structure_entry_reason(
     effective_min_rr = max(1.1, effective_min_rr)
 
     reasons: list[str] = []
-    if support_distance_pct > max_support_distance_pct:
-        reasons.append(f"距离支撑 {support_distance_pct:.1f}% 大于 {max_support_distance_pct:.1f}%")
-    if support_strength < effective_min_strength:
+    effective_support_distance = support_distance_pct
+    if support_level < close_price:
+        effective_support_distance = ((close_price - support_level) / close_price) * 100
+    else:
+        reasons.append("当前价格已跌破结构支撑")
+
+    if support_level > 0 and effective_support_distance > max_support_distance_pct:
+        reasons.append(f"距离支撑 {effective_support_distance:.1f}% 大于 {max_support_distance_pct:.1f}%")
+    if support_level > 0 and support_strength < effective_min_strength:
         reasons.append(f"支撑触碰强度 {support_strength:.1f} 低于 {effective_min_strength:.1f}")
-    if resistance_level > 0 and resistance_level <= close_price:
-        reasons.append("上方有效阻力/目标空间不足")
-    elif resistance_distance_pct < min_resistance_distance_pct:
-        reasons.append(f"上方阻力空间 {resistance_distance_pct:.1f}% 小于 {min_resistance_distance_pct:.1f}%")
+
+    has_overhead_resistance = resistance_level > close_price
+    effective_resistance_distance = resistance_distance_pct
+    if has_overhead_resistance:
+        effective_resistance_distance = ((resistance_level - close_price) / close_price) * 100
+        if effective_resistance_distance < min_resistance_distance_pct:
+            reasons.append(f"上方阻力空间 {effective_resistance_distance:.1f}% 小于 {min_resistance_distance_pct:.1f}%")
+
+    if support_level < close_price:
+        risk_pct = max(effective_support_distance + support_stop_buffer_pct, 0.1)
+        reward_pct = (
+            max(effective_resistance_distance - resistance_take_profit_buffer_pct, 0.0)
+            if has_overhead_resistance
+            else max(take_profit_pct, 0.0)
+        )
+        risk_reward_ratio = reward_pct / risk_pct
     if risk_reward_ratio < effective_min_rr:
         reasons.append(f"结构盈亏比 {risk_reward_ratio:.2f} 低于 {effective_min_rr:.2f}")
 
@@ -160,6 +195,15 @@ def structure_entry_reason_from_config(
         min_resistance_distance_pct=_safe_float(
             getattr(config, "min_entry_resistance_distance_pct", STRUCTURE_DEFAULT_MIN_RESISTANCE_DISTANCE_PCT),
             STRUCTURE_DEFAULT_MIN_RESISTANCE_DISTANCE_PCT,
+        ),
+        take_profit_pct=_safe_float(getattr(config, "take_profit_pct", 9.0), 9.0),
+        support_stop_buffer_pct=_safe_float(
+            getattr(config, "support_stop_buffer_pct", STRUCTURE_DEFAULT_SUPPORT_STOP_BUFFER_PCT),
+            STRUCTURE_DEFAULT_SUPPORT_STOP_BUFFER_PCT,
+        ),
+        resistance_take_profit_buffer_pct=_safe_float(
+            getattr(config, "resistance_take_profit_buffer_pct", STRUCTURE_DEFAULT_RESISTANCE_TAKE_PROFIT_BUFFER_PCT),
+            STRUCTURE_DEFAULT_RESISTANCE_TAKE_PROFIT_BUFFER_PCT,
         ),
     )
 

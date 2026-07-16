@@ -27,7 +27,13 @@ from .carry import (
     run_carry_paper_cycle,
 )
 from .config import BASE_DIR, SETTINGS
-from .entry_filters import anti_chase_reason_from_config, structure_adjusted_exit_prices, structure_entry_reason_from_config
+from .entry_filters import (
+    anti_chase_reason_from_config,
+    buy_pressure_entry_reason_from_config,
+    structure_adjusted_exit_prices,
+    structure_entry_reason_from_config,
+    volume_entry_reason_from_config,
+)
 from .feishu import FeishuNotificationError, FeishuTradeNotifier
 from .intelligence import IntelligenceHub, IntelligenceSnapshot, LlmInsightClient
 from .okx_client import OKXSpotGateway
@@ -1904,6 +1910,42 @@ def _run_forced_paper_trading_once() -> dict[str, object]:
             continue
         if score < config.score_threshold:
             continue
+        volume_issue = volume_entry_reason_from_config(
+            volume_ratio=_float_from_mapping(signal, "volume_ratio", 1.0),
+            config=config,
+        )
+        if volume_issue:
+            events.append(
+                TradingEvent(
+                    action="SKIP",
+                    symbol=symbol,
+                    mode="paper",
+                    status="wait_volume",
+                    message=volume_issue,
+                    score=score,
+                    price=price,
+                    exchange=config.execution_exchange.upper(),
+                )
+            )
+            continue
+        buy_pressure_issue = buy_pressure_entry_reason_from_config(
+            buy_pressure_ratio=_float_from_mapping(signal, "buy_pressure_ratio", 0.0),
+            config=config,
+        )
+        if buy_pressure_issue:
+            events.append(
+                TradingEvent(
+                    action="SKIP",
+                    symbol=symbol,
+                    mode="paper",
+                    status="wait_buy_pressure",
+                    message=buy_pressure_issue,
+                    score=score,
+                    price=price,
+                    exchange=config.execution_exchange.upper(),
+                )
+            )
+            continue
         volatility_issue = _scan_signal_volatility_entry_reason(signal, config)
         if volatility_issue:
             events.append(
@@ -2156,6 +2198,28 @@ def _record_signal_scan_snapshot(summary: object, signals: list[object]) -> None
     )
 
 
+def _live_readiness_block_event(config: AutoTradeDefaults) -> TradingEvent | None:
+    try:
+        readiness = _trading_readiness_payload()
+    except Exception as exc:  # noqa: BLE001
+        readiness = {
+            "live_ready": False,
+            "blockers": [f"实盘就绪检查异常：{exc}"],
+        }
+    if bool(readiness.get("live_ready")):
+        return None
+    blockers = readiness.get("blockers") if isinstance(readiness.get("blockers"), list) else []
+    blocker_message = "；".join(str(item) for item in blockers) or "未知原因"
+    return TradingEvent(
+        action="SKIP",
+        symbol="*",
+        mode="live",
+        status="blocked",
+        message="实盘自动交易未就绪：" + blocker_message,
+        exchange=config.execution_exchange.upper(),
+    )
+
+
 def _run_trading_once(*, force_paper: bool = False) -> dict[str, object]:
     runtime_config, scanner = APP_STATE.snapshot()
     autotrade_config = runtime_config.autotrade_defaults
@@ -2177,50 +2241,37 @@ def _run_trading_once(*, force_paper: bool = False) -> dict[str, object]:
 
     extra_events: list[TradingEvent] = []
     mode_label = "+".join(active_modes)
-    runnable_modes = list(active_modes)
-    if "live" in runnable_modes and not autotrade_config.order_test_only:
-        try:
-            readiness = _trading_readiness_payload()
-        except Exception as exc:  # noqa: BLE001
-            readiness = {
-                "live_ready": False,
-                "blockers": [f"实盘就绪检查异常：{exc}"],
-            }
-        if not readiness["live_ready"]:
+    live_requires_readiness = "live" in active_modes and not autotrade_config.order_test_only
+    if active_modes == ["live"] and live_requires_readiness:
+        event = _live_readiness_block_event(autotrade_config)
+        if event is not None:
             positions = _trading_store().load()
-            blockers = readiness.get("blockers") if isinstance(readiness.get("blockers"), list) else []
-            blocker_message = "；".join(str(item) for item in blockers) or "未知原因"
-            event = TradingEvent(
-                action="SKIP",
-                symbol="*",
-                mode="live",
-                status="blocked",
-                message="实盘自动交易未就绪：" + blocker_message,
-                exchange=autotrade_config.execution_exchange.upper(),
-            )
             _trading_store().append_events([event])
-            extra_events.append(event)
-            runnable_modes = [mode for mode in runnable_modes if mode != "live"]
-            if not runnable_modes:
-                latest_prices = _latest_prices_for_open_positions(positions, scanner)
-                return _serialize_trading_report(
-                    TradingRunReport(
-                        enabled=autotrade_config.enabled or autotrade_config.paper_enabled or autotrade_config.live_enabled,
-                        mode=mode_label,
-                        scanned_symbols=0,
-                        returned_signals=0,
-                        open_positions=positions,
-                        events=extra_events,
-                    ),
-                    latest_prices=latest_prices,
-                )
+            latest_prices = _latest_prices_for_open_positions(positions, scanner)
+            return _serialize_trading_report(
+                TradingRunReport(
+                    enabled=autotrade_config.enabled or autotrade_config.live_enabled,
+                    mode=mode_label,
+                    scanned_symbols=0,
+                    returned_signals=0,
+                    open_positions=positions,
+                    events=[event],
+                ),
+                latest_prices=latest_prices,
+            )
     risk_snapshot = IntelligenceHub(scanner=scanner, runtime_config=runtime_config, settings=SETTINGS).snapshot()
     blocked_symbols = risk_snapshot.execution_risk.blocked_symbols
     shared_scan_result = scanner.scan()
     _record_signal_scan_snapshot(*shared_scan_result)
     reports: list[TradingRunReport] = []
     mode_isolated = autotrade_config.paper_enabled or autotrade_config.live_enabled or len(active_modes) > 1
-    for mode in runnable_modes:
+    for mode in active_modes:
+        if mode == "live" and live_requires_readiness:
+            event = _live_readiness_block_event(autotrade_config)
+            if event is not None:
+                _trading_store().append_events([event])
+                extra_events.append(event)
+                continue
         trader = AutoTrader(
             scanner=scanner,
             state_store=_trading_store(),

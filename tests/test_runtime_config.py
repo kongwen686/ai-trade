@@ -6,10 +6,18 @@ import tempfile
 import unittest
 
 from trade_signal_app.config import AppSettings, DEFAULT_X_TRACKED_ACCOUNTS
-from trade_signal_app.runtime_config import RuntimeConfig, RuntimeConfigStore
+from trade_signal_app.runtime_config import SCAN_LIQUIDITY_RECOMMENDED_PROFILE, RuntimeConfig, RuntimeConfigStore, ScanDefaults
 
 
 class RuntimeConfigTests(unittest.TestCase):
+    def test_scan_defaults_use_defensive_balanced_liquidity_profile(self) -> None:
+        defaults = ScanDefaults()
+
+        for key, expected in SCAN_LIQUIDITY_RECOMMENDED_PROFILE.items():
+            self.assertEqual(getattr(defaults, key), expected)
+        self.assertLess(defaults.min_quote_volume, defaults.top30_min_quote_volume)
+        self.assertGreaterEqual(defaults.min_trade_count, defaults.top30_min_trade_count)
+
     def test_default_from_settings_includes_curated_x_accounts(self) -> None:
         config = RuntimeConfig.default_from_settings(AppSettings())
 

@@ -693,6 +693,7 @@ class MainTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["returned_signals"], 30)
         self.assertEqual(len(payload["signals"]), 30)
         self.assertEqual(payload["signals"][0]["symbol"], "TEST00USDT")
+        self.assertTrue(all(float(signal["score"]) < 70.0 for signal in payload["signals"]))
 
     def test_scan_payload_sorts_signals_by_score_descending(self) -> None:
         def signal(symbol: str, score: float, quote_volume: float) -> SimpleNamespace:
@@ -1894,6 +1895,9 @@ class MainTests(unittest.TestCase):
         self.assertIn("加密资产等权再平衡 · crypto_rebalance_premium", html)
         self.assertIn("Auto Trade Defaults", html)
         self.assertIn("分类流动性门槛", html)
+        self.assertIn("防守均衡推荐", html)
+        self.assertIn("其他山寨币 5M/30K", html)
+        self.assertIn("实际买入仍需通过评分、量比、买压、反追高、支撑结构与波动率过滤", html)
         self.assertIn('name="scan_btc_min_quote_volume" value="100000000"', html)
         self.assertIn('name="scan_top30_min_trade_count" value="5000"', html)
         self.assertIn("其他山寨币最低24H成交额", html)
@@ -3120,19 +3124,24 @@ class MainTests(unittest.TestCase):
         config.autotrade_defaults.order_test_only = False
         config.autotrade_defaults.quote_order_qty = 25.0
         config.autotrade_defaults.score_threshold = 75.0
+        notifier = Mock()
+
+        def insufficient_readiness():
+            self.assertEqual(notifier.notify_trade.call_count, 1)
+            return {
+                "live_ready": False,
+                "blockers": ["USDT 可用余额不足"],
+            }
 
         with tempfile.TemporaryDirectory() as temp_dir:
             store = TradingStateStore(Path(temp_dir) / "state.json")
             with (
                 patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, scanner)),
                 patch("trade_signal_app.main._trading_store", return_value=store),
-                patch("trade_signal_app.main._feishu_trade_notifier", return_value=None),
+                patch("trade_signal_app.main._feishu_trade_notifier", return_value=notifier),
                 patch(
                     "trade_signal_app.main._trading_readiness_payload",
-                    return_value={
-                        "live_ready": False,
-                        "blockers": ["USDT 可用余额不足"],
-                    },
+                    side_effect=insufficient_readiness,
                 ),
                 patch("trade_signal_app.main.IntelligenceHub") as hub_cls,
             ):
@@ -3148,6 +3157,76 @@ class MainTests(unittest.TestCase):
         self.assertIn("USDT 可用余额不足", " ".join(str(event["message"]) for event in payload["events"]))
         self.assertEqual([(position.symbol, position.mode) for position in stored_positions], [("BTCUSDT", "paper")])
         self.assertGreaterEqual(gateway.ticker_price.call_count, 1)
+        notified_event = notifier.notify_trade.call_args.kwargs["event"]
+        self.assertEqual((notified_event.action, notified_event.mode, notified_event.status), ("BUY", "paper", "paper_filled"))
+
+    def test_live_order_insufficient_balance_does_not_rollback_paper_fill_or_notification(self) -> None:
+        signal = SimpleNamespace(
+            symbol="BTCUSDT",
+            score=84.0,
+            grade="A",
+            ticker=SimpleNamespace(last_price=100.0, quote_volume=20_000_000.0),
+            indicators=SimpleNamespace(
+                volume_ratio=1.6,
+                buy_pressure_ratio=0.63,
+                rsi_14=55.0,
+                price_vs_ema20_pct=1.0,
+                recent_change_pct=1.0,
+                support_level=99.0,
+                resistance_level=115.0,
+                support_distance_pct=1.0,
+                resistance_distance_pct=15.0,
+                support_strength=3.0,
+                structure_risk_reward=3.0,
+            ),
+        )
+        gateway = SimpleNamespace(
+            ticker_price=Mock(return_value=100.0),
+            order_market_buy=Mock(
+                side_effect=ValueError(
+                    "Binance SIGNED 接口请求失败：HTTP 400，Account has insufficient balance for requested action."
+                )
+            ),
+        )
+        scanner = SimpleNamespace(
+            gateway=gateway,
+            scan=Mock(return_value=(SimpleNamespace(scanned_symbols=10, returned_signals=1), [signal])),
+        )
+        config = RuntimeConfig()
+        config.autotrade_defaults.enabled = True
+        config.autotrade_defaults.paper_enabled = True
+        config.autotrade_defaults.live_enabled = True
+        config.autotrade_defaults.order_test_only = False
+        config.autotrade_defaults.quote_order_qty = 25.0
+        config.autotrade_defaults.score_threshold = 75.0
+        notifier = Mock()
+
+        def ready_after_paper_notification():
+            self.assertEqual(notifier.notify_trade.call_count, 1)
+            return {"live_ready": True, "blockers": []}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            with (
+                patch("trade_signal_app.main.APP_STATE.snapshot", return_value=(config, scanner)),
+                patch("trade_signal_app.main._trading_store", return_value=store),
+                patch("trade_signal_app.main._feishu_trade_notifier", return_value=notifier),
+                patch("trade_signal_app.main._trading_readiness_payload", side_effect=ready_after_paper_notification),
+                patch("trade_signal_app.main.IntelligenceHub") as hub_cls,
+                patch.dict("os.environ", {"AI_TRADE_LIVE_CONFIRM": "I_UNDERSTAND_REAL_ORDERS"}),
+            ):
+                hub_cls.return_value.snapshot.return_value = SimpleNamespace(
+                    execution_risk=SimpleNamespace(blocked_symbols={})
+                )
+                payload = _run_trading_once()
+                stored_positions = store.load()
+
+        statuses = {event["status"] for event in payload["events"]}
+        self.assertEqual(statuses, {"paper_filled", "rejected"})
+        self.assertEqual([(position.symbol, position.mode) for position in stored_positions], [("BTCUSDT", "paper")])
+        self.assertEqual(notifier.notify_trade.call_count, 1)
+        gateway.order_market_buy.assert_called_once()
+        self.assertIn("insufficient balance", " ".join(str(event["message"]) for event in payload["events"]))
 
     def test_live_readiness_error_does_not_block_paper_dispatch(self) -> None:
         config = RuntimeConfig()

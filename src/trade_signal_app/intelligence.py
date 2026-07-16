@@ -588,7 +588,13 @@ class IntelligenceHub:
 
         hit_symbols = []
         for hit in strategy_hits:
-            if hit.action in {"wait_pullback", "wait_support", "wait_volatility"}:
+            if hit.action in {
+                "wait_pullback",
+                "wait_support",
+                "wait_volatility",
+                "wait_volume",
+                "wait_buy_pressure",
+            }:
                 continue
             if hit.symbol not in hit_symbols:
                 hit_symbols.append(hit.symbol)

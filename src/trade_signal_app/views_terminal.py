@@ -315,7 +315,19 @@ def _terminal_status_chip(label: str, status: object, lang: str) -> str:
     raw_status = str(status or "").lower()
     if raw_status in {"ready", "configured", "ready_public", "api_live", "live", "enabled", "ok"}:
         chip_class = "ready"
-    elif raw_status in {"guarded", "partial_configured", "fallback", "monitoring", "watch_only", "pending_scan", "wait_pullback", "wait_support", "wait_volatility"}:
+    elif raw_status in {
+        "guarded",
+        "partial_configured",
+        "fallback",
+        "monitoring",
+        "watch_only",
+        "pending_scan",
+        "wait_pullback",
+        "wait_support",
+        "wait_volatility",
+        "wait_volume",
+        "wait_buy_pressure",
+    }:
         chip_class = "pending"
     elif raw_status in {"source_missing", "not_configured", "auth_failed", "empty", "error"}:
         chip_class = "blocked"

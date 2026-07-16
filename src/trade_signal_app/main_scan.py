@@ -269,12 +269,14 @@ def _fallback_scan_payload(params: dict[str, object], warning: str, *, scanner: 
     signals = []
     for ticker in selected_tickers:
         status = liquidity_status[ticker.symbol]
-        score = min(82.0, 50.0 + abs(ticker.price_change_percent) * 3 + min(ticker.quote_volume / 1_000_000_000, 10.0))
+        # A ticker-only fallback has no K-line confirmations and must never look
+        # eligible for the 70+ strategy or 75+ auto-trading thresholds.
+        score = min(69.0, 50.0 + abs(ticker.price_change_percent) * 2 + min(ticker.quote_volume / 1_000_000_000, 6.0))
         signals.append(
             {
                 "symbol": ticker.symbol,
                 "score": round(score, 2),
-                "grade": "B" if score >= 70 else "C",
+                "grade": "C" if score >= 62 else "Watch",
                 "reasons": ["实时 ticker 快速返回", f"24h 成交额 {ticker.quote_volume / 1_000_000:.1f}M"],
                 "warnings": [item for item in (str(status["message"]), warning) if item],
                 "liquidity_eligible": bool(status["eligible"]),

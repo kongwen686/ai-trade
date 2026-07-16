@@ -105,25 +105,43 @@ def decrypt_runtime_config_payload(payload: dict[str, object], passphrase: str) 
     return decoded
 
 
+SCAN_LIQUIDITY_RECOMMENDED_PROFILE = {
+    "min_quote_volume": 5_000_000,
+    "min_trade_count": 30_000,
+    "btc_min_quote_volume": 150_000_000,
+    "btc_min_trade_count": 150_000,
+    "eth_min_quote_volume": 100_000_000,
+    "eth_min_trade_count": 120_000,
+    "xrp_min_quote_volume": 40_000_000,
+    "xrp_min_trade_count": 60_000,
+    "sol_min_quote_volume": 60_000_000,
+    "sol_min_trade_count": 80_000,
+    "bnb_min_quote_volume": 30_000_000,
+    "bnb_min_trade_count": 50_000,
+    "top30_min_quote_volume": 10_000_000,
+    "top30_min_trade_count": 30_000,
+}
+
+
 @dataclass
 class ScanDefaults:
     quote_asset: str = "USDT"
     interval: str = "4h"
     candidate_pool: int = 18
-    min_quote_volume: float = 10_000_000
-    min_trade_count: int = 3000
-    btc_min_quote_volume: float = 100_000_000
-    btc_min_trade_count: int = 50_000
-    eth_min_quote_volume: float = 80_000_000
-    eth_min_trade_count: int = 40_000
-    xrp_min_quote_volume: float = 30_000_000
-    xrp_min_trade_count: int = 15_000
-    sol_min_quote_volume: float = 50_000_000
-    sol_min_trade_count: int = 25_000
-    bnb_min_quote_volume: float = 30_000_000
-    bnb_min_trade_count: int = 15_000
-    top30_min_quote_volume: float = 15_000_000
-    top30_min_trade_count: int = 5000
+    min_quote_volume: float = SCAN_LIQUIDITY_RECOMMENDED_PROFILE["min_quote_volume"]
+    min_trade_count: int = SCAN_LIQUIDITY_RECOMMENDED_PROFILE["min_trade_count"]
+    btc_min_quote_volume: float = SCAN_LIQUIDITY_RECOMMENDED_PROFILE["btc_min_quote_volume"]
+    btc_min_trade_count: int = SCAN_LIQUIDITY_RECOMMENDED_PROFILE["btc_min_trade_count"]
+    eth_min_quote_volume: float = SCAN_LIQUIDITY_RECOMMENDED_PROFILE["eth_min_quote_volume"]
+    eth_min_trade_count: int = SCAN_LIQUIDITY_RECOMMENDED_PROFILE["eth_min_trade_count"]
+    xrp_min_quote_volume: float = SCAN_LIQUIDITY_RECOMMENDED_PROFILE["xrp_min_quote_volume"]
+    xrp_min_trade_count: int = SCAN_LIQUIDITY_RECOMMENDED_PROFILE["xrp_min_trade_count"]
+    sol_min_quote_volume: float = SCAN_LIQUIDITY_RECOMMENDED_PROFILE["sol_min_quote_volume"]
+    sol_min_trade_count: int = SCAN_LIQUIDITY_RECOMMENDED_PROFILE["sol_min_trade_count"]
+    bnb_min_quote_volume: float = SCAN_LIQUIDITY_RECOMMENDED_PROFILE["bnb_min_quote_volume"]
+    bnb_min_trade_count: int = SCAN_LIQUIDITY_RECOMMENDED_PROFILE["bnb_min_trade_count"]
+    top30_min_quote_volume: float = SCAN_LIQUIDITY_RECOMMENDED_PROFILE["top30_min_quote_volume"]
+    top30_min_trade_count: int = SCAN_LIQUIDITY_RECOMMENDED_PROFILE["top30_min_trade_count"]
 
 
 SCAN_TIER_THRESHOLD_FIELDS = (

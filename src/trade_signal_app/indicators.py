@@ -98,6 +98,53 @@ def _level_strength(values: list[float], level: float, tolerance_pct: float = 0.
     return float(sum(1 for value in values if abs(value - level) <= tolerance))
 
 
+def _pivot_values(
+    values: list[float],
+    *,
+    kind: str,
+    radius: int = 2,
+    min_prominence_pct: float = 0.008,
+) -> list[float]:
+    pivots: list[float] = []
+    if len(values) < (radius * 2) + 1:
+        return pivots
+    for index in range(radius, len(values) - radius):
+        value = values[index]
+        neighbors = values[index - radius : index] + values[index + 1 : index + radius + 1]
+        if (
+            kind == "low"
+            and value <= min(neighbors)
+            and value > 0
+            and ((max(neighbors) - value) / value) >= min_prominence_pct
+        ):
+            pivots.append(value)
+        elif (
+            kind == "high"
+            and value >= max(neighbors)
+            and value > 0
+            and ((value - min(neighbors)) / value) >= min_prominence_pct
+        ):
+            pivots.append(value)
+    return pivots
+
+
+def _cluster_levels(values: list[float], reference_values: list[float], tolerance_pct: float = 0.006) -> list[tuple[float, float]]:
+    clusters: list[list[float]] = []
+    for value in sorted(item for item in values if item > 0):
+        if not clusters:
+            clusters.append([value])
+            continue
+        center = sum(clusters[-1]) / len(clusters[-1])
+        if abs(value - center) <= center * tolerance_pct:
+            clusters[-1].append(value)
+        else:
+            clusters.append([value])
+    return [
+        (sum(cluster) / len(cluster), _level_strength(reference_values, sum(cluster) / len(cluster), tolerance_pct))
+        for cluster in clusters
+    ]
+
+
 def _nearest_structure_levels(
     *,
     highs: list[float],
@@ -109,19 +156,39 @@ def _nearest_structure_levels(
     start = max(0, len(closes) - lookback)
     previous_lows = lows[start:-1] or lows[start:]
     previous_highs = highs[start:-1] or highs[start:]
-    support_candidates = [low for low in previous_lows if low <= latest_close]
-    resistance_candidates = [high for high in previous_highs if high >= latest_close]
+    support_profiles = [
+        profile
+        for profile in _cluster_levels(_pivot_values(previous_lows, kind="low"), previous_lows)
+        if profile[0] < latest_close
+    ]
+    resistance_profiles = [
+        profile
+        for profile in _cluster_levels(_pivot_values(previous_highs, kind="high"), previous_highs)
+        if profile[0] > latest_close
+    ]
 
-    support_level = max(support_candidates) if support_candidates else min(previous_lows)
-    resistance_level = min(resistance_candidates) if resistance_candidates else max(previous_highs)
+    reliable_supports = [profile for profile in support_profiles if profile[1] >= 2.0]
+    if reliable_supports:
+        support_level, support_strength = max(reliable_supports, key=lambda profile: profile[0])
+    elif support_profiles:
+        support_level, support_strength = max(support_profiles, key=lambda profile: (profile[1], profile[0]))
+    else:
+        fallback_lows = previous_lows[-20:] or previous_lows
+        support_level = min(fallback_lows)
+        support_strength = _level_strength(previous_lows, support_level)
+
+    if resistance_profiles:
+        resistance_level, resistance_strength = min(resistance_profiles, key=lambda profile: profile[0])
+    else:
+        # No repeated swing high means there is no reliable overhead resistance.
+        resistance_level = 0.0
+        resistance_strength = 0.0
     support_distance_pct = ((latest_close - support_level) / latest_close) * 100 if latest_close and support_level <= latest_close else 0.0
     resistance_distance_pct = ((resistance_level - latest_close) / latest_close) * 100 if latest_close and resistance_level > latest_close else 0.0
-    support_strength = _level_strength(previous_lows, support_level)
-    resistance_strength = _level_strength(previous_highs, resistance_level)
     recent_high = max(previous_highs + [highs[-1]])
     pullback_from_high_pct = ((recent_high - latest_close) / recent_high) * 100 if recent_high else 0.0
     risk_pct = max(support_distance_pct + 0.6, 0.1)
-    reward_pct = max(resistance_distance_pct - 0.4, 0.0)
+    reward_pct = max(resistance_distance_pct - 0.4, 0.0) if resistance_level > latest_close else 9.0
     structure_risk_reward = reward_pct / risk_pct if risk_pct else 0.0
 
     return {

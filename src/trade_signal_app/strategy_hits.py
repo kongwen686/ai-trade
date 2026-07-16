@@ -3,7 +3,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from .entry_filters import anti_chase_reason_from_config, structure_entry_reason_from_config
+from .entry_filters import (
+    anti_chase_reason_from_config,
+    buy_pressure_entry_reason_from_config,
+    structure_entry_reason_from_config,
+    volume_entry_reason_from_config,
+)
 from .volatility import volatility_entry_reason
 
 
@@ -135,6 +140,8 @@ def score_strategy_hits(
         community_score=_community_score(signal),
         config=config,
     )
+    volume_issue = volume_entry_reason_from_config(volume_ratio=volume_ratio, config=config)
+    buy_pressure_issue = buy_pressure_entry_reason_from_config(buy_pressure_ratio=buy_pressure, config=config)
 
     hits: list[StrategyHitScore] = []
 
@@ -151,9 +158,13 @@ def score_strategy_hits(
 
     threshold = float(getattr(config, "score_threshold", 75.0))
     if base_score >= threshold:
-        issue = volatility_issue or anti_chase or structure_issue
+        issue = volume_issue or buy_pressure_issue or volatility_issue or anti_chase or structure_issue
         action = (
-            "wait_volatility"
+            "wait_volume"
+            if volume_issue
+            else "wait_buy_pressure"
+            if buy_pressure_issue
+            else "wait_volatility"
             if volatility_issue
             else "wait_pullback"
             if anti_chase
