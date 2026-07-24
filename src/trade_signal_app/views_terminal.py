@@ -728,6 +728,7 @@ def render_terminal_module_page(
     t = lambda zh, en: _text(active_lang, zh, en)
     intel_items = snapshot["intel_items"]
     twitter_accounts = snapshot["twitter_accounts"]
+    community_scheduler = snapshot.get("community_scheduler") if isinstance(snapshot.get("community_scheduler"), dict) else {}
     onchain_events = snapshot["onchain_events"]
     onchain_sources = snapshot.get("onchain_sources", [])
     spreads = snapshot["spreads"]
@@ -764,15 +765,45 @@ def render_terminal_module_page(
             ]
         )
     elif module == "community":
+        agent_reach = community_scheduler.get("agent_reach") if isinstance(community_scheduler.get("agent_reach"), dict) else {}
+        channel_rows = []
+        for channel, details in dict(agent_reach.get("channels") or {}).items():
+            if not isinstance(details, dict):
+                continue
+            channel_rows.append(
+                {
+                    "channel": channel,
+                    "status": details.get("status", "unknown"),
+                    "backend": details.get("active_backend") or "-",
+                    "message": details.get("message", ""),
+                }
+            )
+        scheduler_rows = [
+            {
+                "status": t("运行中", "Running") if community_scheduler.get("running") else t("已停止", "Stopped"),
+                "last_run": community_scheduler.get("last_run_at") or "-",
+                "next_run": community_scheduler.get("next_run_at") or "-",
+                "symbols": community_scheduler.get("symbol_count", 0),
+                "signals": community_scheduler.get("signal_count", 0),
+                "error": community_scheduler.get("last_error") or agent_reach.get("error") or "-",
+            }
+        ]
+        bullish_candidates = community_scheduler.get("bullish_candidates") if isinstance(community_scheduler.get("bullish_candidates"), list) else []
+        bearish_candidates = community_scheduler.get("bearish_candidates") if isinstance(community_scheduler.get("bearish_candidates"), list) else []
         twitter_actions = f"""
           <div class="terminal-panel-actions">
             <a class="action-link" href="{escape(_url('/settings#settings-twitter', active_lang), quote=True)}">{t("开启/配置账户监控", "Enable / Configure Account Monitor")}</a>
+            <a class="action-link" href="{escape(_url('/api/community/intelligence/status', active_lang), quote=True)}">{t("定时扫描状态", "Scheduled Scan Status")}</a>
             <a class="action-link" href="{escape(_url('/api/terminal/community', active_lang), quote=True)}">{t("查看 JSON", "View JSON")}</a>
           </div>
         """
         panels = "".join(
             [
                 notice_html,
+                _terminal_panel(t("Agent-Reach 定时扫描", "Agent-Reach Scheduled Scan"), t("后台定时预热社区缓存，只生成情绪指标与风险候选，不直接触发下单。", "Prewarms community intelligence in the background; it produces sentiment/risk candidates and never places orders directly."), _terminal_rows(scheduler_rows, [(t("状态", "Status"), "status"), (t("上次运行", "Last Run"), "last_run"), (t("下次运行", "Next Run"), "next_run"), (t("标的", "Symbols"), "symbols"), (t("有效信号", "Signals"), "signals"), (t("异常", "Error"), "error")], lang=active_lang), wide=True),
+                _terminal_panel(t("Agent-Reach 后端", "Agent-Reach Backends"), t("doctor 健康检查识别的只读平台后端；未认证渠道自动降级。", "Read-only platform backends detected by doctor; unauthenticated channels degrade automatically."), _terminal_rows(channel_rows, [(t("渠道", "Channel"), "channel"), (t("状态", "Status"), "status"), (t("后端", "Backend"), "backend"), (t("说明", "Message"), "message")], lang=active_lang), wide=True),
+                _terminal_panel(t("情绪上涨候选", "Sentiment Upside Candidates"), t("达到样本数、可信度、偏多情绪和分数阈值；仍需技术面与量能确认。", "Meets sample, confidence, positive-sentiment, and score thresholds; technical and volume confirmation is still required."), _terminal_rows(bullish_candidates, [(t("标的", "Symbol"), "symbol"), (t("社区分", "Score"), "score"), (t("情绪", "Sentiment"), "sentiment"), (t("可信度 %", "Confidence %"), "confidence_pct"), (t("提及", "Mentions"), "mentions"), (t("摘要", "Summary"), "summary")], lang=active_lang), wide=True),
+                _terminal_panel(t("情绪暴跌风险", "Sentiment Drawdown Risks"), t("负面词、情绪方向与多来源可信度共同确认；用于评分扣分和风险提示。", "Negative terms, sentiment direction, and multi-source confidence confirm these risks for score penalties and warnings."), _terminal_rows(bearish_candidates, [(t("标的", "Symbol"), "symbol"), (t("风险分", "Risk"), "risk_score"), (t("情绪", "Sentiment"), "sentiment"), (t("可信度 %", "Confidence %"), "confidence_pct"), (t("提及", "Mentions"), "mentions"), (t("摘要", "Summary"), "summary")], lang=active_lang), wide=True),
                 _terminal_panel(t("社区数据源", "Community Data Sources"), t("交易所公开行情、X/Reddit 和本地数据源的当前读取状态。", "Current read state for exchange public feeds, X/Reddit, and local sources."), _terminal_rows(market_sources if isinstance(market_sources, list) else [], [(t("来源", "Source"), "source"), (t("标的数", "Symbols"), "symbols"), (t("状态", "Status"), "status")], lang=active_lang), wide=True),
                 _terminal_panel(t("Twitter 账户监控", "Twitter Account Monitor"), t("运行配置中的 tracked accounts 和抓取状态。", "Tracked accounts and fetch state from runtime configuration."), twitter_actions + _terminal_rows(twitter_accounts, [(t("账号", "Account"), "username"), (t("关注点", "Focus"), "focus"), (t("模式", "Mode"), "mode"), (t("权重", "Weight"), "weight_pct"), (t("状态", "Status"), "status")], lang=active_lang), wide=True),
                 _terminal_panel(t("社区/交易所情报", "Community / Exchange Intelligence"), t("X、Reddit、本地新闻、Telegram 与信号引擎信息统一入池。", "X, Reddit, local news, Telegram, and signal-engine items are merged into one intelligence pool."), _terminal_rows(intel_items, [(t("来源", "Source"), "source"), (t("标的", "Symbol"), "symbol"), (t("类别", "Category"), "category"), (t("标题", "Title"), "title"), (t("严重度", "Severity"), "severity")], lang=active_lang), wide=True),

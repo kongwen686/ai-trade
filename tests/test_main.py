@@ -172,6 +172,8 @@ class MainTests(unittest.TestCase):
             patch("trade_signal_app.main.ThreadingHTTPServer", return_value=server) as server_factory,
             patch("trade_signal_app.main._start_feishu_daily_report_scheduler") as scheduler_start,
             patch("trade_signal_app.main._stop_feishu_daily_report_scheduler") as scheduler_stop,
+            patch("trade_signal_app.main._start_community_intelligence_scheduler") as community_scheduler_start,
+            patch("trade_signal_app.main._stop_community_intelligence_scheduler") as community_scheduler_stop,
         ):
             main(["--host", "0.0.0.0", "--port", "9000"])
 
@@ -181,6 +183,8 @@ class MainTests(unittest.TestCase):
         server.serve_forever.assert_called_once_with()
         scheduler_start.assert_called_once_with()
         scheduler_stop.assert_called_once_with()
+        community_scheduler_start.assert_called_once_with()
+        community_scheduler_stop.assert_called_once_with()
 
     def test_tradingview_fetch_result_uses_injected_cache_dir(self) -> None:
         cache_dir = Path("/tmp/custom-tradingview-cache")

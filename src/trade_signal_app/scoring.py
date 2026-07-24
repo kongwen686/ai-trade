@@ -121,6 +121,8 @@ def build_subscores(
         market = 30.0
 
     community = None if community_signal is None else clamp(community_signal.score, 0, 100)
+    if community is not None and community_signal is not None and community_signal.risk_score is not None:
+        community = clamp(community - (max(community_signal.risk_score - 60.0, 0.0) * 0.5), 0, 100)
 
     return ScoreBreakdown(
         trend=round(clamp(trend, 0, 100), 2),
@@ -200,8 +202,17 @@ def build_reasons(ticker: MarketTicker, indicators: IndicatorSnapshot, community
         reasons.append(
             f"{indicators.volatility_label}（分位 {indicators.volatility_percentile:.0f}%）"
         )
-    if community_signal and community_signal.score >= 70:
-        reasons.append(f"社区热度较高 ({community_signal.source})")
+    if (
+        community_signal
+        and community_signal.score >= 70
+        and (community_signal.confidence is None or community_signal.confidence >= 0.55)
+    ):
+        reasons.append(f"社区偏多情绪确认 ({community_signal.source})")
+
+    if community_signal and (community_signal.risk_score or 0.0) >= 70:
+        warnings.append(f"社区负面风险升高 {community_signal.risk_score:.0f}/100")
+    elif community_signal and (community_signal.sentiment or 0.0) <= -0.35:
+        warnings.append("社区情绪明显偏空")
 
     if indicators.volatility_regime == "extreme":
         warnings.append(

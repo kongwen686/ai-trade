@@ -8,7 +8,7 @@ import hmac
 import json
 import os
 
-from .config import AppSettings, DEFAULT_X_TRACKED_ACCOUNTS
+from .config import AppSettings, DEFAULT_AGENT_REACH_RSS_URLS, DEFAULT_X_TRACKED_ACCOUNTS
 from .entry_filters import (
     ANTI_CHASE_DEFAULT_MAX_PRICE_VS_EMA20_PCT,
     ANTI_CHASE_DEFAULT_MAX_RECENT_CHANGE_PCT,
@@ -361,6 +361,18 @@ class IntelligenceDefaults:
     min_intel_severity: float = 60.0
     min_spread_bps: float = 12.0
     whale_transfer_threshold_usd: float = 5_000_000.0
+    community_scan_enabled: bool = True
+    community_scan_interval_seconds: int = 900
+    community_recent_window_hours: int = 12
+    community_max_results: int = 30
+    community_min_mentions: int = 3
+    community_min_confidence: float = 0.55
+    community_bullish_threshold: float = 70.0
+    community_bearish_threshold: float = 70.0
+    community_max_symbols: int = 40
+    agent_reach_enabled: bool = True
+    agent_reach_executable: str = ""
+    agent_reach_rss_urls: list[str] = field(default_factory=lambda: list(DEFAULT_AGENT_REACH_RSS_URLS))
 
 
 @dataclass
@@ -452,6 +464,8 @@ class RuntimeConfig:
                 llm_model=settings.llm_model,
                 openai_api_key=settings.openai_api_key,
                 openai_model=settings.openai_model,
+                agent_reach_executable=settings.agent_reach_executable,
+                agent_reach_rss_urls=list(settings.agent_reach_rss_urls),
             ),
             scan_defaults=ScanDefaults(
                 quote_asset=settings.quote_asset,

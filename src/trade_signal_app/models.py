@@ -55,6 +55,10 @@ class CommunitySignal:
     drivers: list[str] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)
     samples: list[str] = field(default_factory=list)
+    confidence: float | None = None
+    risk_score: float | None = None
+    freshness_minutes: float | None = None
+    source_count: int | None = None
 
 
 @dataclass(frozen=True)

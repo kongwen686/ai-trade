@@ -53,17 +53,32 @@ def _community_detail(signal: dict[str, object]) -> str:
     drivers = [str(item) for item in signal.get("community_drivers") or [] if str(item).strip()]
     risks = [str(item) for item in signal.get("community_risks") or [] if str(item).strip()]
     samples = [str(item) for item in signal.get("community_samples") or [] if str(item).strip()]
+    confidence = signal.get("community_confidence")
+    risk_score = signal.get("community_risk_score")
+    freshness = signal.get("community_freshness_minutes")
+    source_count = signal.get("community_source_count")
     if not summary and not drivers and not risks and not samples:
         return ""
     driver_tags = _chips(drivers[:4], "positive") if drivers else '<span class="muted">暂无明确多头驱动词</span>'
     risk_tags = _chips(risks[:4], "warning") if risks else '<span class="muted">暂无明显风险词</span>'
     sample_items = "".join(f"<li>{escape(item)}</li>" for item in samples[:3])
     samples_html = f"<ul>{sample_items}</ul>" if sample_items else '<p class="muted">暂无可展示样本。</p>'
+    metrics = []
+    if confidence is not None:
+        metrics.append(f"可信度 {float(confidence) * 100:.0f}%")
+    if risk_score is not None:
+        metrics.append(f"下跌风险 {float(risk_score):.0f}/100")
+    if freshness is not None:
+        metrics.append(f"最新 {float(freshness):.0f} 分钟前")
+    if source_count is not None:
+        metrics.append(f"{int(source_count)} 个来源")
+    metrics_html = f'<p class="muted">{" · ".join(metrics)}</p>' if metrics else ""
     return f"""
       <details class="community-detail">
         <summary>社区热度分析</summary>
         <div class="community-detail-body">
           {f'<p>{escape(summary)}</p>' if summary else ""}
+          {metrics_html}
           <div class="community-detail-grid">
             <div><strong>多头驱动</strong><div class="chips compact-chips">{driver_tags}</div></div>
             <div><strong>风险过滤</strong><div class="chips compact-chips">{risk_tags}</div></div>
@@ -87,15 +102,21 @@ def _community_badge(signal: dict[str, object], *, table: bool = False) -> str:
     if signal.get("community_sentiment") is not None:
         sentiment_value = float(signal["community_sentiment"])
         sentiment = f' · senti {sentiment_value:+.2f}'
+    confidence = ""
+    if signal.get("community_confidence") is not None:
+        confidence = f' · conf {float(signal["community_confidence"]) * 100:.0f}%'
+    risk = ""
+    if signal.get("community_risk_score") is not None and float(signal["community_risk_score"]) >= 50:
+        risk = f' · risk {float(signal["community_risk_score"]):.0f}'
     source = escape(str(signal.get("community_source") or "community"))
     if table:
         return (
             f'<div class="community-cell-main">{float(signal["community_score"]):.0f}'
-            f'<span>{source}{mentions}{sentiment}</span></div>'
+            f'<span>{source}{mentions}{sentiment}{confidence}{risk}</span></div>'
         )
     return (
         f'<span class="ant-tag chip neutral">社区 {float(signal["community_score"]):.0f} / 100 · '
-        f'{source}{mentions}{sentiment}</span>'
+        f'{source}{mentions}{sentiment}{confidence}{risk}</span>'
     )
 
 
@@ -170,7 +191,7 @@ def _community_operation_panel(params: dict[str, object], signals: list[dict[str
     else:
         status = t("未接入可用社区数据源", "No usable community data source configured")
         status_class = "muted"
-    provider_options = ["auto", "exchange", "x", "csv", "news", "telegram", "reddit", "exchange,x", "exchange,reddit", "x,csv", "x,reddit", "exchange,x,csv,news,telegram,reddit"]
+    provider_options = ["auto", "agent_reach", "exchange", "x", "csv", "news", "telegram", "reddit", "agent_reach,exchange", "agent_reach,x", "exchange,x", "exchange,reddit", "x,csv", "x,reddit", "agent_reach,exchange,x,csv,news,telegram,reddit", "exchange,x,csv,news,telegram,reddit"]
     x_provider_options = ["official_api", "nitter_rss", "session_scrape"]
     account_mode_options = ["off", "blend", "only"]
     return f"""

@@ -37,7 +37,19 @@ def _settings_description_map(lang: str) -> dict[str, str]:
         "Clear On-chain auth": ("勾选后保存会清空已保存的链上数据 API Key。", "When checked, saving clears the saved on-chain API key."),
         "X Bearer Token": ("用于调用 X/Twitter API 拉取社区热度和指定账号情报。", "Used to call X/Twitter APIs for community heat and tracked-account intelligence."),
         "X Provider": ("选择 X/Twitter 数据来源：official_api 使用 Bearer Token；nitter_rss 使用 Nitter RSS；session_scrape 使用本地只读抓取命令。", "Select X/Twitter source: official_api uses Bearer Token; nitter_rss uses Nitter RSS; session_scrape uses a local read-only scraper command."),
-        "Community Provider": ("选择社区数据来源；auto 会组合 Binance/OKX 官方热点、已配置凭据和本地 CSV。", "Select community data sources; auto combines Binance/OKX official trends, configured credentials, and local CSV files."),
+        "Community Provider": ("选择社区数据来源；auto 会组合 Agent-Reach RSS、Binance/OKX 官方热点、已配置凭据和本地 CSV。", "Select community sources; auto combines Agent-Reach RSS, Binance/OKX official trends, configured credentials, and local CSV files."),
+        "Enable Agent-Reach": ("启用 Agent-Reach 路由健康检查和公开 RSS 情报采集；不会自动读取浏览器 Cookie。", "Enables Agent-Reach routing health checks and public RSS ingestion; browser cookies are never read automatically."),
+        "Enable scheduled community scan": ("后台定时预热社区情报，不调用自动交易或下单接口。", "Prewarms community intelligence in the background without invoking trading or order APIs."),
+        "Community Scan Interval": ("社区情报扫描间隔，默认 900 秒。", "Community intelligence scan interval; defaults to 900 seconds."),
+        "Community Window Hours": ("只统计该时间窗口内的情报，越短越强调突发情绪。", "Only counts intelligence inside this lookback window; shorter windows emphasize sudden sentiment."),
+        "Community Max Results": ("每个标的最多保留的去重情报样本。", "Maximum deduplicated intelligence samples retained per symbol."),
+        "Community Min Mentions": ("进入高可信多空候选所需的最少独立样本数。", "Minimum independent samples required for a high-confidence candidate."),
+        "Community Min Confidence": ("可信度由样本数、来源数量和时效共同计算。", "Confidence combines sample count, source diversity, and freshness."),
+        "Community Bullish Threshold": ("达到该分数且情绪偏多时标记为潜在上涨候选。", "Marks a potential upside candidate when this score and positive sentiment are reached."),
+        "Community Bearish Threshold": ("负面风险达到该分数时标记为潜在暴跌预警。", "Marks a potential drawdown warning when negative risk reaches this score."),
+        "Community Max Symbols": ("每轮按 Binance 24h 成交额排序后预热的标的数量。", "Symbols prewarmed per cycle after ranking by Binance 24h quote volume."),
+        "Agent-Reach Executable": ("可选 Agent-Reach CLI 绝对路径；留空会自动查找 PATH 和 ~/.local/bin。", "Optional absolute path to Agent-Reach CLI; blank checks PATH and ~/.local/bin."),
+        "Agent-Reach RSS URLs": ("一行一个只读 RSS/Atom 来源；内容会去重并按时间衰减。", "One read-only RSS/Atom source per line; content is deduplicated and time-decayed."),
         "X API Base URL": ("X API 网关地址，通常保持默认；代理环境可改成内部转发地址。", "X API gateway URL; keep default unless you route through an internal proxy."),
         "X Nitter Base URL": ("自建 Nitter 实例地址，例如 http://127.0.0.1:8788；公共实例不稳定，不建议重度依赖。", "Self-hosted Nitter base URL, e.g. http://127.0.0.1:8788; public instances are unreliable."),
         "X Session Command": ("本地只读抓取命令模板，支持 {query}、{raw_query}、{limit}、{hours} 占位符，输出 JSON/JSONL。", "Local read-only scraper command template. Supports {query}, {raw_query}, {limit}, {hours}; output JSON/JSONL."),
@@ -510,7 +522,7 @@ def render_settings_page(
           <label class="inline-check"><input type="checkbox" name="clear_onchain_auth" /><span>Clear On-chain auth</span></label>
           <label><span>X Bearer Token</span><input type="password" name="x_bearer_token" value="" placeholder="留空保持当前" autocomplete="new-password" /></label>
           <label><span>X Provider</span><select name="x_provider">{''.join(_option(item, str(params['x_provider'])) for item in ['official_api', 'nitter_rss', 'session_scrape'])}</select></label>
-          <label><span>Community Provider</span><select name="community_provider">{''.join(_option(item, str(params['community_provider'])) for item in ['auto', 'exchange', 'x', 'csv', 'news', 'telegram', 'reddit', 'exchange,x', 'exchange,news', 'exchange,reddit', 'exchange,x,csv', 'exchange,x,reddit', 'x,csv', 'x,news', 'x,telegram', 'x,reddit', 'csv,news', 'csv,telegram', 'csv,reddit', 'news,telegram', 'news,reddit', 'telegram,reddit', 'x,csv,news', 'x,csv,telegram', 'x,csv,reddit', 'x,news,telegram', 'x,news,reddit', 'x,telegram,reddit', 'csv,news,telegram', 'csv,news,reddit', 'csv,telegram,reddit', 'news,telegram,reddit', 'exchange,x,csv,news,telegram,reddit', 'x,csv,news,telegram', 'x,csv,news,reddit', 'x,csv,telegram,reddit', 'x,news,telegram,reddit', 'csv,news,telegram,reddit', 'x,csv,news,telegram,reddit'])}</select></label>
+          <label><span>Community Provider</span><select name="community_provider">{''.join(_option(item, str(params['community_provider'])) for item in ['auto', 'agent_reach', 'exchange', 'x', 'csv', 'news', 'telegram', 'reddit', 'agent_reach,exchange', 'agent_reach,x', 'exchange,x', 'exchange,news', 'exchange,reddit', 'exchange,x,csv', 'exchange,x,reddit', 'x,csv', 'x,news', 'x,telegram', 'x,reddit', 'csv,news', 'csv,telegram', 'csv,reddit', 'news,telegram', 'news,reddit', 'telegram,reddit', 'x,csv,news', 'x,csv,telegram', 'x,csv,reddit', 'x,news,telegram', 'x,news,reddit', 'x,telegram,reddit', 'csv,news,telegram', 'csv,news,reddit', 'csv,telegram,reddit', 'news,telegram,reddit', 'agent_reach,exchange,x,csv,news,telegram,reddit', 'exchange,x,csv,news,telegram,reddit', 'x,csv,news,telegram', 'x,csv,news,reddit', 'x,csv,telegram,reddit', 'x,news,telegram,reddit', 'csv,news,telegram,reddit', 'x,csv,news,telegram,reddit'])}</select></label>
           <label><span>X API Base URL</span><input type="text" name="x_api_base_url" value="{escape(str(params['x_api_base_url']))}" /></label>
           <label><span>X Nitter Base URL</span><input type="text" name="x_nitter_base_url" value="{escape(str(params['x_nitter_base_url']))}" placeholder="http://127.0.0.1:8788" /></label>
           <label class="full-span"><span>X Session Command</span><input type="text" name="x_session_command" value="{escape(str(params['x_session_command']))}" placeholder='twscrape search {{query}} --limit {{limit}} --json' /></label>
@@ -549,6 +561,23 @@ def render_settings_page(
           <label><span>Min Intel Severity</span><input type="number" step="0.1" min="0" max="100" name="intelligence_min_intel_severity" value="{float(params['intelligence_min_intel_severity']):.1f}" /></label>
           <label><span>Min Spread bps</span><input type="number" step="0.1" min="0" name="intelligence_min_spread_bps" value="{float(params['intelligence_min_spread_bps']):.1f}" /></label>
           <label><span>Whale Threshold USD</span><input type="number" step="100000" min="0" name="intelligence_whale_transfer_threshold_usd" value="{float(params['intelligence_whale_transfer_threshold_usd']):.0f}" /></label>
+          </div>
+          </div>
+          <div class="settings-group">
+          <div class="settings-group-head"><h3>Agent-Reach 社区扫描</h3><p>按成交额选取标的，聚合只读 RSS 与已配置社区源，完成去重、时效衰减、可信度和多空风险评分。</p></div>
+          <div class="settings-grid settings-grid-compact">
+          <label class="inline-check"><input type="hidden" name="agent_reach_enabled" value="0" /><input type="checkbox" name="agent_reach_enabled" value="1" {"checked" if params.get("agent_reach_enabled", True) else ""} /><span>Enable Agent-Reach</span></label>
+          <label class="inline-check"><input type="hidden" name="community_scan_enabled" value="0" /><input type="checkbox" name="community_scan_enabled" value="1" {"checked" if params.get("community_scan_enabled", True) else ""} /><span>Enable scheduled community scan</span></label>
+          <label><span>Community Scan Interval</span><input type="number" min="60" max="86400" step="60" name="community_scan_interval_seconds" value="{int(params.get('community_scan_interval_seconds', 900))}" /></label>
+          <label><span>Community Window Hours</span><input type="number" min="1" max="168" name="community_recent_window_hours" value="{int(params.get('community_recent_window_hours', 12))}" /></label>
+          <label><span>Community Max Results</span><input type="number" min="5" max="200" name="community_max_results" value="{int(params.get('community_max_results', 30))}" /></label>
+          <label><span>Community Min Mentions</span><input type="number" min="1" max="100" name="community_min_mentions" value="{int(params.get('community_min_mentions', 3))}" /></label>
+          <label><span>Community Min Confidence</span><input type="number" min="0" max="1" step="0.05" name="community_min_confidence" value="{float(params.get('community_min_confidence', 0.55)):.2f}" /></label>
+          <label><span>Community Bullish Threshold</span><input type="number" min="0" max="100" step="1" name="community_bullish_threshold" value="{float(params.get('community_bullish_threshold', 70)):.0f}" /></label>
+          <label><span>Community Bearish Threshold</span><input type="number" min="0" max="100" step="1" name="community_bearish_threshold" value="{float(params.get('community_bearish_threshold', 70)):.0f}" /></label>
+          <label><span>Community Max Symbols</span><input type="number" min="5" max="100" name="community_max_symbols" value="{int(params.get('community_max_symbols', 40))}" /></label>
+          <label class="full-span"><span>Agent-Reach Executable</span><input type="text" name="agent_reach_executable" value="{escape(str(params.get('agent_reach_executable', '')))}" placeholder="~/.local/bin/agent-reach" /></label>
+          <label class="full-span"><span>Agent-Reach RSS URLs</span><textarea name="agent_reach_rss_urls" rows="4">{escape(chr(10).join(str(item) for item in params.get('agent_reach_rss_urls', [])))}</textarea></label>
           </div>
           </div>
           <div class="settings-group">

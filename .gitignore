@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 data/runtime_config.json
 data/trading_state.json
+data/community_intelligence_cache.json
 data/*.corrupt-*
 data/*.sqlite3*
 data/logs/

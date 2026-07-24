@@ -26,6 +26,7 @@ from .carry import (
     carry_position_mark_payload,
     run_carry_paper_cycle,
 )
+from .community_scheduler import CommunityIntelligenceScheduler
 from .config import BASE_DIR, SETTINGS
 from .entry_filters import (
     anti_chase_reason_from_config,
@@ -66,8 +67,13 @@ from .views import normalize_language, render_backtest_page, render_btc_signal_p
 RUNTIME_CONFIG_PATH = BASE_DIR / "data" / "runtime_config.json"
 TRADING_STATE_PATH = BASE_DIR / "data" / "trading_state.json"
 LOCAL_DATABASE_PATH = BASE_DIR / "data" / "ai_trade.sqlite3"
+COMMUNITY_INTELLIGENCE_CACHE_PATH = BASE_DIR / "data" / "community_intelligence_cache.json"
 TRADINGVIEW_CACHE_DIR = BASE_DIR / "data" / "tradingview_klines"
 APP_STATE = AppState(SETTINGS, RUNTIME_CONFIG_PATH)
+COMMUNITY_INTELLIGENCE_SCHEDULER = CommunityIntelligenceScheduler(
+    snapshot=APP_STATE.snapshot,
+    cache_path=COMMUNITY_INTELLIGENCE_CACHE_PATH,
+)
 MARKET_TICKER_SYMBOLS = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT")
 TERMINAL_SNAPSHOT_TTL_SECONDS = 45
 TERMINAL_SYNC_TIMEOUT_SECONDS = 1.2
@@ -135,6 +141,22 @@ _validate_runtime_config = settings_handlers._validate_runtime_config
 _scan_params_from_config = settings_handlers._scan_params_from_config
 _backtest_params_from_config = settings_handlers._backtest_params_from_config
 _settings_params_from_config = settings_handlers._settings_params_from_config
+
+
+def _community_intelligence_scheduler_status() -> dict[str, object]:
+    return COMMUNITY_INTELLIGENCE_SCHEDULER.status()
+
+
+def _start_community_intelligence_scheduler() -> dict[str, object]:
+    return COMMUNITY_INTELLIGENCE_SCHEDULER.start()
+
+
+def _stop_community_intelligence_scheduler() -> dict[str, object]:
+    return COMMUNITY_INTELLIGENCE_SCHEDULER.stop()
+
+
+def _run_community_intelligence_once() -> dict[str, object]:
+    return COMMUNITY_INTELLIGENCE_SCHEDULER.run_once()
 
 
 def _settings_status_from_config(config: RuntimeConfig) -> dict[str, object]:
@@ -2668,15 +2690,19 @@ def _community_signal_intel_rows(scanner: object, symbols: list[str]) -> tuple[l
             continue
         mentions = "" if signal.mentions is None else f"，提及 {signal.mentions}"
         sentiment = "" if signal.sentiment is None else f"，情绪 {signal.sentiment:+.2f}"
+        risk_score = float(signal.risk_score or 0.0)
+        confidence = None if signal.confidence is None else float(signal.confidence)
         title = signal.summary or f"{symbol} 社区热度 {signal.score:.1f}{mentions}{sentiment}"
         rows.append(
             {
                 "source": signal.source,
                 "symbol": symbol,
                 "title": title,
-                "category": "community_heat",
-                "severity": round(float(signal.score), 2),
+                "category": "community_risk" if risk_score >= 70 else "community_sentiment",
+                "severity": round(max(float(signal.score), risk_score), 2),
                 "sentiment": 0.0 if signal.sentiment is None else round(float(signal.sentiment), 4),
+                "confidence": None if confidence is None else round(confidence, 4),
+                "risk_score": round(risk_score, 2),
                 "url": "",
             }
         )
@@ -2712,6 +2738,7 @@ def _community_only_module_payload() -> dict[str, object]:
         "twitter_accounts": _to_jsonable(hub._build_twitter_accounts()),
         "intel_items": filtered_items[:16],
         "market_sources": sections.get("market_sources", []),
+        "community_scheduler": _community_intelligence_scheduler_status(),
         "cached": False,
         "warning": "；".join(part for part in warning_parts if part),
     }
@@ -3466,6 +3493,7 @@ def _fast_terminal_payload(
         "returned_signals": 0,
         "intel_items": intel_items,
         "twitter_accounts": community["twitter_accounts"],
+        "community_scheduler": community.get("community_scheduler", _community_intelligence_scheduler_status()),
         "onchain_events": onchain_events,
         "onchain_sources": onchain.get("onchain_sources", []),
         "spreads": spreads,
@@ -3595,6 +3623,7 @@ def _terminal_module_payload(module: str) -> dict[str, object]:
             "module": module,
             "twitter_accounts": snapshot["twitter_accounts"],
             "intel_items": snapshot["intel_items"],
+            "community_scheduler": snapshot.get("community_scheduler", _community_intelligence_scheduler_status()),
         }
     if module == "onchain":
         return {
@@ -4140,6 +4169,13 @@ class RequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/notifications/feishu/daily/status":
                 self._send_text(
                     json.dumps(_feishu_daily_report_status_payload(), ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            if parsed.path == "/api/community/intelligence/status":
+                self._send_text(
+                    json.dumps(_community_intelligence_scheduler_status(), ensure_ascii=False, indent=2),
                     content_type="application/json; charset=utf-8",
                 )
                 return
@@ -4749,6 +4785,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            if parsed.path == "/api/community/intelligence/run":
+                self._send_text(
+                    json.dumps(_run_community_intelligence_once(), ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
             if parsed.path == "/api/btc/signal/push":
                 form = parse_qs(_read_body(self))
                 self._send_text(
@@ -4828,10 +4871,12 @@ def run(*, host: str | None = None, port: int | None = None) -> None:
     resolved_port = port if port is not None else SETTINGS.server_port
     server = ThreadingHTTPServer((resolved_host, resolved_port), RequestHandler)
     _start_feishu_daily_report_scheduler()
+    _start_community_intelligence_scheduler()
     print(f"Serving on http://{resolved_host}:{resolved_port}", flush=True)
     try:
         server.serve_forever()
     finally:
+        _stop_community_intelligence_scheduler()
         _stop_feishu_daily_report_scheduler()
 
 

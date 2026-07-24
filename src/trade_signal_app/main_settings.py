@@ -191,6 +191,17 @@ def _validate_runtime_config(config: RuntimeConfig) -> None:
     _validate_range(intelligence.min_intel_severity, "Intelligence Min Severity", minimum=0, maximum=100)
     _validate_range(intelligence.min_spread_bps, "Intelligence Min Spread", minimum=0)
     _validate_range(intelligence.whale_transfer_threshold_usd, "Whale Transfer Threshold", minimum=0)
+    _validate_range(intelligence.community_scan_interval_seconds, "Community Scan Interval", minimum=60, maximum=86400)
+    _validate_range(intelligence.community_recent_window_hours, "Community Window Hours", minimum=1, maximum=168)
+    _validate_range(intelligence.community_max_results, "Community Max Results", minimum=5, maximum=200)
+    _validate_range(intelligence.community_min_mentions, "Community Min Mentions", minimum=1, maximum=100)
+    _validate_range(intelligence.community_min_confidence, "Community Min Confidence", minimum=0, maximum=1)
+    _validate_range(intelligence.community_bullish_threshold, "Community Bullish Threshold", minimum=0, maximum=100)
+    _validate_range(intelligence.community_bearish_threshold, "Community Bearish Threshold", minimum=0, maximum=100)
+    _validate_range(intelligence.community_max_symbols, "Community Max Symbols", minimum=5, maximum=100)
+    for url in intelligence.agent_reach_rss_urls:
+        if not url.startswith(("http://", "https://")):
+            raise ValueError("Agent-Reach RSS URL 必须以 http:// 或 https:// 开头。")
 
     carry = config.carry_paper_defaults
     _validate_range(carry.notional_per_leg, "Carry Notional Per Leg", minimum=1)
@@ -440,6 +451,18 @@ def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "intelligence_min_intel_severity": intelligence.min_intel_severity,
         "intelligence_min_spread_bps": intelligence.min_spread_bps,
         "intelligence_whale_transfer_threshold_usd": intelligence.whale_transfer_threshold_usd,
+        "community_scan_enabled": intelligence.community_scan_enabled,
+        "community_scan_interval_seconds": intelligence.community_scan_interval_seconds,
+        "community_recent_window_hours": intelligence.community_recent_window_hours,
+        "community_max_results": intelligence.community_max_results,
+        "community_min_mentions": intelligence.community_min_mentions,
+        "community_min_confidence": intelligence.community_min_confidence,
+        "community_bullish_threshold": intelligence.community_bullish_threshold,
+        "community_bearish_threshold": intelligence.community_bearish_threshold,
+        "community_max_symbols": intelligence.community_max_symbols,
+        "agent_reach_enabled": intelligence.agent_reach_enabled,
+        "agent_reach_executable": intelligence.agent_reach_executable,
+        "agent_reach_rss_urls": intelligence.agent_reach_rss_urls,
         "carry_paper_enabled": carry.enabled,
         "carry_notional_per_leg": carry.notional_per_leg,
         "carry_min_basis_bps": carry.min_basis_bps,
@@ -924,6 +947,18 @@ def _build_runtime_config(form: dict[str, list[str]], *, current_config: Runtime
             min_intel_severity=_parse_float_value(_get_first(form, "intelligence_min_intel_severity", str(current_config.intelligence_defaults.min_intel_severity)), "Intelligence Min Severity"),
             min_spread_bps=_parse_float_value(_get_first(form, "intelligence_min_spread_bps", str(current_config.intelligence_defaults.min_spread_bps)), "Intelligence Min Spread"),
             whale_transfer_threshold_usd=_parse_float_value(_get_first(form, "intelligence_whale_transfer_threshold_usd", str(current_config.intelligence_defaults.whale_transfer_threshold_usd)), "Whale Transfer Threshold"),
+            community_scan_enabled=_runtime_bool(form, "community_scan_enabled", current_config.intelligence_defaults.community_scan_enabled),
+            community_scan_interval_seconds=_parse_int_value(_get_first(form, "community_scan_interval_seconds", str(current_config.intelligence_defaults.community_scan_interval_seconds)), "Community Scan Interval"),
+            community_recent_window_hours=_parse_int_value(_get_first(form, "community_recent_window_hours", str(current_config.intelligence_defaults.community_recent_window_hours)), "Community Window Hours"),
+            community_max_results=_parse_int_value(_get_first(form, "community_max_results", str(current_config.intelligence_defaults.community_max_results)), "Community Max Results"),
+            community_min_mentions=_parse_int_value(_get_first(form, "community_min_mentions", str(current_config.intelligence_defaults.community_min_mentions)), "Community Min Mentions"),
+            community_min_confidence=_parse_float_value(_get_first(form, "community_min_confidence", str(current_config.intelligence_defaults.community_min_confidence)), "Community Min Confidence"),
+            community_bullish_threshold=_parse_float_value(_get_first(form, "community_bullish_threshold", str(current_config.intelligence_defaults.community_bullish_threshold)), "Community Bullish Threshold"),
+            community_bearish_threshold=_parse_float_value(_get_first(form, "community_bearish_threshold", str(current_config.intelligence_defaults.community_bearish_threshold)), "Community Bearish Threshold"),
+            community_max_symbols=_parse_int_value(_get_first(form, "community_max_symbols", str(current_config.intelligence_defaults.community_max_symbols)), "Community Max Symbols"),
+            agent_reach_enabled=_runtime_bool(form, "agent_reach_enabled", current_config.intelligence_defaults.agent_reach_enabled),
+            agent_reach_executable=_get_first(form, "agent_reach_executable", current_config.intelligence_defaults.agent_reach_executable).strip(),
+            agent_reach_rss_urls=_parse_multiline_list(_get_first(form, "agent_reach_rss_urls", "\n".join(current_config.intelligence_defaults.agent_reach_rss_urls))),
         ),
         backtest_defaults=BacktestDefaults(
             preset=_get_first(form, "backtest_preset", current_config.backtest_defaults.preset).strip() or "custom",

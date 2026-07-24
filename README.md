@@ -35,6 +35,8 @@
   - 主动买盘占比
   - 波动率状态：已实现波动率、历史分位、波动率倍数、ATR 和冲击强度
 - 社区与情报
+  - Agent-Reach 后端健康检查与定时社区情报预热
+  - CoinDesk、Cointelegraph、Decrypt 公开 RSS 去重、时效衰减、可信度和多空风险评分
   - X/Twitter 实时舆情
   - 指定账号情报模式：`off` / `blend` / `only`
   - 本地 CSV 社区分数
@@ -112,6 +114,8 @@
 - 平台风控 API：`http://127.0.0.1:8000/api/platform/risk`
 - 平台日志 API：`http://127.0.0.1:8000/api/platform/logs`
 - 总控台模块 API：`http://127.0.0.1:8000/api/terminal/modules/{market|community|onchain|basis|strategies|trading|risk}`
+- 社区情报定时扫描状态：`GET http://127.0.0.1:8000/api/community/intelligence/status`
+- 手动运行一轮社区情报扫描：`POST http://127.0.0.1:8000/api/community/intelligence/run`
 - 自然语言策略编译 API：`POST http://127.0.0.1:8000/api/strategy/compile`
 - 回测 API：`http://127.0.0.1:8000/api/backtest`
 - 自动交易 API：`POST http://127.0.0.1:8000/api/trading/run`
@@ -440,6 +444,24 @@ python3 -m trade_signal_app
 
 ## 社区热度与 Twitter 情报
 
+### Agent-Reach 定时扫描
+
+系统会在独立后台线程中按 Binance 24h 成交额选取最多 40 个 USDT 标的，默认每 900 秒预热一次社区情报。采集结果先经过文本去重、时间窗口过滤、来源数量、样本数和时效衰减，再生成：
+
+- 社区偏多分：作为综合扫描分的社区子项，权重上限仍为 10%
+- 社区可信度：低于阈值的单来源或低样本信息不会进入上涨/暴跌候选
+- 下跌风险分：负面情绪达到阈值时扣减社区子分并显示风险提示
+- 上涨与暴跌候选：展示在 `/terminal/community`，不会直接调用自动交易或下单接口
+
+Agent-Reach CLI 用于识别 Twitter、Reddit、RSS 和 Web 等只读后端；未认证渠道会自动降级，不会自动读取浏览器 Cookie。安装与检查示例：
+
+```bash
+uv tool install 'git+https://github.com/Panniantong/Agent-Reach.git'
+agent-reach doctor --json
+```
+
+公开 RSS 默认包含 CoinDesk、Cointelegraph 和 Decrypt。扫描间隔、回看窗口、最小样本、最小可信度、多空阈值、最大标的数、CLI 路径和 RSS URL 均可在 `/settings` 的 `Intelligence & LLM` 区域调整。
+
 ### X / Twitter
 
 支持三挡 X / Twitter provider。`Community Provider` 里仍使用 `x` 代表 X/Twitter 数据源，具体采集方式由 `X Provider` 决定。
@@ -498,6 +520,9 @@ export X_TRACKED_ACCOUNTS="lookonchain,WuBlockchain,Grayscale,saylor,Strategy"
 
 `Community Provider` 现在支持：
 
+- `agent_reach`
+- `agent_reach,exchange`
+- `agent_reach,x`
 - `x`
 - `csv`
 - `news`
@@ -530,7 +555,7 @@ export X_TRACKED_ACCOUNTS="lookonchain,WuBlockchain,Grayscale,saylor,Strategy"
 - `csv,news,telegram,reddit`
 - `x,csv,news,telegram,reddit`
 - `auto`
-  - 自动尝试可用的 `x + csv + news`
+  - 自动尝试可用的 `agent_reach + exchange + x + csv + news`
   - 为了避免无意增加网络依赖，`telegram` 和 `reddit` 需要显式选择
 
 示例账号：

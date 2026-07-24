@@ -11,12 +11,14 @@ import math
 import re
 import shlex
 import subprocess
+from threading import RLock
 from typing import Callable
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
 from .models import CommunitySignal
+from .ssl_compat import create_default_ssl_context
 
 QUOTE_SUFFIXES = (
     "USDT",
@@ -38,7 +40,7 @@ QUOTE_SUFFIXES = (
 
 DEFAULT_X_NAME_MAP = {
     "BTC": ["bitcoin"],
-    "ETH": ["ethereum"],
+    "ETH": ["ethereum", "ether"],
     "BNB": ["binance coin", "bnb chain"],
     "XRP": ["ripple"],
     "SOL": ["solana"],
@@ -52,6 +54,10 @@ DEFAULT_X_NAME_MAP = {
     "SUI": ["sui"],
     "TON": ["toncoin", "the open network"],
     "SHIB": ["shiba inu"],
+    "NEAR": ["near protocol"],
+    "TAO": ["bittensor"],
+    "WLD": ["worldcoin"],
+    "USDC": ["usd coin"],
 }
 
 POSITIVE_TERMS = {
@@ -66,7 +72,6 @@ POSITIVE_TERMS = {
     "growth",
     "long",
     "momentum",
-    "pump",
     "rally",
     "rebound",
     "reversal",
@@ -92,6 +97,40 @@ NEGATIVE_TERMS = {
     "sell",
     "short",
     "weak",
+    "exploit",
+    "fomo",
+    "hack",
+    "insolvency",
+    "outflow",
+    "pump",
+}
+
+POSITIVE_PHRASES = {
+    "上涨",
+    "突破",
+    "买入",
+    "增持",
+    "看涨",
+    "反弹",
+    "拉升",
+    "资金流入",
+    "利好",
+    "机构采用",
+}
+
+NEGATIVE_PHRASES = {
+    "下跌",
+    "暴跌",
+    "崩盘",
+    "抛售",
+    "清算",
+    "爆仓",
+    "恐慌",
+    "看空",
+    "资金流出",
+    "黑客攻击",
+    "安全漏洞",
+    "监管调查",
 }
 
 EXCHANGE_POSITIVE_TERMS = {
@@ -151,11 +190,18 @@ def message_insight(symbol: str, texts: list[str], *, source: str, max_samples: 
     positive_counts: dict[str, int] = {}
     negative_counts: dict[str, int] = {}
     for text in unique_texts:
-        for token in normalize_tokens(text):
+        tokens = normalize_tokens(text)
+        for token in tokens:
             if token in POSITIVE_TERMS:
                 positive_counts[token] = positive_counts.get(token, 0) + 1
             if token in NEGATIVE_TERMS:
                 negative_counts[token] = negative_counts.get(token, 0) + 1
+        for phrase in POSITIVE_PHRASES:
+            if phrase in text:
+                positive_counts[phrase] = positive_counts.get(phrase, 0) + 1
+        for phrase in NEGATIVE_PHRASES:
+            if phrase in text:
+                negative_counts[phrase] = negative_counts.get(phrase, 0) + 1
 
     drivers = [f"{term} x{count}" for term, count in sorted(positive_counts.items(), key=lambda item: (-item[1], item[0]))[:4]]
     risks = [f"{term} x{count}" for term, count in sorted(negative_counts.items(), key=lambda item: (-item[1], item[0]))[:4]]
@@ -186,6 +232,10 @@ def signal_with_insight(
     sentiment: float | None,
     sample_size: int | None,
     texts: list[str],
+    confidence: float | None = None,
+    risk_score: float | None = None,
+    freshness_minutes: float | None = None,
+    source_count: int | None = None,
 ) -> CommunitySignal:
     insight = message_insight(symbol, texts, source=source)
     return CommunitySignal(
@@ -198,6 +248,10 @@ def signal_with_insight(
         drivers=[str(item) for item in insight["drivers"]],
         risks=[str(item) for item in insight["risks"]],
         samples=[str(item) for item in insight["samples"]],
+        confidence=None if confidence is None else round(max(0.0, min(confidence, 1.0)), 4),
+        risk_score=None if risk_score is None else round(max(0.0, min(risk_score, 100.0)), 2),
+        freshness_minutes=None if freshness_minutes is None else round(max(freshness_minutes, 0.0), 1),
+        source_count=source_count,
     )
 
 
@@ -213,6 +267,161 @@ class CommunityScoreProvider:
 class NullCommunityScoreProvider(CommunityScoreProvider):
     def get(self, symbol: str) -> CommunitySignal | None:
         return None
+
+
+@dataclass
+class AgentReachRSSCommunityScoreProvider(CommunityScoreProvider):
+    urls: list[str]
+    ttl_seconds: int
+    recent_window_hours: int
+    max_results: int
+    min_mentions: int = 3
+    min_confidence: float = 0.55
+    timeout: int = 12
+    max_workers: int = 3
+    fetcher: Callable[[str, dict[str, str] | None, int], str] | None = None
+    _expires_at: datetime = field(default_factory=lambda: datetime.min.replace(tzinfo=timezone.utc))
+    _items: list[dict[str, object]] = field(default_factory=list)
+    _signals: dict[str, CommunitySignal | None] = field(default_factory=dict)
+    _lock: RLock = field(default_factory=RLock)
+
+    def __post_init__(self) -> None:
+        if self.fetcher is None:
+            self.fetcher = http_get_text
+
+    def prepare(self, symbols: list[str]) -> None:
+        normalized = list(dict.fromkeys(symbol.upper() for symbol in symbols if symbol.strip()))
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            if self._expires_at <= now:
+                self._items = self._fetch_items()
+                self._signals.clear()
+                self._expires_at = now + timedelta(seconds=max(60, self.ttl_seconds))
+            for symbol in normalized:
+                if symbol not in self._signals:
+                    self._signals[symbol] = self._build_signal(symbol, now=now)
+
+    def get(self, symbol: str) -> CommunitySignal | None:
+        normalized = symbol.upper()
+        self.prepare([normalized])
+        with self._lock:
+            return self._signals.get(normalized)
+
+    def _fetch_items(self) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        urls = list(dict.fromkeys(url.strip() for url in self.urls if url.strip()))
+        if not urls:
+            return rows
+        assert self.fetcher is not None
+        with ThreadPoolExecutor(max_workers=max(1, min(self.max_workers, len(urls)))) as executor:
+            futures = {
+                executor.submit(
+                    self.fetcher,
+                    url,
+                    {"User-Agent": "trade-signal-app/0.3 agent-reach-rss"},
+                    self.timeout,
+                ): url
+                for url in urls
+            }
+            for future in as_completed(futures):
+                url = futures[future]
+                try:
+                    payload = future.result()
+                except Exception:  # noqa: BLE001
+                    continue
+                rows.extend(self._parse_feed(payload, url=url))
+        return dedupe_social_items(rows)
+
+    def _build_signal(self, symbol: str, *, now: datetime) -> CommunitySignal | None:
+        cutoff = now - timedelta(hours=max(1, self.recent_window_hours))
+        matched = [
+            item
+            for item in self._items
+            if (item.get("created_at") is None or item["created_at"] >= cutoff)
+            and social_item_matches_symbol(symbol, str(item.get("text") or ""))
+        ][: max(1, self.max_results)]
+        if not matched:
+            return None
+
+        texts = [str(item["text"]) for item in matched]
+        sources = {str(item.get("source") or "rss") for item in matched}
+        dated_items = [item["created_at"] for item in matched if isinstance(item.get("created_at"), datetime)]
+        newest = max(dated_items) if dated_items else now
+        freshness_minutes = max(0.0, (now - newest).total_seconds() / 60)
+        freshness_factor = math.exp(-freshness_minutes / max(self.recent_window_hours * 60, 1))
+        sample_factor = min(1.0, len(matched) / max(self.min_mentions, 1))
+        source_factor = min(1.0, len(sources) / 2)
+        confidence = (sample_factor * 0.45) + (source_factor * 0.30) + (freshness_factor * 0.25)
+
+        sentiment = XCommunityScoreProvider.score_sentiment(texts)
+        raw_score = XCommunityScoreProvider.compute_score(
+            mentions=len(matched) * 18,
+            sentiment=sentiment,
+            sample_size=len(texts),
+        )
+        effective_confidence = confidence if confidence >= self.min_confidence else confidence * 0.65
+        score = 50.0 + ((raw_score - 50.0) * effective_confidence)
+        negative_terms = sum(
+            1
+            for text in texts
+            for token in normalize_tokens(text)
+            if token in NEGATIVE_TERMS
+        )
+        raw_risk_score = min(
+            100.0,
+            (max(-sentiment, 0.0) * 70.0)
+            + (min(negative_terms / max(len(texts), 1), 2.0) * 15.0),
+        )
+        risk_score = raw_risk_score * confidence
+        return signal_with_insight(
+            symbol=symbol,
+            score=score,
+            source="agent_reach_rss",
+            mentions=len(matched),
+            sentiment=sentiment,
+            sample_size=len(texts),
+            texts=texts,
+            confidence=confidence,
+            risk_score=risk_score,
+            freshness_minutes=freshness_minutes,
+            source_count=len(sources),
+        )
+
+    @staticmethod
+    def _parse_feed(payload: str, *, url: str) -> list[dict[str, object]]:
+        try:
+            root = ET.fromstring(payload)
+        except ET.ParseError:
+            return []
+        source = urlparse(url).netloc.lower().removeprefix("www.") or "rss"
+        items: list[dict[str, object]] = []
+        for node in [*root.findall(".//item"), *root.findall(".//{*}entry")]:
+            title = node.findtext("title") or node.findtext("{*}title") or ""
+            description = (
+                node.findtext("description")
+                or node.findtext("summary")
+                or node.findtext("{*}summary")
+                or node.findtext("{*}content")
+                or ""
+            )
+            published = (
+                node.findtext("pubDate")
+                or node.findtext("published")
+                or node.findtext("updated")
+                or node.findtext("{*}published")
+                or node.findtext("{*}updated")
+                or ""
+            )
+            text = clean_message_sample(html_to_visible_text(f"{title}\n{description}"), limit=260)
+            if text:
+                items.append(
+                    {
+                        "text": text,
+                        "created_at": parse_rss_datetime(published),
+                        "source": source,
+                    }
+                )
+        return items
 
 
 @dataclass
@@ -515,13 +724,13 @@ class CachedExchangeItems:
 
 def http_get_json(url: str, headers: dict[str, str] | None = None, timeout: int = 20) -> object:
     request = Request(url, headers=headers or {})
-    with urlopen(request, timeout=timeout) as response:
+    with urlopen(request, timeout=timeout, context=create_default_ssl_context()) as response:
         return json.load(response)
 
 
 def http_get_text(url: str, headers: dict[str, str] | None = None, timeout: int = 20) -> str:
     request = Request(url, headers=headers or {})
-    with urlopen(request, timeout=timeout) as response:
+    with urlopen(request, timeout=timeout, context=create_default_ssl_context()) as response:
         return response.read().decode("utf-8", errors="replace")
 
 
@@ -835,6 +1044,8 @@ class XCommunityScoreProvider(CommunityScoreProvider):
                 continue
             positive = sum(1 for token in tokens if token in POSITIVE_TERMS)
             negative = sum(1 for token in tokens if token in NEGATIVE_TERMS)
+            positive += sum(1 for phrase in POSITIVE_PHRASES if phrase in text)
+            negative += sum(1 for phrase in NEGATIVE_PHRASES if phrase in text)
             if positive == 0 and negative == 0:
                 continue
             total += (positive - negative) / max(positive + negative, 1)
@@ -1099,33 +1310,65 @@ class SessionScrapeCommunityScoreProvider(CommunityScoreProvider):
 @dataclass
 class CompositeCommunityScoreProvider(CommunityScoreProvider):
     providers: list[CommunityScoreProvider]
+    _lock: RLock = field(default_factory=RLock)
 
     def prepare(self, symbols: list[str]) -> None:
-        for provider in self.providers:
-            provider.prepare(symbols)
+        with self._lock:
+            for provider in self.providers:
+                provider.prepare(symbols)
 
     def get(self, symbol: str) -> CommunitySignal | None:
-        signals = [signal for signal in (provider.get(symbol) for provider in self.providers) if signal is not None]
+        with self._lock:
+            signals = [signal for signal in (provider.get(symbol) for provider in self.providers) if signal is not None]
         if not signals:
             return None
         if len(signals) == 1:
             return signals[0]
 
-        score = sum(signal.score for signal in signals) / len(signals)
+        weights = [signal.confidence if signal.confidence is not None else 0.65 for signal in signals]
+        weight_total = sum(weights) or 1.0
+        score = sum(signal.score * weight for signal, weight in zip(signals, weights)) / weight_total
         mention_values = [signal.mentions for signal in signals if signal.mentions is not None]
-        sentiment_values = [signal.sentiment for signal in signals if signal.sentiment is not None]
+        sentiment_pairs = [
+            (signal.sentiment, weight)
+            for signal, weight in zip(signals, weights)
+            if signal.sentiment is not None
+        ]
         sample_values = [signal.sample_size for signal in signals if signal.sample_size is not None]
         merged_samples: list[str] = []
         for signal in signals:
             merged_samples.extend(signal.samples)
+        merged_samples = [str(item["text"]) for item in dedupe_social_items([{"text": text} for text in merged_samples])]
+        confidence = min(0.98, (sum(weights) / len(weights)) + (0.05 * (len(signals) - 1)))
+        risk_pairs = [
+            (signal.risk_score, weight)
+            for signal, weight in zip(signals, weights)
+            if signal.risk_score is not None
+        ]
+        freshness_values = [signal.freshness_minutes for signal in signals if signal.freshness_minutes is not None]
+        source_count = sum(signal.source_count or 1 for signal in signals)
         return signal_with_insight(
             symbol=symbol,
             score=score,
             source="+".join(signal.source for signal in signals),
             mentions=sum(mention_values) if mention_values else None,
-            sentiment=(sum(sentiment_values) / len(sentiment_values)) if sentiment_values else None,
+            sentiment=(
+                sum(value * weight for value, weight in sentiment_pairs)
+                / (sum(weight for _, weight in sentiment_pairs) or 1.0)
+            )
+            if sentiment_pairs
+            else None,
             sample_size=sum(sample_values) if sample_values else None,
             texts=merged_samples,
+            confidence=confidence,
+            risk_score=(
+                sum(value * weight for value, weight in risk_pairs)
+                / (sum(weight for _, weight in risk_pairs) or 1.0)
+            )
+            if risk_pairs
+            else None,
+            freshness_minutes=min(freshness_values) if freshness_values else None,
+            source_count=source_count,
         )
 
 
@@ -1318,6 +1561,23 @@ def dedupe_exchange_items(items: list[dict[str, object]]) -> list[dict[str, obje
     return result
 
 
+def dedupe_social_items(items: list[dict[str, object]]) -> list[dict[str, object]]:
+    result: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for item in sorted(
+        items,
+        key=lambda row: row.get("created_at") or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    ):
+        text = clean_message_sample(str(item.get("text") or ""), limit=260)
+        key = re.sub(r"\W+", "", text).lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append({**item, "text": text})
+    return result
+
+
 def exchange_item_matches_symbol(symbol: str, text: str) -> bool:
     symbol = symbol.upper()
     base_asset = derive_base_asset(symbol)
@@ -1336,6 +1596,21 @@ def exchange_item_matches_symbol(symbol: str, text: str) -> bool:
         if re.search(rf"(?<![A-Z0-9]){re.escape(term)}(?![A-Z0-9])", text, re.IGNORECASE):
             return True
     return False
+
+
+def social_item_matches_symbol(symbol: str, text: str) -> bool:
+    symbol = symbol.upper()
+    base_asset = derive_base_asset(symbol)
+    if base_asset in DEFAULT_X_NAME_MAP:
+        return exchange_item_matches_symbol(symbol, text)
+    upper_text = text.upper()
+    if symbol in re.sub(r"[^A-Z0-9]", "", upper_text):
+        return True
+    if f"${base_asset}" in upper_text or f"#{base_asset}" in upper_text:
+        return True
+    if len(base_asset) <= 2:
+        return False
+    return bool(re.search(rf"(?<![A-Z0-9]){re.escape(base_asset)}(?![A-Z0-9])", text))
 
 
 def exchange_announcement_sentiment(texts: list[str]) -> float:
@@ -1397,7 +1672,7 @@ def derive_base_asset(symbol: str) -> str:
 def parse_provider_mode(value: str) -> list[str]:
     normalized = (value or "auto").strip().lower()
     if normalized == "auto":
-        return ["exchange", "x", "csv", "news"]
+        return ["agent_reach", "exchange", "x", "csv", "news"]
     return [item.strip().lower() for item in normalized.split(",") if item.strip()]
 
 
@@ -1426,10 +1701,28 @@ def build_community_provider(
     x_account_mode: str = "off",
     x_account_weight_pct: float = 35.0,
     exchange_community_urls: list[str] | None = None,
+    agent_reach_enabled: bool = True,
+    agent_reach_rss_urls: list[str] | None = None,
+    agent_reach_recent_window_hours: int = 12,
+    agent_reach_max_results: int = 30,
+    agent_reach_min_mentions: int = 3,
+    agent_reach_min_confidence: float = 0.55,
 ) -> CommunityScoreProvider:
     providers: list[CommunityScoreProvider] = []
     requested = parse_provider_mode(provider_mode)
     x_provider = (x_provider or "official_api").strip().lower()
+
+    if "agent_reach" in requested and agent_reach_enabled and agent_reach_rss_urls:
+        providers.append(
+            AgentReachRSSCommunityScoreProvider(
+                urls=agent_reach_rss_urls,
+                ttl_seconds=community_ttl_seconds,
+                recent_window_hours=agent_reach_recent_window_hours,
+                max_results=agent_reach_max_results,
+                min_mentions=agent_reach_min_mentions,
+                min_confidence=agent_reach_min_confidence,
+            )
+        )
 
     if "exchange" in requested and exchange_community_urls:
         providers.append(

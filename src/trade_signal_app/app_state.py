@@ -115,6 +115,12 @@ class AppState:
             x_tracked_accounts=config.x_tracked_accounts,
             x_account_mode=config.x_account_mode,
             x_account_weight_pct=config.x_account_weight_pct,
+            agent_reach_enabled=config.intelligence_defaults.agent_reach_enabled,
+            agent_reach_rss_urls=config.intelligence_defaults.agent_reach_rss_urls,
+            agent_reach_recent_window_hours=config.intelligence_defaults.community_recent_window_hours,
+            agent_reach_max_results=config.intelligence_defaults.community_max_results,
+            agent_reach_min_mentions=config.intelligence_defaults.community_min_mentions,
+            agent_reach_min_confidence=config.intelligence_defaults.community_min_confidence,
         )
         return SignalScanner(
             gateway=gateway,

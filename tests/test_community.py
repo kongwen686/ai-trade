@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from trade_signal_app.community import (
+    AgentReachRSSCommunityScoreProvider,
     AliasRegistry,
     CompositeCommunityScoreProvider,
     CommunitySignal,
@@ -27,6 +28,63 @@ from trade_signal_app.community import (
 
 
 class CommunityTests(unittest.TestCase):
+    def test_agent_reach_rss_scores_fresh_deduplicated_sentiment(self) -> None:
+        feeds = {
+            "https://source-a.example/rss": """
+                <rss><channel>
+                  <item><title>BTC bullish breakout and strong adoption</title></item>
+                  <item><title>BTC bullish breakout and strong adoption</title></item>
+                  <item><title>Bitcoin accumulation supports rally momentum</title></item>
+                </channel></rss>
+            """,
+            "https://source-b.example/rss": """
+                <rss><channel>
+                  <item><title>BTC rebound with institutional buy momentum</title></item>
+                </channel></rss>
+            """,
+        }
+        provider = AgentReachRSSCommunityScoreProvider(
+            urls=list(feeds),
+            ttl_seconds=60,
+            recent_window_hours=12,
+            max_results=20,
+            fetcher=lambda url, _headers, _timeout: feeds[url],
+        )
+
+        provider.prepare(["BTCUSDT"])
+        signal = provider.get("BTCUSDT")
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal.mentions, 3)
+        self.assertEqual(signal.source_count, 2)
+        self.assertGreaterEqual(signal.confidence or 0.0, 0.9)
+        self.assertGreater(signal.sentiment or 0.0, 0.0)
+        self.assertGreater(signal.score, 65)
+
+    def test_agent_reach_rss_exposes_bearish_crash_risk(self) -> None:
+        payload = """
+            <rss><channel>
+              <item><title>BTC crash liquidation panic dump</title></item>
+              <item><title>Bitcoin bearish breakdown sparks fear</title></item>
+              <item><title>BTC sell pressure and liquidation risk</title></item>
+            </channel></rss>
+        """
+        provider = AgentReachRSSCommunityScoreProvider(
+            urls=["https://risk.example/rss"],
+            ttl_seconds=60,
+            recent_window_hours=12,
+            max_results=20,
+            fetcher=lambda _url, _headers, _timeout: payload,
+        )
+
+        signal = provider.get("BTCUSDT")
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertLess(signal.sentiment or 0.0, 0.0)
+        self.assertGreaterEqual(signal.risk_score or 0.0, 70)
+
     def test_derive_base_asset(self) -> None:
         self.assertEqual(derive_base_asset("BTCUSDT"), "BTC")
         self.assertEqual(derive_base_asset("ETHBTC"), "ETH")

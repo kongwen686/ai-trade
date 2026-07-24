@@ -42,6 +42,12 @@ DEFAULT_X_TRACKED_ACCOUNTS = (
     "APompliano",
 )
 
+DEFAULT_AGENT_REACH_RSS_URLS = (
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "https://cointelegraph.com/rss",
+    "https://decrypt.co/feed",
+)
+
 
 def parse_env_list(value: str) -> list[str]:
     return [item.strip() for item in value.replace(",", "\n").splitlines() if item.strip()]
@@ -85,6 +91,12 @@ class AppSettings:
     community_telegram_csv: Path = BASE_DIR / os.getenv("COMMUNITY_TELEGRAM_CSV", "data/telegram_sentiment.csv")
     community_aliases_csv: Path = BASE_DIR / os.getenv("COMMUNITY_ALIASES_CSV", "data/social_aliases.csv")
     community_ttl_seconds: int = int(os.getenv("COMMUNITY_TTL_SECONDS", "900"))
+    agent_reach_executable: str = os.getenv("AGENT_REACH_EXECUTABLE", "")
+    agent_reach_rss_urls: list[str] = field(
+        default_factory=lambda: parse_env_list(
+            os.getenv("AGENT_REACH_RSS_URLS", "\n".join(DEFAULT_AGENT_REACH_RSS_URLS))
+        )
+    )
     exchange_community_urls: list[str] = field(
         default_factory=lambda: parse_env_list(
             os.getenv(
