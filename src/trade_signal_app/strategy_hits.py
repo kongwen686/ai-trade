@@ -3,13 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from .entry_filters import (
-    anti_chase_reason_from_config,
-    buy_pressure_entry_reason_from_config,
-    structure_entry_reason_from_config,
-    volume_entry_reason_from_config,
-)
-from .volatility import volatility_entry_reason
+from .strategy import entry_rule_config_from_runtime, evaluate_long_entry
 
 
 @dataclass(frozen=True)
@@ -62,21 +56,6 @@ def _signal_reasons(signal: object) -> list[str]:
     return [str(reason) for reason in raw if str(reason).strip()]
 
 
-def _community_score(signal: object) -> float | None:
-    direct = _signal_value(signal, "community_score", None)
-    if direct is not None:
-        try:
-            return float(direct)
-        except (TypeError, ValueError):
-            return None
-    community = _signal_value(signal, "community_signal", None)
-    raw = _read(community, "score", None)
-    try:
-        return None if raw is None else float(raw)
-    except (TypeError, ValueError):
-        return None
-
-
 def _funding_reason(funding: object | None) -> str:
     if funding is None:
         return "资金费率未接入，按现货量价降级观察"
@@ -99,9 +78,7 @@ def score_strategy_hits(
     volume_ratio = _signal_float(signal, "volume_ratio", 1.0)
     buy_pressure = _signal_float(signal, "buy_pressure_ratio", 0.5)
     rsi = _signal_float(signal, "rsi_14", 50.0)
-    ema_spread = _signal_float(signal, "ema_spread_pct")
     price_vs_ema20 = _signal_float(signal, "price_vs_ema20_pct")
-    recent_change = _signal_float(signal, "recent_change_pct")
     funding_rate = _float(funding, "funding_rate") if funding is not None else 0.0
 
     context_reasons: list[str] = []
@@ -111,37 +88,13 @@ def score_strategy_hits(
         context_reasons.append(f"现货/合约价差 {_float(spread, 'spread_bps'):+.2f}bps")
     base_reasons = [*_signal_reasons(signal)[:3], *context_reasons]
 
-    anti_chase = anti_chase_reason_from_config(
-        rsi=rsi,
-        price_vs_ema20_pct=price_vs_ema20,
-        recent_change_pct=recent_change,
-        config=config,
+    entry_decision = evaluate_long_entry(
+        symbol=str(_signal_value(signal, "symbol", "") or ""),
+        score=base_score,
+        indicators=_signal_value(signal, "indicators", signal),
+        current_price=_signal_float(signal, "last_price"),
+        config=entry_rule_config_from_runtime(config),
     )
-    volatility_issue = volatility_entry_reason(
-        regime=str(_signal_value(signal, "volatility_regime", "normal") or "normal"),
-        percentile=_signal_float(signal, "volatility_percentile", 50.0),
-        ratio=_signal_float(signal, "volatility_ratio", 1.0),
-        atr_pct=_signal_float(signal, "atr_pct"),
-        enabled=bool(getattr(config, "volatility_filter_enabled", True)),
-        block_extreme=bool(getattr(config, "block_extreme_volatility", True)),
-        max_percentile=float(getattr(config, "max_entry_volatility_percentile", 92.0)),
-        max_ratio=float(getattr(config, "max_entry_volatility_ratio", 2.0)),
-    )
-    structure_issue = structure_entry_reason_from_config(
-        close_price=_signal_float(signal, "close_price", _signal_float(signal, "last_price")),
-        support_level=_signal_float(signal, "support_level"),
-        resistance_level=_signal_float(signal, "resistance_level"),
-        support_distance_pct=_signal_float(signal, "support_distance_pct"),
-        resistance_distance_pct=_signal_float(signal, "resistance_distance_pct"),
-        support_strength=_signal_float(signal, "support_strength"),
-        risk_reward_ratio=_signal_float(signal, "structure_risk_reward"),
-        volume_ratio=volume_ratio,
-        buy_pressure_ratio=buy_pressure,
-        community_score=_community_score(signal),
-        config=config,
-    )
-    volume_issue = volume_entry_reason_from_config(volume_ratio=volume_ratio, config=config)
-    buy_pressure_issue = buy_pressure_entry_reason_from_config(buy_pressure_ratio=buy_pressure, config=config)
 
     hits: list[StrategyHitScore] = []
 
@@ -158,23 +111,20 @@ def score_strategy_hits(
 
     threshold = float(getattr(config, "score_threshold", 75.0))
     if base_score >= threshold:
-        issue = volume_issue or buy_pressure_issue or volatility_issue or anti_chase or structure_issue
         action = (
-            "wait_volume"
-            if volume_issue
-            else "wait_buy_pressure"
-            if buy_pressure_issue
-            else "wait_volatility"
-            if volatility_issue
-            else "wait_pullback"
-            if anti_chase
-            else "wait_support"
-            if structure_issue
-            else "candidate_buy"
-            if bool(getattr(config, "enabled", False))
+            "candidate_buy"
+            if entry_decision.allowed and bool(getattr(config, "enabled", False))
             else "watch"
+            if entry_decision.allowed
+            else entry_decision.status or "wait_momentum"
         )
-        add("auto_score_breakout", base_score, action, [issue, *base_reasons] if issue else base_reasons or ["综合评分达到自动交易阈值"])
+        entry_reasons = entry_decision.reasons[-3:]
+        add(
+            "auto_score_breakout",
+            base_score,
+            action,
+            [*entry_reasons, *base_reasons] or ["综合评分达到自动交易阈值"],
+        )
     elif base_score >= 60 or abs(change_24h) >= 1.5:
         add(
             "market_momentum_watch",

@@ -142,6 +142,16 @@ class ScanDefaults:
     bnb_min_trade_count: int = SCAN_LIQUIDITY_RECOMMENDED_PROFILE["bnb_min_trade_count"]
     top30_min_quote_volume: float = SCAN_LIQUIDITY_RECOMMENDED_PROFILE["top30_min_quote_volume"]
     top30_min_trade_count: int = SCAN_LIQUIDITY_RECOMMENDED_PROFILE["top30_min_trade_count"]
+    dynamic_activity_enabled: bool = True
+    activity_discovery_pool: int = 80
+    activity_baseline_hours: int = 48
+    activity_surge_ratio: float = 1.6
+    activity_trade_surge_ratio: float = 1.25
+    activity_contraction_ratio: float = 0.65
+    activity_trade_contraction_ratio: float = 0.75
+    activity_min_consecutive_windows: int = 2
+    activity_liquidity_floor_ratio: float = 0.2
+    activity_normalized_threshold_ratio: float = 0.5
 
 
 SCAN_TIER_THRESHOLD_FIELDS = (
@@ -157,6 +167,19 @@ SCAN_TIER_THRESHOLD_FIELDS = (
     "bnb_min_trade_count",
     "top30_min_quote_volume",
     "top30_min_trade_count",
+)
+
+SCAN_DYNAMIC_ACTIVITY_FIELDS = (
+    "dynamic_activity_enabled",
+    "activity_discovery_pool",
+    "activity_baseline_hours",
+    "activity_surge_ratio",
+    "activity_trade_surge_ratio",
+    "activity_contraction_ratio",
+    "activity_trade_contraction_ratio",
+    "activity_min_consecutive_windows",
+    "activity_liquidity_floor_ratio",
+    "activity_normalized_threshold_ratio",
 )
 
 
@@ -242,6 +265,17 @@ class AutoTradeDefaults:
     block_extreme_volatility: bool = True
     max_entry_volatility_percentile: float = 92.0
     max_entry_volatility_ratio: float = 2.0
+    indicator_confluence_enabled: bool = True
+    major_trend_breakout_enabled: bool = True
+    major_trend_breakout_min_score: float = 85.0
+    major_trend_breakout_min_volume_ratio: float = 1.25
+    major_trend_breakout_min_buy_pressure: float = 0.55
+    major_trend_breakout_max_rsi: float = 70.0
+    major_trend_breakout_max_boll_position: float = 1.05
+    eth_trend_pullback_enabled: bool = True
+    eth_trend_pullback_min_score: float = 90.0
+    eth_trend_pullback_max_boll_position: float = 0.80
+    eth_trend_pullback_max_atr_pct: float = 2.0
     support_stop_buffer_pct: float = STRUCTURE_DEFAULT_SUPPORT_STOP_BUFFER_PCT
     resistance_take_profit_buffer_pct: float = STRUCTURE_DEFAULT_RESISTANCE_TAKE_PROFIT_BUFFER_PCT
     stop_loss_pct: float = 4.0
@@ -437,6 +471,16 @@ class RuntimeConfig:
                 bnb_min_trade_count=settings.bnb_min_trade_count,
                 top30_min_quote_volume=settings.top30_min_quote_volume,
                 top30_min_trade_count=settings.top30_min_trade_count,
+                dynamic_activity_enabled=settings.dynamic_activity_enabled,
+                activity_discovery_pool=settings.activity_discovery_pool,
+                activity_baseline_hours=settings.activity_baseline_hours,
+                activity_surge_ratio=settings.activity_surge_ratio,
+                activity_trade_surge_ratio=settings.activity_trade_surge_ratio,
+                activity_contraction_ratio=settings.activity_contraction_ratio,
+                activity_trade_contraction_ratio=settings.activity_trade_contraction_ratio,
+                activity_min_consecutive_windows=settings.activity_min_consecutive_windows,
+                activity_liquidity_floor_ratio=settings.activity_liquidity_floor_ratio,
+                activity_normalized_threshold_ratio=settings.activity_normalized_threshold_ratio,
             ),
         )
 

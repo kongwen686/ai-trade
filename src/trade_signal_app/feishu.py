@@ -23,9 +23,12 @@ STATUS_LABELS = {
     "risk_blocked": "风控阻断",
     "rejected": "已拒绝",
     "auth_failed": "授权失败",
+    "wait_score": "等待评分达标",
     "wait_pullback": "等待回调",
     "wait_support": "等待支撑确认",
     "wait_volatility": "等待波动回落",
+    "wait_trend": "等待趋势共振",
+    "wait_momentum": "等待动量共振",
     "trend_hold": "趋势持有",
     "no_signal": "暂无信号",
 }

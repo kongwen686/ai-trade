@@ -9,15 +9,14 @@ from pathlib import Path
 
 from .entry_filters import (
     anti_chase_reason_from_config,
-    buy_pressure_entry_reason_from_config,
     structure_adjusted_exit_prices,
     structure_entry_reason_from_config,
-    volume_entry_reason_from_config,
 )
 from .feishu import FeishuTradeNotifier
 from .runtime_config import AutoTradeDefaults
 from .service import SignalScanner
 from .storage import LocalDataStore
+from .strategy import entry_rule_config_from_runtime, evaluate_long_entry
 from .time_utils import now_app_time, to_app_time
 from .volatility import volatility_entry_reason
 
@@ -411,6 +410,7 @@ class AutoTrader:
             and event.symbol != "*"
             and event.created_at > cooldown_after
         }
+        entry_config = entry_rule_config_from_runtime(config)
 
         for signal_index, signal in enumerate(signals):
             if len(positions) >= config.max_open_positions:
@@ -444,92 +444,41 @@ class AutoTrader:
             if signal.score < config.score_threshold:
                 filter_counts["score"] += 1
                 continue
-            volume_issue = volume_entry_reason_from_config(
-                volume_ratio=signal.indicators.volume_ratio,
-                config=config,
+            entry_decision = evaluate_long_entry(
+                score=signal.score,
+                indicators=signal.indicators,
+                config=entry_config,
+                symbol=signal.symbol,
+                current_price=signal.ticker.last_price,
             )
-            if volume_issue:
-                filter_counts["volume"] += 1
+            if not entry_decision.allowed:
+                status = entry_decision.status or "wait_momentum"
+                if status == "wait_volume":
+                    filter_counts["volume"] += 1
+                elif status == "wait_buy_pressure":
+                    filter_counts["buy_pressure"] += 1
                 events.append(
                     TradingEvent(
                         action="SKIP",
                         symbol=signal.symbol,
                         mode=config.mode,
-                        status="wait_volume",
-                        message=volume_issue,
+                        status=status,
+                        message=entry_decision.reasons[-1] if entry_decision.reasons else "指标共振尚未满足",
                         score=signal.score,
                         price=signal.ticker.last_price,
-                        exchange=config.execution_exchange.upper(),
-                    )
-                )
-                continue
-            buy_pressure_issue = buy_pressure_entry_reason_from_config(
-                buy_pressure_ratio=signal.indicators.buy_pressure_ratio,
-                config=config,
-            )
-            if buy_pressure_issue:
-                filter_counts["buy_pressure"] += 1
-                events.append(
-                    TradingEvent(
-                        action="SKIP",
-                        symbol=signal.symbol,
-                        mode=config.mode,
-                        status="wait_buy_pressure",
-                        message=buy_pressure_issue,
-                        score=signal.score,
-                        price=signal.ticker.last_price,
-                        exchange=config.execution_exchange.upper(),
-                    )
-                )
-                continue
-            volatility_issue = self._volatility_entry_reason(signal, config)
-            if volatility_issue:
-                events.append(
-                    TradingEvent(
-                        action="SKIP",
-                        symbol=signal.symbol,
-                        mode=config.mode,
-                        status="wait_volatility",
-                        message=volatility_issue,
-                        score=signal.score,
-                        price=signal.ticker.last_price,
-                        exchange=config.execution_exchange.upper(),
-                    )
-                )
-                continue
-            anti_chase = self._anti_chase_reason(signal, config)
-            if anti_chase:
-                events.append(
-                    TradingEvent(
-                        action="SKIP",
-                        symbol=signal.symbol,
-                        mode=config.mode,
-                        status="wait_pullback",
-                        message=anti_chase,
-                        score=signal.score,
-                        price=signal.ticker.last_price,
+                        response={"entry_setup": entry_decision.setup, "confirmations": entry_decision.reasons[-5:]},
                         exchange=config.execution_exchange.upper(),
                     )
                 )
                 continue
             entry_price = self._latest_price_for_symbol(signal.symbol, fallback=self._signal_price(signal))
-            structure_issue = self._structure_entry_reason(signal, config, current_price=entry_price)
-            if structure_issue:
-                events.append(
-                    TradingEvent(
-                        action="SKIP",
-                        symbol=signal.symbol,
-                        mode=config.mode,
-                        status="wait_support",
-                        message=structure_issue,
-                        score=signal.score,
-                        price=entry_price,
-                        exchange=config.execution_exchange.upper(),
-                    )
-                )
-                continue
 
             position, event = self._open_position(signal, config, entry_price=entry_price)
+            event.response = {
+                **(event.response or {}),
+                "entry_setup": entry_decision.setup,
+                "confirmations": entry_decision.reasons[-5:],
+            }
             events.append(event)
             if event.status in {"filled", "paper_filled"}:
                 positions.append(position)

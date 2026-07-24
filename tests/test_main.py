@@ -62,7 +62,7 @@ from trade_signal_app.views import (
     render_terminal_page,
     render_trading_page,
 )
-from trade_signal_app.views_backtest import BACKTEST_ADVANCED_HELP
+from trade_signal_app.views_backtest import BACKTEST_ADVANCED_HELP, _backtest_visual_analysis
 
 
 def _build_archive(path: Path, *, start: datetime | None = None, bars: int = 180) -> None:
@@ -809,6 +809,12 @@ class MainTests(unittest.TestCase):
         self.assertIn('data-live-symbol="BTCUSDT"', html)
         self.assertIn("data-live-price", html)
         self.assertIn("data-live-change", html)
+        self.assertIn('class="indicator-cell"', html)
+        self.assertIn('class="indicator-label">EMA', html)
+        self.assertIn('class="indicator-label">BOLL', html)
+        self.assertIn('class="indicator-label">KDJ', html)
+        self.assertIn('class="indicator-label">MACD', html)
+        self.assertIn("+0.0234", html)
         self.assertIn('/static/scan_live.js', html)
         self.assertIn("评分、支撑阻力和波动状态来自最近一次完整扫描", html)
 
@@ -866,6 +872,12 @@ class MainTests(unittest.TestCase):
         self.assertIn("@miniTicker", script)
         self.assertIn("/api/market/realtime", script)
         self.assertIn("scheduleReconnect", script)
+        self.assertIn("pollFullScan", script)
+        self.assertIn('new URL("/api/scan"', script)
+        self.assertIn("restoreScrollPosition", script)
+        self.assertIn("scan-scroll-position", script)
+        self.assertIn("replaceWhenIdle", script)
+        self.assertNotIn("attempts < 12", script)
         self.assertNotIn("order_market_buy", script)
 
     def test_render_index_page_orders_cards_and_table_by_score(self) -> None:
@@ -1219,7 +1231,7 @@ class MainTests(unittest.TestCase):
 
     def test_backtest_payload_runs_with_web_only_parameters(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            archive = Path(temp_dir) / "BTCUSDT-4h-2025-01.zip"
+            archive = Path(temp_dir) / "SOLUSDT-4h-2025-01.zip"
             _build_archive(archive)
             payload, params, error = _backtest_payload(
                 {
@@ -1511,7 +1523,9 @@ class MainTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("Lookback Bars", html)
+        self.assertIn("Indicator Lookback Bars", html)
+        self.assertIn("不是加载 K 线数或交易样本数", html)
+        self.assertIn("4H 设置 12 表示最多持有 48 小时", html)
         self.assertIn("Cooldown Bars", html)
         self.assertIn("Min Slippage", html)
         self.assertIn("Max Slippage", html)
@@ -1550,6 +1564,38 @@ class MainTests(unittest.TestCase):
         self.assertIn('max="100000" step="100" name="tradingview_bars" value="10000"', html)
         for description in BACKTEST_ADVANCED_HELP.values():
             self.assertIn(description, html)
+
+    def test_backtest_analysis_does_not_double_count_portfolio_batches_as_trades(self) -> None:
+        html = _backtest_visual_analysis(
+            series_reports=[
+                {
+                    "symbol": "BTCUSDT",
+                    "interval": "4h",
+                    "final_equity": 1.08,
+                    "buy_hold_final_equity": 1.05,
+                    "max_drawdown_pct": -4.0,
+                    "signal_count": 12,
+                    "trade_stat": {"trade_count": 12, "win_rate_pct": 58.3, "profit_factor": 1.4},
+                }
+            ],
+            portfolio_reports=[
+                {
+                    "top_n": 1,
+                    "interval": "4h",
+                    "final_equity": 1.08,
+                    "max_drawdown_pct": -4.0,
+                    "batch_count": 12,
+                    "trade_stat": {"trade_count": 12, "win_rate_pct": 58.3, "profit_factor": 1.4},
+                }
+            ],
+            rebalance_reports=[],
+        )
+
+        self.assertRegex(
+            html,
+            r'(?s)data-testid="backtest-trade-samples".*?<strong>12</strong>',
+        )
+        self.assertIn("单币种成交 12 笔；组合 12 批次另计", html)
 
     def test_backtest_empty_portfolio_and_rebalance_cards_explain_next_steps(self) -> None:
         portfolio_html = _portfolio_card(
@@ -3094,7 +3140,7 @@ class MainTests(unittest.TestCase):
 
     def test_live_insufficient_balance_does_not_block_paper_fill(self) -> None:
         signal = SimpleNamespace(
-            symbol="BTCUSDT",
+            symbol="SOLUSDT",
             score=84.0,
             grade="A",
             ticker=SimpleNamespace(last_price=100.0, quote_volume=20_000_000.0),
@@ -3155,14 +3201,14 @@ class MainTests(unittest.TestCase):
         self.assertIn("blocked", statuses)
         self.assertIn("paper_filled", statuses)
         self.assertIn("USDT 可用余额不足", " ".join(str(event["message"]) for event in payload["events"]))
-        self.assertEqual([(position.symbol, position.mode) for position in stored_positions], [("BTCUSDT", "paper")])
+        self.assertEqual([(position.symbol, position.mode) for position in stored_positions], [("SOLUSDT", "paper")])
         self.assertGreaterEqual(gateway.ticker_price.call_count, 1)
         notified_event = notifier.notify_trade.call_args.kwargs["event"]
         self.assertEqual((notified_event.action, notified_event.mode, notified_event.status), ("BUY", "paper", "paper_filled"))
 
     def test_live_order_insufficient_balance_does_not_rollback_paper_fill_or_notification(self) -> None:
         signal = SimpleNamespace(
-            symbol="BTCUSDT",
+            symbol="SOLUSDT",
             score=84.0,
             grade="A",
             ticker=SimpleNamespace(last_price=100.0, quote_volume=20_000_000.0),
@@ -3223,7 +3269,7 @@ class MainTests(unittest.TestCase):
 
         statuses = {event["status"] for event in payload["events"]}
         self.assertEqual(statuses, {"paper_filled", "rejected"})
-        self.assertEqual([(position.symbol, position.mode) for position in stored_positions], [("BTCUSDT", "paper")])
+        self.assertEqual([(position.symbol, position.mode) for position in stored_positions], [("SOLUSDT", "paper")])
         self.assertEqual(notifier.notify_trade.call_count, 1)
         gateway.order_market_buy.assert_called_once()
         self.assertIn("insufficient balance", " ".join(str(event["message"]) for event in payload["events"]))
@@ -3520,6 +3566,16 @@ class MainTests(unittest.TestCase):
                     "scan_bnb_min_trade_count": ["16000"],
                     "scan_top30_min_quote_volume": ["16000000"],
                     "scan_top30_min_trade_count": ["6000"],
+                    "scan_dynamic_activity_enabled": ["on"],
+                    "scan_activity_discovery_pool": ["96"],
+                    "scan_activity_baseline_hours": ["72"],
+                    "scan_activity_surge_ratio": ["1.7"],
+                    "scan_activity_trade_surge_ratio": ["1.3"],
+                    "scan_activity_contraction_ratio": ["0.6"],
+                    "scan_activity_trade_contraction_ratio": ["0.7"],
+                    "scan_activity_min_consecutive_windows": ["3"],
+                    "scan_activity_liquidity_floor_ratio": ["0.25"],
+                    "scan_activity_normalized_threshold_ratio": ["0.55"],
                     "autotrade_enabled": ["on"],
                     "autotrade_mode": ["paper"],
                     "autotrade_paper_enabled": ["on"],
@@ -3543,6 +3599,17 @@ class MainTests(unittest.TestCase):
                     "autotrade_min_entry_support_strength": ["2.5"],
                     "autotrade_min_entry_risk_reward_ratio": ["1.8"],
                     "autotrade_min_entry_resistance_distance_pct": ["2.8"],
+                    "autotrade_indicator_confluence_enabled": ["on"],
+                    "autotrade_major_trend_breakout_enabled": ["on"],
+                    "autotrade_major_trend_breakout_min_score": ["86"],
+                    "autotrade_major_trend_breakout_min_volume_ratio": ["1.3"],
+                    "autotrade_major_trend_breakout_min_buy_pressure": ["0.56"],
+                    "autotrade_major_trend_breakout_max_rsi": ["69"],
+                    "autotrade_major_trend_breakout_max_boll_position": ["1.04"],
+                    "autotrade_eth_trend_pullback_enabled": ["on"],
+                    "autotrade_eth_trend_pullback_min_score": ["91"],
+                    "autotrade_eth_trend_pullback_max_boll_position": ["0.78"],
+                    "autotrade_eth_trend_pullback_max_atr_pct": ["1.9"],
                     "autotrade_support_stop_buffer_pct": ["0.7"],
                     "autotrade_resistance_take_profit_buffer_pct": ["0.5"],
                     "autotrade_stop_loss_pct": ["3"],
@@ -3636,6 +3703,16 @@ class MainTests(unittest.TestCase):
         self.assertEqual(config.feishu_webhook_url, "https://open.feishu.cn/webhook/new")
         self.assertEqual(config.backtest_defaults.preset, "portfolio_rotation")
         self.assertEqual(config.scan_defaults.quote_asset, "FDUSD")
+        self.assertTrue(config.scan_defaults.dynamic_activity_enabled)
+        self.assertEqual(config.scan_defaults.activity_discovery_pool, 96)
+        self.assertEqual(config.scan_defaults.activity_baseline_hours, 72)
+        self.assertEqual(config.scan_defaults.activity_surge_ratio, 1.7)
+        self.assertEqual(config.scan_defaults.activity_trade_surge_ratio, 1.3)
+        self.assertEqual(config.scan_defaults.activity_contraction_ratio, 0.6)
+        self.assertEqual(config.scan_defaults.activity_trade_contraction_ratio, 0.7)
+        self.assertEqual(config.scan_defaults.activity_min_consecutive_windows, 3)
+        self.assertEqual(config.scan_defaults.activity_liquidity_floor_ratio, 0.25)
+        self.assertEqual(config.scan_defaults.activity_normalized_threshold_ratio, 0.55)
         self.assertTrue(config.autotrade_defaults.enabled)
         self.assertTrue(config.autotrade_defaults.paper_enabled)
         self.assertTrue(config.autotrade_defaults.live_enabled)
@@ -3655,6 +3732,17 @@ class MainTests(unittest.TestCase):
         self.assertEqual(config.autotrade_defaults.min_entry_support_strength, 2.5)
         self.assertEqual(config.autotrade_defaults.min_entry_risk_reward_ratio, 1.8)
         self.assertEqual(config.autotrade_defaults.min_entry_resistance_distance_pct, 2.8)
+        self.assertTrue(config.autotrade_defaults.indicator_confluence_enabled)
+        self.assertTrue(config.autotrade_defaults.major_trend_breakout_enabled)
+        self.assertEqual(config.autotrade_defaults.major_trend_breakout_min_score, 86.0)
+        self.assertEqual(config.autotrade_defaults.major_trend_breakout_min_volume_ratio, 1.3)
+        self.assertEqual(config.autotrade_defaults.major_trend_breakout_min_buy_pressure, 0.56)
+        self.assertEqual(config.autotrade_defaults.major_trend_breakout_max_rsi, 69.0)
+        self.assertEqual(config.autotrade_defaults.major_trend_breakout_max_boll_position, 1.04)
+        self.assertTrue(config.autotrade_defaults.eth_trend_pullback_enabled)
+        self.assertEqual(config.autotrade_defaults.eth_trend_pullback_min_score, 91.0)
+        self.assertEqual(config.autotrade_defaults.eth_trend_pullback_max_boll_position, 0.78)
+        self.assertEqual(config.autotrade_defaults.eth_trend_pullback_max_atr_pct, 1.9)
         self.assertEqual(config.autotrade_defaults.support_stop_buffer_pct, 0.7)
         self.assertEqual(config.autotrade_defaults.resistance_take_profit_buffer_pct, 0.5)
         self.assertTrue(config.autotrade_defaults.trend_hold_enabled)

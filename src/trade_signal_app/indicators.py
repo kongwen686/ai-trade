@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 
 from .models import Candlestick, IndicatorSnapshot
 from .volatility import build_volatility_state
@@ -21,6 +22,17 @@ def ema(values: list[float], period: int) -> list[float]:
         current = (value * smoothing) + (current * (1 - smoothing))
         result.append(current)
     return result
+
+
+def bollinger_bands(values: list[float], period: int = 20, deviations: float = 2.0) -> tuple[float, float, float]:
+    if not values:
+        return 0.0, 0.0, 0.0
+    window = values[-max(1, period) :]
+    middle = sum(window) / len(window)
+    variance = sum((value - middle) ** 2 for value in window) / len(window)
+    standard_deviation = math.sqrt(variance)
+    offset = standard_deviation * deviations
+    return middle, middle + offset, middle - offset
 
 
 def rsi(values: list[float], period: int = 14) -> list[float]:
@@ -247,6 +259,8 @@ def build_indicator_snapshot(candles: list[Candlestick], *, as_of: datetime | No
     latest_close = closes[-1]
     latest_ema_20 = ema_20_series[-1]
     latest_ema_50 = ema_50_series[-1]
+    boll_mb, boll_up, boll_dn = bollinger_bands(closes)
+    boll_span = boll_up - boll_dn
     effective_as_of = as_of or datetime.now(timezone.utc)
     volume_ratio = _volume_ratio(candles, volumes, as_of=effective_as_of)
     structure = _nearest_structure_levels(highs=highs, lows=lows, closes=closes)
@@ -271,6 +285,11 @@ def build_indicator_snapshot(candles: list[Candlestick], *, as_of: datetime | No
         volume_ratio=volume_ratio,
         buy_pressure_ratio=taker_buy_ratios[-1],
         recent_change_pct=((latest_close - closes[-7]) / closes[-7]) * 100 if len(closes) > 6 and closes[-7] else 0.0,
+        boll_mb=boll_mb,
+        boll_up=boll_up,
+        boll_dn=boll_dn,
+        boll_bandwidth_pct=(boll_span / boll_mb) * 100 if boll_mb else 0.0,
+        boll_position=(latest_close - boll_dn) / boll_span if boll_span else 0.5,
         support_level=structure["support_level"],
         resistance_level=structure["resistance_level"],
         support_distance_pct=structure["support_distance_pct"],

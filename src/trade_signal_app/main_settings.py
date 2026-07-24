@@ -19,7 +19,7 @@ from .runtime_config import (
 )
 from .tradingview_data import TRADINGVIEW_INTERVALS
 
-SCAN_INTERVALS = {"15m", "1h", "2h", "4h", "1d"}
+SCAN_INTERVALS = {"15m", "1h", "2h", "4h", "8h", "12h", "1d"}
 AUTOTRADE_MODES = {"paper", "live"}
 AUTOTRADE_EXCHANGES = {"binance", "okx"}
 X_ACCOUNT_MODES = {"off", "blend", "only"}
@@ -119,6 +119,15 @@ def _validate_runtime_config(config: RuntimeConfig) -> None:
     _validate_range(scan.candidate_pool, "Candidate Pool", minimum=5, maximum=40)
     _validate_range(scan.min_quote_volume, "Min Quote Volume", minimum=0)
     _validate_range(scan.min_trade_count, "Min Trade Count", minimum=0)
+    _validate_range(scan.activity_discovery_pool, "Activity Discovery Pool", minimum=20, maximum=200)
+    _validate_range(scan.activity_baseline_hours, "Activity Baseline Hours", minimum=24, maximum=168)
+    _validate_range(scan.activity_surge_ratio, "Activity Surge Ratio", minimum=1.05, maximum=10)
+    _validate_range(scan.activity_trade_surge_ratio, "Activity Trade Surge Ratio", minimum=1.0, maximum=10)
+    _validate_range(scan.activity_contraction_ratio, "Activity Contraction Ratio", minimum=0.05, maximum=0.95)
+    _validate_range(scan.activity_trade_contraction_ratio, "Activity Trade Contraction Ratio", minimum=0.05, maximum=0.95)
+    _validate_range(scan.activity_min_consecutive_windows, "Activity Consecutive Windows", minimum=1, maximum=5)
+    _validate_range(scan.activity_liquidity_floor_ratio, "Activity Liquidity Floor Ratio", minimum=0.05, maximum=1)
+    _validate_range(scan.activity_normalized_threshold_ratio, "Activity Normalized Threshold Ratio", minimum=0.1, maximum=1)
     for symbol, min_quote_volume, min_trade_count in (
         ("BTC", scan.btc_min_quote_volume, scan.btc_min_trade_count),
         ("ETH", scan.eth_min_quote_volume, scan.eth_min_trade_count),
@@ -150,6 +159,14 @@ def _validate_runtime_config(config: RuntimeConfig) -> None:
     _validate_range(autotrade.min_entry_resistance_distance_pct, "Auto Trade Min Entry Resistance Distance", minimum=0)
     _validate_range(autotrade.max_entry_volatility_percentile, "Auto Trade Max Volatility Percentile", minimum=50, maximum=100)
     _validate_range(autotrade.max_entry_volatility_ratio, "Auto Trade Max Volatility Ratio", minimum=1, maximum=10)
+    _validate_range(autotrade.major_trend_breakout_min_score, "Major Breakout Min Score", minimum=0, maximum=100)
+    _validate_range(autotrade.major_trend_breakout_min_volume_ratio, "Major Breakout Min Volume", minimum=0)
+    _validate_range(autotrade.major_trend_breakout_min_buy_pressure, "Major Breakout Min Buy Pressure", minimum=0, maximum=1)
+    _validate_range(autotrade.major_trend_breakout_max_rsi, "Major Breakout Max RSI", minimum=0, maximum=100)
+    _validate_range(autotrade.major_trend_breakout_max_boll_position, "Major Breakout Max BOLL Position", minimum=0.5, maximum=2)
+    _validate_range(autotrade.eth_trend_pullback_min_score, "ETH Pullback Min Score", minimum=0, maximum=100)
+    _validate_range(autotrade.eth_trend_pullback_max_boll_position, "ETH Pullback Max BOLL Position", minimum=0, maximum=1.5)
+    _validate_range(autotrade.eth_trend_pullback_max_atr_pct, "ETH Pullback Max ATR", minimum=0.1, maximum=20)
     _validate_range(autotrade.support_stop_buffer_pct, "Auto Trade Support Stop Buffer", minimum=0)
     _validate_range(autotrade.resistance_take_profit_buffer_pct, "Auto Trade Resistance Take Profit Buffer", minimum=0)
     _validate_range(autotrade.stop_loss_pct, "Auto Trade Stop Loss", minimum=0.1)
@@ -224,6 +241,16 @@ def _scan_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "candidate_pool": config.scan_defaults.candidate_pool,
         "min_quote_volume": int(config.scan_defaults.min_quote_volume),
         "min_trade_count": config.scan_defaults.min_trade_count,
+        "dynamic_activity_enabled": config.scan_defaults.dynamic_activity_enabled,
+        "activity_discovery_pool": config.scan_defaults.activity_discovery_pool,
+        "activity_baseline_hours": config.scan_defaults.activity_baseline_hours,
+        "activity_surge_ratio": config.scan_defaults.activity_surge_ratio,
+        "activity_trade_surge_ratio": config.scan_defaults.activity_trade_surge_ratio,
+        "activity_contraction_ratio": config.scan_defaults.activity_contraction_ratio,
+        "activity_trade_contraction_ratio": config.scan_defaults.activity_trade_contraction_ratio,
+        "activity_min_consecutive_windows": config.scan_defaults.activity_min_consecutive_windows,
+        "activity_liquidity_floor_ratio": config.scan_defaults.activity_liquidity_floor_ratio,
+        "activity_normalized_threshold_ratio": config.scan_defaults.activity_normalized_threshold_ratio,
         "liquidity_profiles": {
             symbol: {
                 "min_quote_volume": getattr(config.scan_defaults, f"{symbol.lower()}_min_quote_volume"),
@@ -336,6 +363,16 @@ def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "scan_bnb_min_trade_count": config.scan_defaults.bnb_min_trade_count,
         "scan_top30_min_quote_volume": int(config.scan_defaults.top30_min_quote_volume),
         "scan_top30_min_trade_count": config.scan_defaults.top30_min_trade_count,
+        "scan_dynamic_activity_enabled": config.scan_defaults.dynamic_activity_enabled,
+        "scan_activity_discovery_pool": config.scan_defaults.activity_discovery_pool,
+        "scan_activity_baseline_hours": config.scan_defaults.activity_baseline_hours,
+        "scan_activity_surge_ratio": config.scan_defaults.activity_surge_ratio,
+        "scan_activity_trade_surge_ratio": config.scan_defaults.activity_trade_surge_ratio,
+        "scan_activity_contraction_ratio": config.scan_defaults.activity_contraction_ratio,
+        "scan_activity_trade_contraction_ratio": config.scan_defaults.activity_trade_contraction_ratio,
+        "scan_activity_min_consecutive_windows": config.scan_defaults.activity_min_consecutive_windows,
+        "scan_activity_liquidity_floor_ratio": config.scan_defaults.activity_liquidity_floor_ratio,
+        "scan_activity_normalized_threshold_ratio": config.scan_defaults.activity_normalized_threshold_ratio,
         "autotrade_enabled": autotrade.enabled,
         "autotrade_mode": autotrade.mode,
         "autotrade_paper_enabled": autotrade.paper_enabled,
@@ -363,6 +400,17 @@ def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "autotrade_block_extreme_volatility": autotrade.block_extreme_volatility,
         "autotrade_max_entry_volatility_percentile": autotrade.max_entry_volatility_percentile,
         "autotrade_max_entry_volatility_ratio": autotrade.max_entry_volatility_ratio,
+        "autotrade_indicator_confluence_enabled": autotrade.indicator_confluence_enabled,
+        "autotrade_major_trend_breakout_enabled": autotrade.major_trend_breakout_enabled,
+        "autotrade_major_trend_breakout_min_score": autotrade.major_trend_breakout_min_score,
+        "autotrade_major_trend_breakout_min_volume_ratio": autotrade.major_trend_breakout_min_volume_ratio,
+        "autotrade_major_trend_breakout_min_buy_pressure": autotrade.major_trend_breakout_min_buy_pressure,
+        "autotrade_major_trend_breakout_max_rsi": autotrade.major_trend_breakout_max_rsi,
+        "autotrade_major_trend_breakout_max_boll_position": autotrade.major_trend_breakout_max_boll_position,
+        "autotrade_eth_trend_pullback_enabled": autotrade.eth_trend_pullback_enabled,
+        "autotrade_eth_trend_pullback_min_score": autotrade.eth_trend_pullback_min_score,
+        "autotrade_eth_trend_pullback_max_boll_position": autotrade.eth_trend_pullback_max_boll_position,
+        "autotrade_eth_trend_pullback_max_atr_pct": autotrade.eth_trend_pullback_max_atr_pct,
         "autotrade_support_stop_buffer_pct": autotrade.support_stop_buffer_pct,
         "autotrade_resistance_take_profit_buffer_pct": autotrade.resistance_take_profit_buffer_pct,
         "autotrade_stop_loss_pct": autotrade.stop_loss_pct,
@@ -624,6 +672,47 @@ def _build_runtime_config(form: dict[str, list[str]], *, current_config: Runtime
             bnb_min_trade_count=_parse_int_value(_get_first(form, "scan_bnb_min_trade_count", str(current_config.scan_defaults.bnb_min_trade_count)), "BNB Min Trade Count"),
             top30_min_quote_volume=_parse_float_value(_get_first(form, "scan_top30_min_quote_volume", str(current_config.scan_defaults.top30_min_quote_volume)), "Top 30 Min Quote Volume"),
             top30_min_trade_count=_parse_int_value(_get_first(form, "scan_top30_min_trade_count", str(current_config.scan_defaults.top30_min_trade_count)), "Top 30 Min Trade Count"),
+            dynamic_activity_enabled=_runtime_bool(
+                form,
+                "scan_dynamic_activity_enabled",
+                current_config.scan_defaults.dynamic_activity_enabled,
+            ),
+            activity_discovery_pool=_parse_int_value(
+                _get_first(form, "scan_activity_discovery_pool", str(current_config.scan_defaults.activity_discovery_pool)),
+                "Activity Discovery Pool",
+            ),
+            activity_baseline_hours=_parse_int_value(
+                _get_first(form, "scan_activity_baseline_hours", str(current_config.scan_defaults.activity_baseline_hours)),
+                "Activity Baseline Hours",
+            ),
+            activity_surge_ratio=_parse_float_value(
+                _get_first(form, "scan_activity_surge_ratio", str(current_config.scan_defaults.activity_surge_ratio)),
+                "Activity Surge Ratio",
+            ),
+            activity_trade_surge_ratio=_parse_float_value(
+                _get_first(form, "scan_activity_trade_surge_ratio", str(current_config.scan_defaults.activity_trade_surge_ratio)),
+                "Activity Trade Surge Ratio",
+            ),
+            activity_contraction_ratio=_parse_float_value(
+                _get_first(form, "scan_activity_contraction_ratio", str(current_config.scan_defaults.activity_contraction_ratio)),
+                "Activity Contraction Ratio",
+            ),
+            activity_trade_contraction_ratio=_parse_float_value(
+                _get_first(form, "scan_activity_trade_contraction_ratio", str(current_config.scan_defaults.activity_trade_contraction_ratio)),
+                "Activity Trade Contraction Ratio",
+            ),
+            activity_min_consecutive_windows=_parse_int_value(
+                _get_first(form, "scan_activity_min_consecutive_windows", str(current_config.scan_defaults.activity_min_consecutive_windows)),
+                "Activity Consecutive Windows",
+            ),
+            activity_liquidity_floor_ratio=_parse_float_value(
+                _get_first(form, "scan_activity_liquidity_floor_ratio", str(current_config.scan_defaults.activity_liquidity_floor_ratio)),
+                "Activity Liquidity Floor Ratio",
+            ),
+            activity_normalized_threshold_ratio=_parse_float_value(
+                _get_first(form, "scan_activity_normalized_threshold_ratio", str(current_config.scan_defaults.activity_normalized_threshold_ratio)),
+                "Activity Normalized Threshold Ratio",
+            ),
         ),
         autotrade_defaults=AutoTradeDefaults(
             enabled=autotrade_enabled,
@@ -681,6 +770,77 @@ def _build_runtime_config(form: dict[str, list[str]], *, current_config: Runtime
             max_entry_volatility_ratio=_parse_float_value(
                 _get_first(form, "autotrade_max_entry_volatility_ratio", str(current_config.autotrade_defaults.max_entry_volatility_ratio)),
                 "Auto Trade Max Volatility Ratio",
+            ),
+            indicator_confluence_enabled=_runtime_bool(
+                form,
+                "autotrade_indicator_confluence_enabled",
+                current_config.autotrade_defaults.indicator_confluence_enabled,
+            ),
+            major_trend_breakout_enabled=_runtime_bool(
+                form,
+                "autotrade_major_trend_breakout_enabled",
+                current_config.autotrade_defaults.major_trend_breakout_enabled,
+            ),
+            major_trend_breakout_min_score=_parse_float_value(
+                _get_first(form, "autotrade_major_trend_breakout_min_score", str(current_config.autotrade_defaults.major_trend_breakout_min_score)),
+                "Major Breakout Min Score",
+            ),
+            major_trend_breakout_min_volume_ratio=_parse_float_value(
+                _get_first(
+                    form,
+                    "autotrade_major_trend_breakout_min_volume_ratio",
+                    str(current_config.autotrade_defaults.major_trend_breakout_min_volume_ratio),
+                ),
+                "Major Breakout Min Volume",
+            ),
+            major_trend_breakout_min_buy_pressure=_parse_float_value(
+                _get_first(
+                    form,
+                    "autotrade_major_trend_breakout_min_buy_pressure",
+                    str(current_config.autotrade_defaults.major_trend_breakout_min_buy_pressure),
+                ),
+                "Major Breakout Min Buy Pressure",
+            ),
+            major_trend_breakout_max_rsi=_parse_float_value(
+                _get_first(form, "autotrade_major_trend_breakout_max_rsi", str(current_config.autotrade_defaults.major_trend_breakout_max_rsi)),
+                "Major Breakout Max RSI",
+            ),
+            major_trend_breakout_max_boll_position=_parse_float_value(
+                _get_first(
+                    form,
+                    "autotrade_major_trend_breakout_max_boll_position",
+                    str(current_config.autotrade_defaults.major_trend_breakout_max_boll_position),
+                ),
+                "Major Breakout Max BOLL Position",
+            ),
+            eth_trend_pullback_enabled=_runtime_bool(
+                form,
+                "autotrade_eth_trend_pullback_enabled",
+                current_config.autotrade_defaults.eth_trend_pullback_enabled,
+            ),
+            eth_trend_pullback_min_score=_parse_float_value(
+                _get_first(
+                    form,
+                    "autotrade_eth_trend_pullback_min_score",
+                    str(current_config.autotrade_defaults.eth_trend_pullback_min_score),
+                ),
+                "ETH Pullback Min Score",
+            ),
+            eth_trend_pullback_max_boll_position=_parse_float_value(
+                _get_first(
+                    form,
+                    "autotrade_eth_trend_pullback_max_boll_position",
+                    str(current_config.autotrade_defaults.eth_trend_pullback_max_boll_position),
+                ),
+                "ETH Pullback Max BOLL Position",
+            ),
+            eth_trend_pullback_max_atr_pct=_parse_float_value(
+                _get_first(
+                    form,
+                    "autotrade_eth_trend_pullback_max_atr_pct",
+                    str(current_config.autotrade_defaults.eth_trend_pullback_max_atr_pct),
+                ),
+                "ETH Pullback Max ATR",
             ),
             support_stop_buffer_pct=_parse_float_value(
                 _get_first(form, "autotrade_support_stop_buffer_pct", str(current_config.autotrade_defaults.support_stop_buffer_pct)),

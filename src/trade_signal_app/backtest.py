@@ -240,6 +240,7 @@ def run_backtest_for_series(
             score=score,
             indicators=indicators,
             config=entry_config,
+            symbol=symbol,
         )
         if not decision.allowed:
             continue

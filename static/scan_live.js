@@ -4,17 +4,111 @@
   const root = document.querySelector("[data-live-market]");
   if (!root) return;
 
-  const refreshKey = `scan-full-refresh:${window.location.pathname}:${window.location.search}`;
-  if (root.dataset.scanFallback === "true") {
-    const attempts = Number(window.sessionStorage.getItem(refreshKey) || 0);
-    if (attempts < 12) {
-      window.sessionStorage.setItem(refreshKey, String(attempts + 1));
-      window.setTimeout(() => {
-        const url = new URL(window.location.href);
-        url.searchParams.delete("refresh");
-        window.location.replace(url.toString());
-      }, 1500);
+  const canonicalUrl = new URL(window.location.href);
+  canonicalUrl.searchParams.delete("refresh");
+  const pageStateKey = `${canonicalUrl.pathname}:${canonicalUrl.search}`;
+  const refreshKey = `scan-full-refresh:${pageStateKey}`;
+  const scrollKey = `scan-scroll-position:${pageStateKey}`;
+
+  const restoreScrollPosition = () => {
+    const stored = window.sessionStorage.getItem(scrollKey);
+    if (!stored) return;
+    window.sessionStorage.removeItem(scrollKey);
+    try {
+      const position = JSON.parse(stored);
+      const previousBehavior = document.documentElement.style.scrollBehavior;
+      document.documentElement.style.scrollBehavior = "auto";
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          window.scrollTo(Number(position.x) || 0, Number(position.y) || 0);
+          document.documentElement.style.scrollBehavior = previousBehavior;
+        });
+      });
+    } catch (_error) {
+      // Ignore stale session state and keep the page usable.
     }
+  };
+
+  restoreScrollPosition();
+
+  if (root.dataset.scanFallback === "true") {
+    const scanStatusUrl = new URL("/api/scan", window.location.origin);
+    for (const [key, value] of canonicalUrl.searchParams) scanStatusUrl.searchParams.append(key, value);
+    let fullScanTimer = 0;
+    let fullScanStopped = false;
+    let attempts = Number(window.sessionStorage.getItem(refreshKey) || 0);
+    let lastInteractionAt = Date.now();
+
+    const markInteraction = () => {
+      lastInteractionAt = Date.now();
+    };
+    window.addEventListener("scroll", markInteraction, { passive: true });
+    window.addEventListener("wheel", markInteraction, { passive: true });
+    window.addEventListener("touchmove", markInteraction, { passive: true });
+    window.addEventListener("pointerdown", markInteraction, { passive: true });
+    window.addEventListener("keydown", markInteraction);
+
+    const replaceWhenIdle = () => {
+      if (fullScanStopped) return;
+      const idleFor = Date.now() - lastInteractionAt;
+      if (idleFor < 1200) {
+        fullScanTimer = window.setTimeout(replaceWhenIdle, 1200 - idleFor);
+        return;
+      }
+      window.sessionStorage.setItem(
+        scrollKey,
+        JSON.stringify({ x: window.scrollX, y: window.scrollY }),
+      );
+      window.sessionStorage.removeItem(refreshKey);
+      window.location.replace(canonicalUrl.toString());
+    };
+
+    const scheduleFullScanPoll = (delay = 2500) => {
+      if (fullScanStopped || fullScanTimer) return;
+      fullScanTimer = window.setTimeout(() => {
+        fullScanTimer = 0;
+        void pollFullScan();
+      }, delay);
+    };
+
+    const pollFullScan = async () => {
+      if (fullScanStopped) return;
+      if (document.hidden) {
+        scheduleFullScanPoll();
+        return;
+      }
+      attempts += 1;
+      window.sessionStorage.setItem(refreshKey, String(attempts));
+      try {
+        const response = await fetch(scanStatusUrl, {
+          cache: "no-store",
+          headers: { Accept: "application/json" },
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const payload = await response.json();
+        const summary = payload && typeof payload.summary === "object" ? payload.summary : null;
+        const complete = summary && Array.isArray(payload.signals)
+          && payload.fallback !== true
+          && summary.fallback !== true;
+        if (complete) {
+          replaceWhenIdle();
+          return;
+        }
+      } catch (_error) {
+        // Keep the current fallback results visible while the background scan retries.
+      }
+      if (attempts < 60) {
+        scheduleFullScanPoll();
+      } else {
+        window.sessionStorage.removeItem(refreshKey);
+      }
+    };
+
+    window.addEventListener("pagehide", () => {
+      fullScanStopped = true;
+      if (fullScanTimer) window.clearTimeout(fullScanTimer);
+    });
+    scheduleFullScanPoll(1500);
   } else {
     window.sessionStorage.removeItem(refreshKey);
   }

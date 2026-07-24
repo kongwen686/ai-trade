@@ -30,6 +30,21 @@ class MarketTicker:
 
 
 @dataclass(frozen=True)
+class MarketActivityProfile:
+    regime: str = "insufficient"
+    label: str = "量能样本不足"
+    windows_hours: list[int] = field(default_factory=list)
+    matched_windows: list[int] = field(default_factory=list)
+    volume_ratios: dict[int, float] = field(default_factory=dict)
+    trade_ratios: dict[int, float] = field(default_factory=dict)
+    consecutive_windows: int = 0
+    max_volume_ratio: float = 1.0
+    max_trade_ratio: float = 1.0
+    normalized_quote_volume_24h: float = 0.0
+    normalized_trade_count_24h: int = 0
+
+
+@dataclass(frozen=True)
 class CommunitySignal:
     score: float
     source: str
@@ -62,6 +77,11 @@ class IndicatorSnapshot:
     volume_ratio: float
     buy_pressure_ratio: float
     recent_change_pct: float
+    boll_mb: float = 0.0
+    boll_up: float = 0.0
+    boll_dn: float = 0.0
+    boll_bandwidth_pct: float = 0.0
+    boll_position: float = 0.5
     support_level: float = 0.0
     resistance_level: float = 0.0
     support_distance_pct: float = 0.0
@@ -108,6 +128,8 @@ class TradeSignal:
     liquidity_eligible: bool = True
     liquidity_tier: str = ""
     liquidity_issue: str = ""
+    activity_profile: MarketActivityProfile | None = None
+    dynamic_liquidity_override: bool = False
 
 
 @dataclass(frozen=True)
@@ -124,6 +146,11 @@ class ScanSummary:
     candidate_pool: int = 0
     liquidity_profiles: dict[str, dict[str, float | int]] = field(default_factory=dict)
     liquidity_tier_stats: dict[str, dict[str, int]] = field(default_factory=dict)
+    dynamic_activity_enabled: bool = False
+    activity_discovery_symbols: int = 0
+    activity_surge_symbols: int = 0
+    activity_contraction_symbols: int = 0
+    dynamic_eligible_symbols: int = 0
 
 
 @dataclass(frozen=True)

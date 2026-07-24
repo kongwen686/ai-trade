@@ -17,6 +17,11 @@ class RuntimeConfigTests(unittest.TestCase):
             self.assertEqual(getattr(defaults, key), expected)
         self.assertLess(defaults.min_quote_volume, defaults.top30_min_quote_volume)
         self.assertGreaterEqual(defaults.min_trade_count, defaults.top30_min_trade_count)
+        self.assertTrue(defaults.dynamic_activity_enabled)
+        self.assertEqual(defaults.activity_discovery_pool, 80)
+        self.assertEqual(defaults.activity_baseline_hours, 48)
+        self.assertEqual(defaults.activity_surge_ratio, 1.6)
+        self.assertEqual(defaults.activity_liquidity_floor_ratio, 0.2)
 
     def test_default_from_settings_includes_curated_x_accounts(self) -> None:
         config = RuntimeConfig.default_from_settings(AppSettings())
@@ -40,6 +45,8 @@ class RuntimeConfigTests(unittest.TestCase):
             config.scan_defaults.quote_asset = "FDUSD"
             config.scan_defaults.btc_min_quote_volume = 123_000_000
             config.scan_defaults.top30_min_trade_count = 6789
+            config.scan_defaults.activity_discovery_pool = 96
+            config.scan_defaults.activity_surge_ratio = 1.75
             config.backtest_defaults.score_threshold = 74.5
             config.carry_paper_defaults.enabled = True
             config.carry_paper_defaults.min_basis_bps = 32.0
@@ -54,6 +61,8 @@ class RuntimeConfigTests(unittest.TestCase):
             self.assertEqual(loaded.scan_defaults.quote_asset, "FDUSD")
             self.assertEqual(loaded.scan_defaults.btc_min_quote_volume, 123_000_000)
             self.assertEqual(loaded.scan_defaults.top30_min_trade_count, 6789)
+            self.assertEqual(loaded.scan_defaults.activity_discovery_pool, 96)
+            self.assertEqual(loaded.scan_defaults.activity_surge_ratio, 1.75)
             self.assertEqual(loaded.backtest_defaults.score_threshold, 74.5)
             self.assertTrue(loaded.carry_paper_defaults.enabled)
             self.assertEqual(loaded.carry_paper_defaults.min_basis_bps, 32.0)

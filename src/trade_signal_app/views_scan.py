@@ -110,6 +110,33 @@ def _volatility_badge(signal: dict[str, object], lang: str) -> str:
     )
 
 
+def _activity_badge(signal: dict[str, object], lang: str, *, compact: bool = False) -> str:
+    regime = str(signal.get("activity_regime") or "insufficient")
+    if regime == "insufficient":
+        return ""
+    matched = [int(item) for item in signal.get("activity_matched_windows") or []]
+    windows = "/".join(f"{item}H" for item in matched)
+    volume_ratio = float(signal.get("activity_max_volume_ratio") or 1.0)
+    if regime == "surge":
+        label = _text(lang, "连续放量", "Volume surge")
+    elif regime == "contraction":
+        label = _text(lang, "连续缩量", "Volume contraction")
+    else:
+        label = _text(lang, "量能常态", "Normal activity")
+    suffix = f" {windows}" if windows else ""
+    detail = f"{volume_ratio:.2f}x"
+    if compact:
+        return (
+            f'<span class="activity-inline activity-{escape(regime)}">{escape(label)}{escape(suffix)}</span>'
+            f'<small>{detail}</small>'
+        )
+    return (
+        f'<span class="ant-tag chip activity-tag activity-{escape(regime)}" '
+        f'title="24H normalized {float(signal.get("activity_normalized_quote_volume_m") or 0.0):.1f}M">'
+        f'{escape(label)}{escape(suffix)} · {detail}</span>'
+    )
+
+
 def _scan_view_url(params: dict[str, object], lang: str, view_mode: str) -> str:
     query = {
         "quote_asset": params.get("quote_asset", ""),
@@ -194,11 +221,12 @@ def _signal_card(signal: dict[str, object]) -> str:
     community = _community_badge(signal)
     change_pct = float(signal["price_change_percent"])
     liquidity_eligible = bool(signal.get("liquidity_eligible", True))
-    liquidity_badge = (
-        '<span class="ant-tag positive">流动性合格</span>'
-        if liquidity_eligible
-        else '<span class="ant-tag warning">仅扫描观察</span>'
-    )
+    if bool(signal.get("dynamic_liquidity_override")):
+        liquidity_badge = '<span class="ant-tag positive">动态量能准入</span>'
+    elif liquidity_eligible:
+        liquidity_badge = '<span class="ant-tag positive">固定24H合格</span>'
+    else:
+        liquidity_badge = '<span class="ant-tag warning">仅扫描观察</span>'
 
     return f"""
     <article class="ant-card signal-card grade-{grade_class}" data-live-symbol="{escape(str(signal['symbol']))}">
@@ -234,6 +262,14 @@ def _signal_card(signal: dict[str, object]) -> str:
           <span>EMA Spread</span>
           <strong>{float(signal["ema_spread_pct"]):+.2f}%</strong>
         </div>
+        <div>
+          <span>BOLL UP / MB / DN</span>
+          <strong>{float(signal.get("boll_up") or 0.0):.6g} / {float(signal.get("boll_mb") or 0.0):.6g} / {float(signal.get("boll_dn") or 0.0):.6g}</strong>
+        </div>
+        <div>
+          <span>KDJ</span>
+          <strong>{float(signal.get("k_value") or 0.0):.0f}/{float(signal.get("d_value") or 0.0):.0f}/{float(signal.get("j_value") or 0.0):.0f}</strong>
+        </div>
       </div>
 
       <div class="breakdowns">
@@ -242,6 +278,7 @@ def _signal_card(signal: dict[str, object]) -> str:
 
       <div class="chips">
         {liquidity_badge}
+        {_activity_badge(signal, "zh")}
         {_chips(signal["reasons"], "positive")}
         {_chips(signal["warnings"], "warning")}
         {community}
@@ -269,10 +306,10 @@ def _signal_table(signals: list[dict[str, object]], lang: str) -> str:
         "24h",
         _text(lang, "成交额", "Quote Vol"),
         "RSI",
-        _text(lang, "量比", "Vol Ratio"),
+        _text(lang, "量比 / 多周期量能", "Vol / Multi-window"),
         _text(lang, "波动状态", "Volatility"),
-        "EMA",
-        "MACD",
+        "EMA / BOLL",
+        "KDJ / MACD",
         _text(lang, "社区", "Community"),
         _text(lang, "原因", "Reasons"),
     ]
@@ -298,6 +335,7 @@ def _signal_table(signals: list[dict[str, object]], lang: str) -> str:
     for signal in signals:
         grade = str(signal["grade"])
         grade_class = grade.lower().replace("+", "-plus")
+        macd_hist = float(signal.get("macd_hist") or 0.0)
         community_badge = _community_badge(signal, table=True)
         community_detail = _community_detail(signal)
         community = (
@@ -319,10 +357,16 @@ def _signal_table(signals: list[dict[str, object]], lang: str) -> str:
               <td class="numeric"><span data-live-change class="{'positive' if float(signal['price_change_percent']) >= 0 else 'negative'}">{float(signal["price_change_percent"]):+.2f}%</span></td>
               <td class="numeric">{float(signal["quote_volume_m"]):.1f}M</td>
               <td class="numeric">{float(signal["rsi_14"]):.1f}</td>
-              <td class="numeric">{float(signal["volume_ratio"]):.2f}x</td>
+              <td class="activity-cell"><strong>{float(signal["volume_ratio"]):.2f}x</strong>{_activity_badge(signal, lang, compact=True)}</td>
               <td>{_volatility_badge(signal, lang)}</td>
-              <td class="numeric">{float(signal["ema_spread_pct"]):+.2f}%</td>
-              <td class="numeric">{float(signal["macd_hist"]):+.4f}</td>
+              <td class="indicator-cell" title="BOLL UP/MB/DN {float(signal.get('boll_up') or 0.0):.8g} / {float(signal.get('boll_mb') or 0.0):.8g} / {float(signal.get('boll_dn') or 0.0):.8g}">
+                <span class="indicator-line"><span class="indicator-label">EMA</span><strong>{float(signal["ema_spread_pct"]):+.2f}%</strong></span>
+                <span class="indicator-line"><span class="indicator-label">BOLL</span><strong>{float(signal.get("boll_position") or 0.0):.2f}</strong></span>
+              </td>
+              <td class="indicator-cell" title="MACD Hist {macd_hist:+.6f}">
+                <span class="indicator-line"><span class="indicator-label">KDJ</span><strong>{float(signal.get("k_value") or 0.0):.0f}/{float(signal.get("d_value") or 0.0):.0f}/{float(signal.get("j_value") or 0.0):.0f}</strong></span>
+                <span class="indicator-line"><span class="indicator-label">MACD</span><strong>{macd_hist:+.4g}</strong></span>
+              </td>
               <td class="community-cell">{community}</td>
               <td><div class="table-tags">{reason_tags}{warning_tags}</div></td>
             </tr>
@@ -418,6 +462,11 @@ def render_index_page(
     candidate_symbols = int(summary.get("candidate_symbols") or summary["scanned_symbols"])
     eligible_symbols = int(summary.get("eligible_symbols") or summary["scanned_symbols"])
     candidate_pool = int(summary.get("candidate_pool") or params["candidate_pool"])
+    dynamic_enabled = bool(summary.get("dynamic_activity_enabled", params.get("dynamic_activity_enabled")))
+    discovery_symbols = int(summary.get("activity_discovery_symbols") or 0)
+    surge_symbols = int(summary.get("activity_surge_symbols") or 0)
+    contraction_symbols = int(summary.get("activity_contraction_symbols") or 0)
+    dynamic_eligible_symbols = int(summary.get("dynamic_eligible_symbols") or 0)
     hero_right = f"""
       <div class="ant-statistic-card stat-card">
         <span>{t("评分候选", "Scored Candidates")}</span>
@@ -430,9 +479,9 @@ def render_index_page(
         <small>{escape(str(summary["interval"]))} {t("周期", "interval")} · ≤ {candidate_symbols}</small>
       </div>
       <div class="ant-statistic-card stat-card">
-        <span>{t("山寨币最小成交额", "Alt Min Quote Volume")}</span>
-        <strong>{float(summary["min_quote_volume"]) / 1_000_000:.0f}M</strong>
-        <small>Quote Volume</small>
+        <span>{t("多周期量能发现", "Multi-window Discovery")}</span>
+        <strong>{surge_symbols} / {contraction_symbols}</strong>
+        <small>{t("放量 / 缩量", "surge / contraction")} · {t("动态准入", "dynamic eligible")} {dynamic_eligible_symbols}</small>
       </div>
     """
     content = f"""
@@ -465,7 +514,7 @@ def render_index_page(
           <button type="submit" name="refresh" value="1">{t("刷新信号", "Refresh Signals")}</button>
         </form>
         <p class="helper-text">
-          {t("候选数表示实际扫描目标；BTC、ETH、XRP、SOL、BNB、Top 30 和其他山寨币分别使用系统配置中的流动性门槛。未达门槛的币种仍可进入扫描观察，但不会进入模拟或实盘自动交易。数据来自 Binance Spot 市场接口。社区热度支持 Binance/OKX 官方热点、X/Twitter、Reddit 和本地", "Candidate count is the scan target. BTC, ETH, XRP, SOL, BNB, Top 30, and other altcoins use separate liquidity gates. Symbols below their gate remain visible for research but cannot enter paper or live auto trading. Market data comes from Binance Spot APIs. Community heat supports Binance/OKX official trends, X/Twitter, Reddit, and local")} <code>data/community_scores.csv</code>{t("，未配置时会自动忽略不可用来源。", "; unavailable sources are skipped automatically.")}
+          {t("候选数表示实际评分目标；动态量能已", "Candidate count is the scoring target. Multi-window activity is ")}<strong>{t("开启" if dynamic_enabled else "关闭", "enabled" if dynamic_enabled else "disabled")}</strong>{t(f"，会在 {discovery_symbols} 个发现标的中检查 1H/2H/4H/8H/12H 连续放量或缩量。连续放量只有通过分类安全底线后才能替代固定 24H 门槛；缩量仅用于观察，不会直接进入自动交易。社区热度支持 Binance/OKX 官方热点、X/Twitter、Reddit 和本地", f", checking 1H/2H/4H/8H/12H activity across {discovery_symbols} discovery symbols. A surge can replace the fixed 24H gate only above tier safety floors; contraction remains observation-only. Community heat supports Binance/OKX official trends, X/Twitter, Reddit, and local")} <code>data/community_scores.csv</code>{t("，未配置时会自动忽略不可用来源。", "; unavailable sources are skipped automatically.")}
         </p>
         {_community_operation_panel(params, ordered_signals, active_lang)}
         <div class="scan-view-bar">
@@ -484,7 +533,7 @@ def render_index_page(
         page_title="Binance Signal Scanner",
         active_page="scan",
         hero_title=t("从高流动性币种里抓更像“可入手”的那一批。", "Find tradable candidates from high-liquidity spot markets."),
-        hero_text=t("先用 24h 市场活跃度做初筛，再计算 RSI、EMA、MACD、KDJ、量能放大和可选的社区热度，输出一份偏实战的候选榜。", "Filter by 24h market activity, then score RSI, EMA, MACD, KDJ, volume expansion, buy pressure, and optional community heat."),
+        hero_text=t("结合分类流动性底线与 1H/2H/4H/8H/12H 连续量能变化，再计算 RSI、EMA、MACD、KDJ、买压和社区热度，避免固定 24H 门槛漏掉正在启动的机会。", "Combine tier liquidity floors with 1H/2H/4H/8H/12H activity shifts, then score RSI, EMA, MACD, KDJ, buy pressure, and community heat."),
         hero_right=hero_right,
         content=content,
         lang=active_lang,

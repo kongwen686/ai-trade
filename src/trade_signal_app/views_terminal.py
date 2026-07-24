@@ -322,11 +322,14 @@ def _terminal_status_chip(label: str, status: object, lang: str) -> str:
         "monitoring",
         "watch_only",
         "pending_scan",
+        "wait_score",
         "wait_pullback",
         "wait_support",
         "wait_volatility",
         "wait_volume",
         "wait_buy_pressure",
+        "wait_trend",
+        "wait_momentum",
     }:
         chip_class = "pending"
     elif raw_status in {"source_missing", "not_configured", "auth_failed", "empty", "error"}:

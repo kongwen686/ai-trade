@@ -69,6 +69,16 @@ def _settings_description_map(lang: str) -> dict[str, str]:
         "Candidate Pool": ("先按 24h 活跃度选出的候选交易对数量。", "Number of active pairs selected before scoring."),
         "Min Quote Volume": ("低于该 24h 成交额的交易对会被过滤。", "Pairs below this 24h quote volume are filtered out."),
         "Min Trade Count": ("低于该 24h 成交笔数的交易对会被过滤。", "Pairs below this 24h trade count are filtered out."),
+        "Enable dynamic activity": ("扫描 1H K 线并按所选周期组合 1H/2H/4H/8H/12H 连续量能，满足安全条件时替代固定 24H 门槛。", "Detect multi-window 1H/2H/4H/8H/12H activity and safely override fixed 24H gates."),
+        "Activity Discovery Pool": ("进入多周期量能预分析的标的数量，优先包含固定门槛合格和接近门槛的币种。", "Symbols included in the activity discovery pass."),
+        "Activity Baseline Hours": ("计算小时成交额与成交笔数中位数的历史基线长度。", "Historical hours used for median activity baselines."),
+        "Volume Surge Ratio": ("近期每小时成交额相对历史中位数达到该倍数才视为放量。", "Hourly quote-volume ratio required for a surge."),
+        "Trade Surge Ratio": ("近期每小时成交笔数相对历史中位数达到该倍数才视为活跃。", "Hourly trade-count ratio required for a surge."),
+        "Volume Contraction Ratio": ("低于该倍数视为缩量；缩量只进入观察，不直接放行交易。", "Below this ratio is contraction and remains observation-only."),
+        "Trade Contraction Ratio": ("成交笔数低于该倍数时确认缩量。", "Trade-count ratio confirming contraction."),
+        "Consecutive Windows": ("至少多少个相邻窗口同时放量或缩量才确认状态。", "Adjacent windows required to confirm an activity regime."),
+        "24H Safety Floor Ratio": ("动态准入前，实际 24H 成交额与笔数至少达到分类固定门槛的比例。", "Minimum actual 24H tier-gate ratio before dynamic eligibility."),
+        "Normalized Gate Ratio": ("近期小时量折算 24H 后，至少达到分类固定门槛的比例。", "Minimum normalized 24H tier-gate ratio."),
         "Enable auto trade": ("开启后自动交易入口会按配置扫描、风控和执行。", "When enabled, the engine scans, risk-checks, and executes by configuration."),
         "Execution Mode": ("paper 只写本地模拟持仓；live 才可能触发真实订单。", "paper writes local simulated positions; live may submit real orders."),
         "Execution Exchange": ("选择自动交易执行账户。扫描行情仍使用当前公开行情源，订单会提交到所选交易所。", "Select the account used for execution. Scanning still uses the configured public market source; orders use the selected exchange."),
@@ -609,8 +619,27 @@ def render_settings_page(
           <div class="settings-group-head"><h3>扫描候选池</h3><p>控制扫描范围和周期；流动性门槛按独立主流币、Top 30 次主流和其他山寨币分别判断。</p></div>
           <div class="settings-grid settings-grid-compact">
           <label><span>Quote Asset</span><input type="text" name="scan_quote_asset" value="{escape(str(params['scan_quote_asset']))}" /></label>
-          <label><span>Scan Interval</span><select name="scan_interval">{''.join(_option(item, str(params['scan_interval'])) for item in ['15m', '1h', '2h', '4h', '1d'])}</select></label>
+          <label><span>Scan Interval</span><select name="scan_interval">{''.join(_option(item, str(params['scan_interval'])) for item in ['15m', '1h', '2h', '4h', '8h', '12h', '1d'])}</select></label>
           <label><span>Candidate Pool</span><input type="number" min="5" max="40" name="scan_candidate_pool" value="{int(params['scan_candidate_pool'])}" /></label>
+          </div>
+          </div>
+          <div class="settings-group">
+          <div class="settings-group-head"><h3>多周期动态量能</h3><p>使用 1H K 线组合出与扫描周期匹配的 1H/2H/4H/8H/12H 活跃度。连续放量可在双重安全底线之上替代固定 24H 门槛；连续缩量只提升观察优先级。</p></div>
+          <div class="notice full-span">
+            <strong>默认安全规则：实际 24H 活跃度 ≥ 分类门槛 20%，且近期小时量折算 24H ≥ 分类门槛 50%。</strong>
+            <p>动态准入只替代候选流动性门槛，评分、买压、反追高、支撑结构、波动率和仓位风控仍会继续执行。</p>
+          </div>
+          <div class="settings-grid">
+          <label class="inline-check"><input type="hidden" name="scan_dynamic_activity_enabled" value="0" /><input type="checkbox" name="scan_dynamic_activity_enabled" value="1" {"checked" if params.get("scan_dynamic_activity_enabled", True) else ""} /><span>Enable dynamic activity</span></label>
+          <label><span>Activity Discovery Pool</span><input type="number" min="20" max="200" step="1" name="scan_activity_discovery_pool" value="{int(params.get('scan_activity_discovery_pool', 80))}" /></label>
+          <label><span>Activity Baseline Hours</span><input type="number" min="24" max="168" step="1" name="scan_activity_baseline_hours" value="{int(params.get('scan_activity_baseline_hours', 48))}" /></label>
+          <label><span>Consecutive Windows</span><input type="number" min="1" max="5" step="1" name="scan_activity_min_consecutive_windows" value="{int(params.get('scan_activity_min_consecutive_windows', 2))}" /></label>
+          <label><span>Volume Surge Ratio</span><input type="number" min="1.05" max="10" step="0.05" name="scan_activity_surge_ratio" value="{float(params.get('scan_activity_surge_ratio', 1.6)):.2f}" /></label>
+          <label><span>Trade Surge Ratio</span><input type="number" min="1" max="10" step="0.05" name="scan_activity_trade_surge_ratio" value="{float(params.get('scan_activity_trade_surge_ratio', 1.25)):.2f}" /></label>
+          <label><span>Volume Contraction Ratio</span><input type="number" min="0.05" max="0.95" step="0.05" name="scan_activity_contraction_ratio" value="{float(params.get('scan_activity_contraction_ratio', 0.65)):.2f}" /></label>
+          <label><span>Trade Contraction Ratio</span><input type="number" min="0.05" max="0.95" step="0.05" name="scan_activity_trade_contraction_ratio" value="{float(params.get('scan_activity_trade_contraction_ratio', 0.75)):.2f}" /></label>
+          <label><span>24H Safety Floor Ratio</span><input type="number" min="0.05" max="1" step="0.05" name="scan_activity_liquidity_floor_ratio" value="{float(params.get('scan_activity_liquidity_floor_ratio', 0.2)):.2f}" /></label>
+          <label><span>Normalized Gate Ratio</span><input type="number" min="0.1" max="1" step="0.05" name="scan_activity_normalized_threshold_ratio" value="{float(params.get('scan_activity_normalized_threshold_ratio', 0.5)):.2f}" /></label>
           </div>
           </div>
           <div class="settings-group">
@@ -685,6 +714,17 @@ def render_settings_page(
           <label class="inline-check"><input type="hidden" name="autotrade_block_extreme_volatility" value="0" /><input type="checkbox" name="autotrade_block_extreme_volatility" value="1" {"checked" if params.get("autotrade_block_extreme_volatility") else ""} /><span>Block extreme volatility</span></label>
           <label><span>Max Volatility Percentile</span><input type="number" step="1" min="50" max="100" name="autotrade_max_entry_volatility_percentile" value="{float(params.get('autotrade_max_entry_volatility_percentile', 92.0)):.0f}" /></label>
           <label><span>Max Volatility Ratio</span><input type="number" step="0.1" min="1" max="10" name="autotrade_max_entry_volatility_ratio" value="{float(params.get('autotrade_max_entry_volatility_ratio', 2.0)):.1f}" /></label>
+          <label class="inline-check"><input type="hidden" name="autotrade_indicator_confluence_enabled" value="0" /><input type="checkbox" name="autotrade_indicator_confluence_enabled" value="1" {"checked" if params.get("autotrade_indicator_confluence_enabled", True) else ""} /><span>启用 EMA/BOLL/KDJ/RSI/量能共振</span></label>
+          <label class="inline-check"><input type="hidden" name="autotrade_major_trend_breakout_enabled" value="0" /><input type="checkbox" name="autotrade_major_trend_breakout_enabled" value="1" {"checked" if params.get("autotrade_major_trend_breakout_enabled", True) else ""} /><span>启用 BTC 趋势突破</span></label>
+          <label><span>BTC Breakout Score</span><input type="number" step="0.1" min="0" max="100" name="autotrade_major_trend_breakout_min_score" value="{float(params.get('autotrade_major_trend_breakout_min_score', 85.0)):.1f}" /></label>
+          <label><span>BTC Breakout Volume</span><input type="number" step="0.01" min="0" name="autotrade_major_trend_breakout_min_volume_ratio" value="{float(params.get('autotrade_major_trend_breakout_min_volume_ratio', 1.25)):.2f}" /></label>
+          <label><span>BTC Breakout Buy Pressure</span><input type="number" step="0.01" min="0" max="1" name="autotrade_major_trend_breakout_min_buy_pressure" value="{float(params.get('autotrade_major_trend_breakout_min_buy_pressure', 0.55)):.2f}" /></label>
+          <label><span>BTC Breakout Max RSI</span><input type="number" step="0.1" min="0" max="100" name="autotrade_major_trend_breakout_max_rsi" value="{float(params.get('autotrade_major_trend_breakout_max_rsi', 70.0)):.1f}" /></label>
+          <label><span>BTC Max BOLL Position</span><input type="number" step="0.01" min="0.5" max="2" name="autotrade_major_trend_breakout_max_boll_position" value="{float(params.get('autotrade_major_trend_breakout_max_boll_position', 1.05)):.2f}" /></label>
+          <label class="inline-check"><input type="hidden" name="autotrade_eth_trend_pullback_enabled" value="0" /><input type="checkbox" name="autotrade_eth_trend_pullback_enabled" value="1" {"checked" if params.get("autotrade_eth_trend_pullback_enabled", True) else ""} /><span>启用 ETH 动态回踩</span></label>
+          <label><span>ETH Pullback Score</span><input type="number" step="0.1" min="0" max="100" name="autotrade_eth_trend_pullback_min_score" value="{float(params.get('autotrade_eth_trend_pullback_min_score', 90.0)):.1f}" /></label>
+          <label><span>ETH Max BOLL Position</span><input type="number" step="0.01" min="0" max="1.5" name="autotrade_eth_trend_pullback_max_boll_position" value="{float(params.get('autotrade_eth_trend_pullback_max_boll_position', 0.80)):.2f}" /></label>
+          <label><span>ETH Max 4H ATR %</span><input type="number" step="0.1" min="0.1" max="20" name="autotrade_eth_trend_pullback_max_atr_pct" value="{float(params.get('autotrade_eth_trend_pullback_max_atr_pct', 2.0)):.1f}" /></label>
           <label><span>Support Stop Buffer %</span><input type="number" step="0.1" min="0" name="autotrade_support_stop_buffer_pct" value="{float(params.get('autotrade_support_stop_buffer_pct', 0.6)):.1f}" /></label>
           <label><span>Resistance TP Buffer %</span><input type="number" step="0.1" min="0" name="autotrade_resistance_take_profit_buffer_pct" value="{float(params.get('autotrade_resistance_take_profit_buffer_pct', 0.4)):.1f}" /></label>
           <label><span>Stop Loss %</span><input type="number" step="0.1" min="0.1" name="autotrade_stop_loss_pct" value="{float(params['autotrade_stop_loss_pct']):.1f}" /></label>

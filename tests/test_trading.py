@@ -15,11 +15,11 @@ from trade_signal_app.trading import AutoTrader, LIVE_CONFIRM_VALUE, TradingEven
 
 def _signal(
     symbol: str = "BTCUSDT",
-    score: float = 82.0,
+    score: float = 89.0,
     price: float = 100.0,
     quote_volume: float = 20_000_000.0,
     *,
-    rsi: float = 50.0,
+    rsi: float = 58.0,
     price_vs_ema20_pct: float = 0.0,
     recent_change_pct: float = 0.0,
     support_level: float = 0.0,
@@ -34,8 +34,12 @@ def _signal(
     atr_pct: float = 1.0,
     volume_ratio: float = 1.4,
     buy_pressure_ratio: float = 0.62,
-    ema_20: float = 0.0,
-    ema_50: float = 0.0,
+    ema_20: float = 98.0,
+    ema_50: float = 95.0,
+    boll_mb: float = 98.0,
+    boll_up: float = 106.0,
+    boll_dn: float = 90.0,
+    boll_position: float = 0.90,
     liquidity_eligible: bool = True,
 ) -> SimpleNamespace:
     return SimpleNamespace(
@@ -48,6 +52,20 @@ def _signal(
             close_price=price,
             ema_20=ema_20,
             ema_50=ema_50,
+            boll_mb=boll_mb,
+            boll_up=boll_up,
+            boll_dn=boll_dn,
+            boll_bandwidth_pct=((boll_up - boll_dn) / boll_mb) * 100 if boll_mb else 0.0,
+            boll_position=boll_position,
+            macd=1.4,
+            macd_signal=1.0,
+            macd_hist=0.4,
+            macd_hist_rising=True,
+            bullish_macd_cross=False,
+            k_value=62.0,
+            d_value=58.0,
+            j_value=70.0,
+            bullish_kdj_cross=False,
             volume_ratio=volume_ratio,
             buy_pressure_ratio=buy_pressure_ratio,
             rsi_14=rsi,
@@ -60,6 +78,7 @@ def _signal(
             support_strength=support_strength,
             structure_risk_reward=structure_risk_reward,
             volatility_regime=volatility_regime,
+            volatility_label="常态波动",
             volatility_percentile=volatility_percentile,
             volatility_ratio=volatility_ratio,
             atr_pct=atr_pct,
@@ -353,7 +372,7 @@ class TradingTests(unittest.TestCase):
     def test_paper_leverage_scales_notional_and_margin_roi(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = TradingStateStore(Path(temp_dir) / "state.json")
-            trader = AutoTrader(scanner=FakeScanner([_signal(price=100.0)]), state_store=store)
+            trader = AutoTrader(scanner=FakeScanner([_signal(symbol="SOLUSDT", price=100.0)]), state_store=store)
 
             first_report = trader.run_once(
                 AutoTradeDefaults(
@@ -363,10 +382,11 @@ class TradingTests(unittest.TestCase):
                     leverage=5.0,
                     score_threshold=75.0,
                     take_profit_pct=2.0,
+                    structure_filter_enabled=False,
                 )
             )
 
-            trader = AutoTrader(scanner=FakeScanner([_signal(price=102.0, score=10.0)]), state_store=store)
+            trader = AutoTrader(scanner=FakeScanner([_signal(symbol="SOLUSDT", price=102.0, score=10.0)]), state_store=store)
             second_report = trader.run_once(
                 AutoTradeDefaults(
                     enabled=True,
@@ -406,7 +426,7 @@ class TradingTests(unittest.TestCase):
                     )
                 ]
             )
-            scanner = FakeScanner([_signal(score=90.0, price=105.0)])
+            scanner = FakeScanner([_signal(score=90.0, price=105.0, ema_20=0.0, ema_50=0.0)])
             trader = AutoTrader(scanner=scanner, state_store=store)
 
             report = trader.run_once(
@@ -858,6 +878,41 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(report.events[0].status, "wait_support")
         self.assertIn("等待更合理买点", report.events[0].message)
         self.assertEqual(notifier.calls, [])
+
+    def test_paper_run_opens_btc_major_breakout_with_open_upside(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            scanner = FakeScanner(
+                [
+                    _signal(
+                        score=89.0,
+                        rsi=58.0,
+                        support_level=94.0,
+                        resistance_level=0.0,
+                        support_distance_pct=6.0,
+                        support_strength=1.0,
+                        structure_risk_reward=0.4,
+                        boll_mb=96.0,
+                        boll_up=101.0,
+                        boll_dn=90.0,
+                        boll_position=0.91,
+                    )
+                ]
+            )
+            trader = AutoTrader(scanner=scanner, state_store=store)
+
+            report = trader.run_once(
+                AutoTradeDefaults(
+                    enabled=True,
+                    mode="paper",
+                    quote_order_qty=50.0,
+                    score_threshold=75.0,
+                )
+            )
+
+        self.assertEqual(report.events[0].status, "paper_filled")
+        self.assertEqual(report.events[0].response["entry_setup"], "major_trend_breakout")
+        self.assertEqual(len(report.open_positions), 1)
 
     def test_paper_entry_uses_structure_stop_and_resistance_target(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

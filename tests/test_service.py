@@ -1,10 +1,42 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta, timezone
 from trade_signal_app.binance_client import BinancePublicAPIError
 from trade_signal_app.config import AppSettings
-from trade_signal_app.models import MarketTicker
-from trade_signal_app.service import SignalScanner, filter_tickers_by_liquidity_tier, select_tickers_for_scan
+from trade_signal_app.models import Candlestick, MarketActivityProfile, MarketTicker
+from trade_signal_app.service import (
+    SignalScanner,
+    activity_windows_for_interval,
+    analyze_market_activity,
+    filter_tickers_by_liquidity_tier,
+    select_tickers_for_scan,
+)
+
+
+def _activity_candles(recent_quote_volumes: list[float], recent_trade_counts: list[int]) -> tuple[list[Candlestick], datetime]:
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    quote_volumes = [100.0] * 48 + recent_quote_volumes
+    trade_counts = [10] * 48 + recent_trade_counts
+    candles = []
+    for index, (quote_volume, trade_count) in enumerate(zip(quote_volumes, trade_counts)):
+        open_time = start + timedelta(hours=index)
+        candles.append(
+            Candlestick(
+                open_time=open_time,
+                close_time=open_time + timedelta(hours=1) - timedelta(milliseconds=1),
+                open_price=1.0,
+                high_price=1.0,
+                low_price=1.0,
+                close_price=1.0,
+                volume=quote_volume,
+                quote_volume=quote_volume,
+                trade_count=trade_count,
+                taker_buy_base_volume=quote_volume / 2,
+                taker_buy_quote_volume=quote_volume / 2,
+            )
+        )
+    return candles, candles[-1].close_time + timedelta(seconds=1)
 
 
 def _permissive_settings() -> AppSettings:
@@ -87,6 +119,122 @@ class FallbackTickerGateway:
 
 
 class SignalScannerTests(unittest.TestCase):
+    def test_activity_windows_follow_selected_scan_interval(self) -> None:
+        self.assertEqual(activity_windows_for_interval("4h"), (1, 2, 4))
+        self.assertEqual(activity_windows_for_interval("8h"), (1, 2, 4, 8))
+        self.assertEqual(activity_windows_for_interval("12h"), (1, 2, 4, 8, 12))
+        self.assertEqual(activity_windows_for_interval("1d"), (1, 2, 4, 8, 12))
+
+    def test_market_activity_detects_consecutive_4h_volume_surge(self) -> None:
+        candles, now = _activity_candles([170, 180, 220, 260], [14, 15, 18, 22])
+
+        profile = analyze_market_activity(
+            candles,
+            interval="4h",
+            baseline_hours=48,
+            surge_ratio=1.6,
+            trade_surge_ratio=1.25,
+            contraction_ratio=0.65,
+            trade_contraction_ratio=0.75,
+            min_consecutive_windows=2,
+            now=now,
+        )
+
+        self.assertEqual(profile.regime, "surge")
+        self.assertEqual(profile.matched_windows, [1, 2, 4])
+        self.assertEqual(profile.consecutive_windows, 3)
+        self.assertGreater(profile.normalized_quote_volume_24h, 4_000)
+
+    def test_market_activity_detects_consecutive_contraction_as_observation(self) -> None:
+        candles, now = _activity_candles([60, 55, 45, 40], [7, 6, 5, 4])
+
+        profile = analyze_market_activity(
+            candles,
+            interval="4h",
+            baseline_hours=48,
+            surge_ratio=1.6,
+            trade_surge_ratio=1.25,
+            contraction_ratio=0.65,
+            trade_contraction_ratio=0.75,
+            min_consecutive_windows=2,
+            now=now,
+        )
+
+        self.assertEqual(profile.regime, "contraction")
+        self.assertEqual(profile.matched_windows, [1, 2, 4])
+
+    def test_dynamic_surge_can_replace_fixed_gate_above_both_safety_floors(self) -> None:
+        fixed = MarketTicker("FIXEDUSDT", 1.0, 0.0, 1_100.0, 100.0, 110)
+        surge = MarketTicker("SURGEUSDT", 1.0, 0.0, 300.0, 100.0, 30)
+        activity = MarketActivityProfile(
+            regime="surge",
+            label="连续放量 1H/2H/4H",
+            windows_hours=[1, 2, 4],
+            matched_windows=[1, 2, 4],
+            consecutive_windows=3,
+            max_volume_ratio=2.4,
+            max_trade_ratio=2.0,
+            normalized_quote_volume_24h=600.0,
+            normalized_trade_count_24h=60,
+        )
+        profiles = {
+            "min_quote_volume": 1_000,
+            "min_trade_count": 100,
+            "top30_min_quote_volume": 1_000,
+            "top30_min_trade_count": 100,
+        }
+
+        selected, _, _, stats, status = select_tickers_for_scan(
+            [fixed, surge],
+            eligible_symbols={fixed.symbol, surge.symbol},
+            quote_asset="USDT",
+            profile_source=profiles,
+            candidate_pool=2,
+            activity_by_symbol={surge.symbol: activity},
+            dynamic_activity_enabled=True,
+            activity_liquidity_floor_ratio=0.2,
+            activity_normalized_threshold_ratio=0.5,
+        )
+
+        self.assertEqual(selected[0].symbol, surge.symbol)
+        self.assertTrue(status[surge.symbol]["eligible"])
+        self.assertTrue(status[surge.symbol]["dynamic_override"])
+        self.assertEqual(stats["top30"]["dynamic_eligible"], 1)
+
+    def test_dynamic_surge_below_absolute_floor_remains_observation_only(self) -> None:
+        surge = MarketTicker("THINUSDT", 1.0, 0.0, 100.0, 100.0, 10)
+        activity = MarketActivityProfile(
+            regime="surge",
+            label="连续放量 1H/2H",
+            windows_hours=[1, 2, 4],
+            matched_windows=[1, 2],
+            consecutive_windows=2,
+            max_volume_ratio=3.0,
+            max_trade_ratio=3.0,
+            normalized_quote_volume_24h=800.0,
+            normalized_trade_count_24h=80,
+        )
+
+        selected, _, _, _, status = select_tickers_for_scan(
+            [surge],
+            eligible_symbols={surge.symbol},
+            quote_asset="USDT",
+            profile_source={
+                "min_quote_volume": 1_000,
+                "min_trade_count": 100,
+                "top30_min_quote_volume": 1_000,
+                "top30_min_trade_count": 100,
+            },
+            candidate_pool=1,
+            activity_by_symbol={surge.symbol: activity},
+            dynamic_activity_enabled=True,
+            activity_liquidity_floor_ratio=0.2,
+            activity_normalized_threshold_ratio=0.5,
+        )
+
+        self.assertFalse(status[selected[0].symbol]["eligible"])
+        self.assertIn("动态安全底线", str(status[selected[0].symbol]["message"]))
+
     def test_scan_uses_chunked_tickers_to_avoid_large_ticker_response(self) -> None:
         gateway = FallbackTickerGateway()
         scanner = SignalScanner(gateway=gateway, community_provider=NoopCommunityProvider(), settings=_permissive_settings())

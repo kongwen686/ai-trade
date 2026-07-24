@@ -148,7 +148,15 @@ def build_btc_signal_from_candles(
                 "ema_20": round(indicators.ema_20, 8),
                 "ema_50": round(indicators.ema_50, 8),
                 "ema_200": round(regime["ema_200"], 8),
+                "boll_mb": round(indicators.boll_mb, 8),
+                "boll_up": round(indicators.boll_up, 8),
+                "boll_dn": round(indicators.boll_dn, 8),
+                "boll_bandwidth_pct": round(indicators.boll_bandwidth_pct, 4),
+                "boll_position": round(indicators.boll_position, 4),
                 "rsi_14": round(indicators.rsi_14, 2),
+                "k_value": round(indicators.k_value, 2),
+                "d_value": round(indicators.d_value, 2),
+                "j_value": round(indicators.j_value, 2),
                 "macd_hist": round(indicators.macd_hist, 8),
                 "volume_ratio": round(indicators.volume_ratio, 4),
                 "buy_pressure_ratio": round(indicators.buy_pressure_ratio, 4),
@@ -462,6 +470,7 @@ def _action_decision(
     entry_decision = evaluate_long_entry(
         score=score,
         indicators=indicators,
+        symbol="BTCUSDT",
         config=EntryRuleConfig(
             min_score=68.0,
             min_volume_ratio=1.0,

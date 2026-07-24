@@ -23,6 +23,7 @@ def equity_sparkline(points: list[float]) -> str:
 
 
 def format_signal_row(signal: TradeSignal) -> dict:
+    activity = signal.activity_profile
     return {
         "symbol": signal.symbol,
         "score": signal.score,
@@ -33,8 +34,18 @@ def format_signal_row(signal: TradeSignal) -> dict:
         "quote_volume_m": signal.ticker.quote_volume / 1_000_000,
         "price_change_percent": signal.ticker.price_change_percent,
         "rsi_14": signal.indicators.rsi_14,
+        "ema_20": signal.indicators.ema_20,
+        "ema_50": signal.indicators.ema_50,
         "ema_spread_pct": signal.indicators.ema_spread_pct,
         "price_vs_ema20_pct": signal.indicators.price_vs_ema20_pct,
+        "boll_mb": signal.indicators.boll_mb,
+        "boll_up": signal.indicators.boll_up,
+        "boll_dn": signal.indicators.boll_dn,
+        "boll_bandwidth_pct": signal.indicators.boll_bandwidth_pct,
+        "boll_position": signal.indicators.boll_position,
+        "k_value": signal.indicators.k_value,
+        "d_value": signal.indicators.d_value,
+        "j_value": signal.indicators.j_value,
         "recent_change_pct": signal.indicators.recent_change_pct,
         "support_level": signal.indicators.support_level,
         "resistance_level": signal.indicators.resistance_level,
@@ -67,6 +78,18 @@ def format_signal_row(signal: TradeSignal) -> dict:
         "liquidity_eligible": signal.liquidity_eligible,
         "liquidity_tier": signal.liquidity_tier,
         "liquidity_issue": signal.liquidity_issue,
+        "dynamic_liquidity_override": signal.dynamic_liquidity_override,
+        "activity_regime": "insufficient" if activity is None else activity.regime,
+        "activity_label": "量能样本不足" if activity is None else activity.label,
+        "activity_windows": [] if activity is None else activity.windows_hours,
+        "activity_matched_windows": [] if activity is None else activity.matched_windows,
+        "activity_volume_ratios": {} if activity is None else activity.volume_ratios,
+        "activity_trade_ratios": {} if activity is None else activity.trade_ratios,
+        "activity_consecutive_windows": 0 if activity is None else activity.consecutive_windows,
+        "activity_max_volume_ratio": 1.0 if activity is None else activity.max_volume_ratio,
+        "activity_max_trade_ratio": 1.0 if activity is None else activity.max_trade_ratio,
+        "activity_normalized_quote_volume_m": 0.0 if activity is None else activity.normalized_quote_volume_24h / 1_000_000,
+        "activity_normalized_trade_count": 0 if activity is None else activity.normalized_trade_count_24h,
         "breakdown": {
             "trend": signal.breakdown.trend,
             "momentum": signal.breakdown.momentum,

@@ -10,6 +10,8 @@ from .views_common import _backtest_preset_options, _hidden_lang_input, _layout,
 
 
 BACKTEST_ADVANCED_HELP = {
+    "Indicator Lookback Bars": "每个时点计算 EMA、BOLL、KDJ、RSI 等指标使用的滚动历史窗口，不是加载 K 线数或交易样本数；4H 通常使用 240。",
+    "Max Holding Bars": "单笔交易允许持有的最大 K 线数，不是数据加载量；4H 设置 12 表示最多持有 48 小时。",
     "Fee bps": "统一手续费，单位 bps；10 bps 等于 0.10%。",
     "Fee Model": "flat 使用统一费率；maker_taker 会区分挂单和吃单费率。",
     "Fee Source": "manual 使用页面填写费率；account/symbol 会尝试读取 Binance 账户或交易对费率。",
@@ -360,7 +362,17 @@ def _backtest_visual_analysis(
     best_series = max(series_reports, key=lambda item: float(item.get("final_equity", 0.0)), default=None)
     best_portfolio = max(portfolio_reports, key=lambda item: float(item.get("final_equity", 0.0)), default=None)
     best_rebalance = max(rebalance_reports, key=lambda item: float(item.get("premium_pct", -999.0)), default=None)
-    total_trades = sum(int(item["trade_count"]) for item in rows)
+    series_trade_count = sum(int(item["trade_count"]) for item in rows if item["kind"] == "单币种")
+    portfolio_batch_count = sum(int(item["trade_count"]) for item in rows if item["kind"] == "组合")
+    # Portfolio batches are derived from the same series signals, so they must not
+    # be added to the underlying single-symbol trade sample count.
+    total_trades = series_trade_count if series_reports else portfolio_batch_count
+    if series_reports and portfolio_reports:
+        sample_detail = f"单币种成交 {series_trade_count} 笔；组合 {portfolio_batch_count} 批次另计"
+    elif series_reports:
+        sample_detail = f"单币种成交 {series_trade_count} 笔"
+    else:
+        sample_detail = f"组合成交 {portfolio_batch_count} 批次"
     avg_win_rate = sum(float(item["win_rate_pct"]) for item in rows if int(item["trade_count"]) > 0) / max(sum(1 for item in rows if int(item["trade_count"]) > 0), 1)
     avg_profit_factor = sum(float(item["profit_factor"]) for item in rows if float(item["profit_factor"]) > 0) / max(sum(1 for item in rows if float(item["profit_factor"]) > 0), 1)
     max_return = max(abs(float(item["return_pct"])) for item in rows) or 1.0
@@ -439,10 +451,10 @@ def _backtest_visual_analysis(
             <strong>{avg_win_rate:.1f}%</strong>
             <small>PF {avg_profit_factor:.2f}</small>
           </article>
-          <article class="analysis-metric-card metric-card {sample_card_tone}">
+          <article class="analysis-metric-card metric-card {sample_card_tone}" data-testid="backtest-trade-samples">
             <span>交易样本</span>
             <strong>{total_trades}</strong>
-            <small><em class="{sample_tone}">{sample_label}</em></small>
+            <small>{escape(sample_detail)} · <em class="{sample_tone}">{sample_label}</em></small>
           </article>
           <article class="analysis-metric-card metric-card {hold_card_tone}">
             <span>策略基准差</span>
@@ -1096,6 +1108,10 @@ def _stability_check_rows(items: list[object]) -> str:
 
 def _backtest_card(report: dict[str, object]) -> str:
     trade_pills = _trade_pills(report["trade_stat"], float(report["final_equity"]), float(report["max_drawdown_pct"]))
+    trade_stat = report.get("trade_stat") if isinstance(report.get("trade_stat"), dict) else {}
+    trade_count = int(trade_stat.get("trade_count", report.get("signal_count", 0)))
+    candle_count = int(report.get("candle_count", 0))
+    evaluated_bars = int(report.get("evaluated_bars", candle_count))
     equity_points = str(report["equity_sparkline"]).strip()
     event_count = len(report.get("events", []) if isinstance(report.get("events"), list) else [])
     equity_svg = (
@@ -1112,7 +1128,7 @@ def _backtest_card(report: dict[str, object]) -> str:
         <div class="signal-topline series-card-head">
           <div>
             <p class="symbol">{escape(str(report["symbol"]))}</p>
-            <p class="subline">{escape(str(report["interval"]))} · {int(report["signal_count"])} trades · {int(report["candle_count"])} candles</p>
+            <p class="subline">{escape(str(report["interval"]))} · {trade_count:,} 成交 · {candle_count:,} K 线 · {evaluated_bars:,} 已评估</p>
           </div>
           <div class="score-badge">
             <span>Equity</span>
@@ -1403,9 +1419,9 @@ def render_backtest_page(
         <small>{t("等权再平衡", "equal-weight rebalance")}</small>
       </div>
       <div class="ant-statistic-card stat-card">
-        <span>Lookback</span>
+        <span>Indicator Window</span>
         <strong>{int(params["lookback_bars"])}</strong>
-        <small>{escape(str(params["slippage_model"]))} slippage · cooldown {int(params["cooldown_bars"])}</small>
+        <small>指标回看窗口 · {escape(str(params["slippage_model"]))} slippage · cooldown {int(params["cooldown_bars"])}</small>
       </div>
       <div class="ant-statistic-card stat-card">
         <span>{t("计算耗时", "Runtime")}</span>
@@ -1476,14 +1492,14 @@ def render_backtest_page(
                 <span>Archive Patterns</span>
                 <textarea name="archives" rows="3" placeholder="例如：data/spot/monthly/klines/*/4h/*.zip">{archive_value}</textarea>
               </label>
-              <label><span>Lookback Bars</span><input type="number" min="60" name="lookback_bars" value="{int(params['lookback_bars'])}" /></label>
+              <label><span>Indicator Lookback Bars</span>{_backtest_advanced_help("Indicator Lookback Bars")}<input type="number" min="60" name="lookback_bars" value="{int(params['lookback_bars'])}" /></label>
               <label><span>Score Threshold</span><input type="number" step="0.1" name="score_threshold" value="{float(params['score_threshold']):.1f}" /></label>
               <label><span>Holding Periods</span><input type="text" name="holding_periods" value="{escape(str(params['holding_periods']))}" /></label>
               <label><span>Portfolio Top N</span><input type="number" min="0" name="portfolio_top_n" value="{int(params['portfolio_top_n'])}" /></label>
               <label><span>Cooldown Bars</span><input type="number" min="0" name="cooldown_bars" value="{int(params['cooldown_bars'])}" /></label>
               <label><span>Stop Loss %</span><input type="number" step="0.1" name="stop_loss_pct" value="{float(params['stop_loss_pct']):.1f}" /></label>
               <label><span>Take Profit %</span><input type="number" step="0.1" name="take_profit_pct" value="{float(params['take_profit_pct']):.1f}" /></label>
-              <label><span>Max Holding Bars</span><input type="number" min="1" name="max_holding_bars" value="{int(params['max_holding_bars'])}" /></label>
+              <label><span>Max Holding Bars</span>{_backtest_advanced_help("Max Holding Bars")}<input type="number" min="1" name="max_holding_bars" value="{int(params['max_holding_bars'])}" /></label>
               <details class="backtest-advanced-options">
                 <summary>
                   <span>高级成本 / 风控参数</span>

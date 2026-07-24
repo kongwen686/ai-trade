@@ -7,7 +7,7 @@ from threading import RLock
 from .binance_client import parse_ticker
 from .config import SETTINGS
 from .main_settings import _get_first, _parse_int_value, _parse_float_value, _validate_choice, _validate_range
-from .runtime_config import RuntimeConfig, SCAN_TIER_THRESHOLD_FIELDS
+from .runtime_config import RuntimeConfig, SCAN_DYNAMIC_ACTIVITY_FIELDS, SCAN_TIER_THRESHOLD_FIELDS
 from .service import (
     FALLBACK_SCAN_BASES,
     LEVERAGED_SUFFIXES,
@@ -18,7 +18,7 @@ from .time_utils import now_app_time
 from .ui import format_signal_row
 
 SCAN_SYNC_TIMEOUT_SECONDS = 0.8
-SCAN_INTERVALS = {"15m", "1h", "2h", "4h", "1d"}
+SCAN_INTERVALS = {"15m", "1h", "2h", "4h", "8h", "12h", "1d"}
 SCAN_VIEW_MODES = {"cards", "table"}
 _SCAN_CACHE_LOCK = RLock()
 _SCAN_PAYLOAD_CACHE: dict[tuple[object, ...], tuple[datetime, dict[str, object]]] = {}
@@ -56,6 +56,7 @@ def _scan_cache_key(params: dict[str, object]) -> tuple[object, ...]:
         params["min_quote_volume"],
         params["min_trade_count"],
         *(params.get(key) for key in SCAN_TIER_THRESHOLD_FIELDS),
+        *(params.get(key) for key in SCAN_DYNAMIC_ACTIVITY_FIELDS),
         params.get("community_provider", ""),
         params.get("x_provider", ""),
         params.get("x_account_mode", ""),
@@ -150,8 +151,18 @@ def _format_scan_signal_row(signal: object) -> dict[str, object]:
             "quote_volume_m": float(getattr(ticker, "quote_volume", 0.0) or 0.0) / 1_000_000,
             "price_change_percent": float(getattr(ticker, "price_change_percent", 0.0) or 0.0),
             "rsi_14": float(getattr(indicators, "rsi_14", 50.0) or 50.0),
+            "ema_20": float(getattr(indicators, "ema_20", 0.0) or 0.0),
+            "ema_50": float(getattr(indicators, "ema_50", 0.0) or 0.0),
             "ema_spread_pct": float(getattr(indicators, "ema_spread_pct", 0.0) or 0.0),
             "price_vs_ema20_pct": float(getattr(indicators, "price_vs_ema20_pct", 0.0) or 0.0),
+            "boll_mb": float(getattr(indicators, "boll_mb", 0.0) or 0.0),
+            "boll_up": float(getattr(indicators, "boll_up", 0.0) or 0.0),
+            "boll_dn": float(getattr(indicators, "boll_dn", 0.0) or 0.0),
+            "boll_bandwidth_pct": float(getattr(indicators, "boll_bandwidth_pct", 0.0) or 0.0),
+            "boll_position": float(getattr(indicators, "boll_position", 0.5) or 0.5),
+            "k_value": float(getattr(indicators, "k_value", 50.0) or 50.0),
+            "d_value": float(getattr(indicators, "d_value", 50.0) or 50.0),
+            "j_value": float(getattr(indicators, "j_value", 50.0) or 50.0),
             "recent_change_pct": float(getattr(indicators, "recent_change_pct", 0.0) or 0.0),
             "support_level": float(getattr(indicators, "support_level", 0.0) or 0.0),
             "resistance_level": float(getattr(indicators, "resistance_level", 0.0) or 0.0),
@@ -176,6 +187,18 @@ def _format_scan_signal_row(signal: object) -> dict[str, object]:
             "liquidity_eligible": bool(getattr(signal, "liquidity_eligible", True)),
             "liquidity_tier": str(getattr(signal, "liquidity_tier", "")),
             "liquidity_issue": str(getattr(signal, "liquidity_issue", "")),
+            "dynamic_liquidity_override": bool(getattr(signal, "dynamic_liquidity_override", False)),
+            "activity_regime": "insufficient",
+            "activity_label": "量能样本不足",
+            "activity_windows": [],
+            "activity_matched_windows": [],
+            "activity_volume_ratios": {},
+            "activity_trade_ratios": {},
+            "activity_consecutive_windows": 0,
+            "activity_max_volume_ratio": 1.0,
+            "activity_max_trade_ratio": 1.0,
+            "activity_normalized_quote_volume_m": 0.0,
+            "activity_normalized_trade_count": 0,
             "breakdown": {
                 "trend": 50.0,
                 "momentum": 50.0,
@@ -282,12 +305,34 @@ def _fallback_scan_payload(params: dict[str, object], warning: str, *, scanner: 
                 "liquidity_eligible": bool(status["eligible"]),
                 "liquidity_tier": str(status["tier"]),
                 "liquidity_issue": str(status["message"]),
+                "dynamic_liquidity_override": False,
+                "activity_regime": "insufficient",
+                "activity_label": "量能样本不足",
+                "activity_windows": [],
+                "activity_matched_windows": [],
+                "activity_volume_ratios": {},
+                "activity_trade_ratios": {},
+                "activity_consecutive_windows": 0,
+                "activity_max_volume_ratio": 1.0,
+                "activity_max_trade_ratio": 1.0,
+                "activity_normalized_quote_volume_m": 0.0,
+                "activity_normalized_trade_count": 0,
                 "last_price": ticker.last_price,
                 "quote_volume_m": ticker.quote_volume / 1_000_000,
                 "price_change_percent": ticker.price_change_percent,
                 "rsi_14": 50.0,
+                "ema_20": 0.0,
+                "ema_50": 0.0,
                 "ema_spread_pct": 0.0,
                 "price_vs_ema20_pct": 0.0,
+                "boll_mb": 0.0,
+                "boll_up": 0.0,
+                "boll_dn": 0.0,
+                "boll_bandwidth_pct": 0.0,
+                "boll_position": 0.5,
+                "k_value": 50.0,
+                "d_value": 50.0,
+                "j_value": 50.0,
                 "recent_change_pct": 0.0,
                 "support_level": 0.0,
                 "resistance_level": 0.0,
@@ -335,6 +380,11 @@ def _fallback_scan_payload(params: dict[str, object], warning: str, *, scanner: 
             "candidate_pool": int(params["candidate_pool"]),
             "liquidity_profiles": liquidity_profiles,
             "liquidity_tier_stats": liquidity_tier_stats,
+            "dynamic_activity_enabled": bool(params.get("dynamic_activity_enabled")),
+            "activity_discovery_symbols": 0,
+            "activity_surge_symbols": 0,
+            "activity_contraction_symbols": 0,
+            "dynamic_eligible_symbols": 0,
         },
         "signals": signals,
         "cached": False,
@@ -370,6 +420,7 @@ def _scan_payload(
         "min_quote_volume": int(min_quote_volume),
         "min_trade_count": min_trade_count,
         **{key: getattr(scan_defaults, key) for key in SCAN_TIER_THRESHOLD_FIELDS},
+        **{key: getattr(scan_defaults, key) for key in SCAN_DYNAMIC_ACTIVITY_FIELDS},
         "view_mode": view_mode,
         "community_provider": runtime_config.community_provider,
         "x_provider": runtime_config.x_provider,

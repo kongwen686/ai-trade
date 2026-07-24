@@ -28,12 +28,33 @@ def _signal(
         reasons=["趋势结构改善", "量能放大"],
         ticker=SimpleNamespace(last_price=price, quote_volume=200_000_000.0, price_change_percent=change),
         indicators=SimpleNamespace(
+            close_price=price,
+            ema_20=price * 0.98,
+            ema_50=price * 0.95,
+            boll_mb=price * 0.98,
+            boll_up=price * 1.02,
+            boll_dn=price * 0.94,
+            boll_position=0.90,
+            macd=1.4,
+            macd_signal=1.0,
+            macd_hist=0.4,
+            macd_hist_rising=True,
+            bullish_macd_cross=False,
+            k_value=62.0,
+            d_value=58.0,
+            j_value=70.0,
+            bullish_kdj_cross=False,
             volume_ratio=volume_ratio,
             buy_pressure_ratio=0.61,
             ema_spread_pct=1.2,
             rsi_14=rsi,
             price_vs_ema20_pct=price_vs_ema20,
             recent_change_pct=recent_change,
+            volatility_regime="normal",
+            volatility_label="常态波动",
+            volatility_percentile=50.0,
+            volatility_ratio=1.0,
+            atr_pct=1.0,
         ),
     )
 
@@ -53,7 +74,7 @@ class IntelligenceTests(unittest.TestCase):
         config.autotrade_defaults.score_threshold = 75.0
         config.x_tracked_accounts = ["@lookonchain", "wu_blockchain"]
         hub = IntelligenceHub(
-            scanner=FakeScanner([_signal("BTCUSDT", 82.0, 68000.0)]),
+            scanner=FakeScanner([_signal("BTCUSDT", 89.0, 68000.0)]),
             runtime_config=config,
             settings=AppSettings(),
         )

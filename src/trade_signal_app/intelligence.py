@@ -594,6 +594,9 @@ class IntelligenceHub:
                 "wait_volatility",
                 "wait_volume",
                 "wait_buy_pressure",
+                "wait_score",
+                "wait_trend",
+                "wait_momentum",
             }:
                 continue
             if hit.symbol not in hit_symbols:

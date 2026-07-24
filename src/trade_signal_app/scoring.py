@@ -15,6 +15,25 @@ def _scaled_range(value: float, lower: float, upper: float) -> float:
     return clamp(normalized * 100, 0, 100)
 
 
+def _boll_timing_score(indicators: IndicatorSnapshot) -> float:
+    if indicators.boll_mb <= 0 or indicators.boll_up <= indicators.boll_dn:
+        return 60.0
+    position = indicators.boll_position
+    if 0.45 <= position <= 0.85:
+        return 100.0
+    if 0.25 <= position <= 1.0:
+        return 82.0
+    if 0.10 <= position <= 1.10:
+        return 60.0
+    return 25.0
+
+
+def _volume_confirmation_score(indicators: IndicatorSnapshot) -> float:
+    volume_score = _scaled_range(indicators.volume_ratio, 0.45, 1.55)
+    pressure_score = _scaled_range(indicators.buy_pressure_ratio, 0.44, 0.60)
+    return clamp((volume_score * 0.58) + (pressure_score * 0.42), 0, 100)
+
+
 def compute_liquidity_score(
     ticker: MarketTicker,
     quote_volumes: list[float],
@@ -50,7 +69,10 @@ def build_subscores(
     if indicators.ema_20 > indicators.ema_50:
         trend += 38
     trend += clamp((indicators.ema_spread_pct + 1.5) * 8, 0, 18)
-    trend += clamp((4 - abs(indicators.price_vs_ema20_pct - 2)) * 3, 0, 12)
+    if indicators.boll_mb > 0 and indicators.close_price >= indicators.boll_mb:
+        trend += 12
+    else:
+        trend += clamp((4 - abs(indicators.price_vs_ema20_pct - 2)) * 3, 0, 12)
 
     rsi_score = 0.0
     if 48 <= indicators.rsi_14 <= 62:
@@ -83,10 +105,10 @@ def build_subscores(
     if indicators.k_value < 65:
         kdj_score += 15
 
-    extension_penalty = clamp(abs(indicators.price_vs_ema20_pct) * 4, 0, 30)
-    timing = clamp(kdj_score + (30 - extension_penalty), 0, 100)
+    extension_penalty = clamp(max(indicators.price_vs_ema20_pct - 5.0, 0.0) * 5, 0, 25)
+    timing = clamp((kdj_score * 0.58) + (_boll_timing_score(indicators) * 0.42) - extension_penalty, 0, 100)
 
-    volume = clamp((indicators.volume_ratio * 35) + (indicators.buy_pressure_ratio * 40), 0, 100)
+    volume = _volume_confirmation_score(indicators)
 
     market = 45.0
     if 0.5 <= ticker.price_change_percent <= 8:
@@ -157,6 +179,11 @@ def build_reasons(ticker: MarketTicker, indicators: IndicatorSnapshot, community
 
     if indicators.ema_20 > indicators.ema_50 and indicators.close_price > indicators.ema_20:
         reasons.append("EMA20/EMA50 多头排列")
+    if indicators.boll_mb > 0 and indicators.close_price >= indicators.boll_mb:
+        if indicators.boll_position >= 0.85:
+            reasons.append("BOLL 上轨区趋势延续")
+        else:
+            reasons.append("价格运行于 BOLL 中轨上方")
     if indicators.bullish_macd_cross or (indicators.macd > indicators.macd_signal and indicators.macd_hist > 0):
         reasons.append("MACD 动能转强")
     if 45 <= indicators.rsi_14 <= 65:
@@ -186,6 +213,8 @@ def build_reasons(ticker: MarketTicker, indicators: IndicatorSnapshot, community
         )
     if indicators.rsi_14 >= 72:
         warnings.append("RSI 过热，追高风险增大")
+    if indicators.boll_up > 0 and indicators.boll_position > 1.10:
+        warnings.append("价格明显突破 BOLL 上轨，谨防冲高回落")
     if indicators.price_vs_ema20_pct >= 7:
         warnings.append("价格偏离 EMA20 过大")
     if indicators.volume_ratio < 0.9:

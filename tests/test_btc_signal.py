@@ -4,9 +4,11 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import math
 import unittest
+from unittest.mock import patch
 
 from trade_signal_app.btc_signal import BTC_LEVERAGE_REFERENCE, build_btc_signal_from_candles
 from trade_signal_app.models import Candlestick
+from trade_signal_app.strategy import evaluate_long_entry
 
 
 def _build_candles(*, count: int, step_hours: int, mode: str) -> list[Candlestick]:
@@ -57,15 +59,17 @@ class BtcSignalTests(unittest.TestCase):
         daily = primary[::6]
         entry = _build_candles(count=900, step_hours=1, mode="bull")
 
-        summary = build_btc_signal_from_candles(
-            primary_candles=primary,
-            daily_candles=daily,
-            entry_candles=entry,
-            generated_at=datetime(2026, 7, 10, 22, 0, tzinfo=timezone.utc),
-            include_backtests=False,
-        )
+        with patch("trade_signal_app.btc_signal.evaluate_long_entry", wraps=evaluate_long_entry) as entry_evaluator:
+            summary = build_btc_signal_from_candles(
+                primary_candles=primary,
+                daily_candles=daily,
+                entry_candles=entry,
+                generated_at=datetime(2026, 7, 10, 22, 0, tzinfo=timezone.utc),
+                include_backtests=False,
+            )
 
         self.assertEqual(summary["symbol"], "BTCUSDT")
+        self.assertEqual(entry_evaluator.call_args.kwargs["symbol"], "BTCUSDT")
         self.assertIn(summary["action"], {"BUY", "HOLD", "SELL"})
         self.assertIn("btc_", summary["signal"])
         self.assertGreater(float(summary["score"]), 0.0)
