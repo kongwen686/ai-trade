@@ -9,7 +9,7 @@ from http.client import IncompleteRead
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
-from trade_signal_app.binance_client import BinancePublicAPIError, BinanceSpotGateway
+from trade_signal_app.binance_client import BinanceOrderStatusUnknown, BinancePublicAPIError, BinanceSpotGateway
 
 
 class FakeResponse(io.StringIO):
@@ -80,6 +80,23 @@ class BinanceClientTests(unittest.TestCase):
         self.assertTrue(status["can_trade"])
         self.assertEqual(status["quote_available"], 120.5)
         self.assertEqual(len(status["balances"]), 2)
+
+    def test_account_status_fetches_fresh_balance_each_time(self) -> None:
+        responses = [
+            {"canTrade": True, "balances": [{"asset": "USDT", "free": "10", "locked": "0"}]},
+            {"canTrade": True, "balances": [{"asset": "USDT", "free": "25", "locked": "0"}]},
+        ]
+        with patch(
+            "trade_signal_app.binance_client.urlopen",
+            side_effect=[FakeResponse(json.dumps(payload)) for payload in responses],
+        ) as mock_urlopen:
+            gateway = BinanceSpotGateway(ttl_seconds=999, api_key="test-key", api_secret="test-secret")
+            first = gateway.account_status({"USDT"})
+            second = gateway.account_status({"USDT"})
+
+        self.assertEqual(first["quote_available"], 10.0)
+        self.assertEqual(second["quote_available"], 25.0)
+        self.assertEqual(mock_urlopen.call_count, 2)
 
     def test_public_get_retries_incomplete_read(self) -> None:
         with patch(
@@ -215,6 +232,49 @@ class BinanceClientTests(unittest.TestCase):
         self.assertIn("type=MARKET", body)
         self.assertIn("quoteOrderQty=25.5", body)
         self.assertIn("signature=", body)
+
+    def test_market_order_network_failure_is_not_blindly_retried(self) -> None:
+        with patch("trade_signal_app.binance_client.urlopen", side_effect=URLError("connection reset")) as mock_urlopen:
+            gateway = BinanceSpotGateway(api_key="test-key", api_secret="test-secret")
+            with self.assertRaises(BinanceOrderStatusUnknown) as context:
+                gateway.order_market_buy(
+                    symbol="BTCUSDT",
+                    quote_order_qty=25.0,
+                    client_order_id="aitrade-buy-btc-1",
+                )
+
+        self.assertEqual(context.exception.client_order_id, "aitrade-buy-btc-1")
+        self.assertEqual(mock_urlopen.call_count, 1)
+
+    def test_query_order_uses_original_client_order_id(self) -> None:
+        with patch(
+            "trade_signal_app.binance_client.urlopen",
+            return_value=FakeResponse(json.dumps({"orderId": 123, "status": "FILLED"})),
+        ) as mock_urlopen:
+            gateway = BinanceSpotGateway(api_key="test-key", api_secret="test-secret")
+            payload = gateway.query_order(symbol="BTCUSDT", client_order_id="aitrade-buy-btc-1")
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(payload["status"], "FILLED")
+        self.assertEqual(request.get_method(), "GET")
+        self.assertIn("origClientOrderId=aitrade-buy-btc-1", request.full_url)
+
+    def test_stop_loss_sell_uses_exchange_stop_order(self) -> None:
+        with patch(
+            "trade_signal_app.binance_client.urlopen",
+            return_value=FakeResponse(json.dumps({"orderId": 456, "status": "NEW"})),
+        ) as mock_urlopen:
+            gateway = BinanceSpotGateway(api_key="test-key", api_secret="test-secret")
+            gateway.order_stop_loss_sell(
+                symbol="BTCUSDT",
+                quantity=0.01,
+                stop_price=60000.0,
+                client_order_id="aitrade-protect-btc-1",
+            )
+
+        body = mock_urlopen.call_args.args[0].data.decode("utf-8")
+        self.assertIn("type=STOP_LOSS", body)
+        self.assertIn("stopPrice=60000", body)
 
 
 if __name__ == "__main__":

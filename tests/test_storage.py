@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import tempfile
 import unittest
+from datetime import datetime, timezone
 
 from trade_signal_app.storage import LocalDataStore
 
@@ -18,7 +19,7 @@ class LocalDataStoreTests(unittest.TestCase):
                 journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
                 busy_timeout = connection.execute("PRAGMA busy_timeout").fetchone()[0]
 
-        self.assertTrue(all(status["schema_version"] == 3 for status in statuses))
+        self.assertTrue(all(status["schema_version"] == 4 for status in statuses))
         self.assertEqual(journal_mode.lower(), "wal")
         self.assertEqual(busy_timeout, 10_000)
 
@@ -94,6 +95,62 @@ class LocalDataStoreTests(unittest.TestCase):
         self.assertEqual(delivery["attempt_count"], 2)
         self.assertEqual(delivery["metadata"], {"today_trades": 3})
         self.assertTrue(delivery["sent_at"])
+
+    def test_execution_ledger_records_orders_fills_and_net_closed_trade(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LocalDataStore(Path(temp_dir) / "ai_trade.sqlite3")
+            created_at = datetime(2026, 7, 25, tzinfo=timezone.utc).isoformat()
+            store.upsert_trading_events(
+                [
+                    {
+                        "action": "SELL",
+                        "symbol": "BTCUSDT",
+                        "mode": "live",
+                        "status": "filled",
+                        "message": "closed",
+                        "price": 110.0,
+                        "quantity": 0.5,
+                        "quote_notional": 55.0,
+                        "gross_pnl": 5.0,
+                        "fees_quote": 0.11,
+                        "realized_pnl": 4.89,
+                        "realized_pnl_pct": 9.78,
+                        "exit_reason": "take_profit",
+                        "created_at": created_at,
+                        "exchange": "BINANCE",
+                        "position_id": "position-1",
+                        "client_order_id": "sell-1",
+                        "exchange_order_id": "456",
+                        "response": {
+                            "orderId": 456,
+                            "clientOrderId": "sell-1",
+                            "executedQty": "0.5",
+                            "cummulativeQuoteQty": "55",
+                            "position_client_order_id": "position-1",
+                            "fees_quote": 0.11,
+                            "fills": [
+                                {
+                                    "tradeId": 9,
+                                    "price": "110",
+                                    "qty": "0.5",
+                                    "commission": "0.055",
+                                    "commissionAsset": "USDT",
+                                }
+                            ],
+                        },
+                    }
+                ]
+            )
+            status = store.status()
+            with store._connect() as connection:
+                closed = connection.execute("SELECT * FROM closed_trades").fetchone()
+
+        self.assertEqual(status["trading_orders"], 1)
+        self.assertEqual(status["trading_fills"], 1)
+        self.assertEqual(status["closed_trades"], 1)
+        self.assertAlmostEqual(closed["gross_pnl"], 5.0)
+        self.assertAlmostEqual(closed["net_pnl"], 4.89)
+        self.assertAlmostEqual(closed["fees_quote"], 0.11)
 
 
 if __name__ == "__main__":

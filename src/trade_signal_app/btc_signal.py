@@ -50,17 +50,28 @@ def build_btc_signal_summary(
     generated_at: datetime | None = None,
     include_backtests: bool = True,
     market_price: float | None = None,
+    recent_primary_candles: list[Candlestick] | None = None,
+    recent_daily_candles: list[Candlestick] | None = None,
+    recent_entry_candles: list[Candlestick] | None = None,
 ) -> dict[str, object]:
     timeframes = load_btc_timeframes(cache_root=cache_root, exchange=exchange)
     return build_btc_signal_from_candles(
-        primary_candles=timeframes.primary,
-        daily_candles=timeframes.daily,
-        entry_candles=timeframes.entry,
+        primary_candles=_merge_candles(timeframes.primary, recent_primary_candles or []),
+        daily_candles=_merge_candles(timeframes.daily, recent_daily_candles or []),
+        entry_candles=_merge_candles(timeframes.entry, recent_entry_candles or []),
         exchange=exchange,
         generated_at=generated_at,
         include_backtests=include_backtests,
         market_price=market_price,
     )
+
+
+def _merge_candles(historical: list[Candlestick], recent: list[Candlestick]) -> list[Candlestick]:
+    if not recent:
+        return historical
+    by_open_time = {candle.open_time: candle for candle in historical}
+    by_open_time.update({candle.open_time: candle for candle in recent})
+    return sorted(by_open_time.values(), key=lambda candle: candle.open_time)
 
 
 def load_btc_timeframes(*, cache_root: Path, exchange: str = BTC_EXCHANGE) -> BtcTimeframes:

@@ -144,8 +144,13 @@ def _population_stddev_from_prefix(
 def _percentile_rank(values: list[float], current: float) -> float:
     if not values:
         return 50.0
-    below = sum(1 for value in values if value < current)
-    equal = sum(1 for value in values if math.isclose(value, current, rel_tol=1e-9, abs_tol=1e-12))
+    below = 0
+    equal = 0
+    for value in values:
+        if math.isclose(value, current, rel_tol=1e-9, abs_tol=1e-12):
+            equal += 1
+        elif value < current:
+            below += 1
     return ((below + (equal * 0.5)) / len(values)) * 100
 
 

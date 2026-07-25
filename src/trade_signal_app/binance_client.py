@@ -27,6 +27,14 @@ class BinanceSignedAPIError(ValueError):
         self.authentication_failure = authentication_failure
 
 
+class BinanceOrderStatusUnknown(BinanceSignedAPIError):
+    """The exchange may have accepted a non-idempotent request before the connection failed."""
+
+    def __init__(self, message: str, *, client_order_id: str = "") -> None:
+        super().__init__(message, authentication_failure=False)
+        self.client_order_id = client_order_id
+
+
 @dataclass
 class TimedValue:
     expires_at: datetime
@@ -108,6 +116,9 @@ class BinanceSpotGateway:
             raise ValueError("BINANCE_API_KEY / BINANCE_API_SECRET 未配置，无法访问账户级 SIGNED 接口。")
 
         last_error: Exception | None = None
+        normalized_method = method.upper()
+        non_idempotent = normalized_method in {"POST", "DELETE"}
+        client_order_id = str((params or {}).get("newClientOrderId") or (params or {}).get("origClientOrderId") or "")
         for attempt in range(3):
             signed_params = {key: value for key, value in (params or {}).items() if value is not None}
             signed_params["recvWindow"] = self._format_recv_window(self._recv_window_ms)
@@ -120,13 +131,13 @@ class BinanceSpotGateway:
             ).hexdigest()
             body = f"{query}&signature={signature}".encode("utf-8")
             url = f"{self._base_url}{path}"
-            data = body if method.upper() in {"POST", "PUT", "DELETE"} else None
+            data = body if normalized_method in {"POST", "PUT", "DELETE"} else None
             if data is None:
                 url = f"{url}?{body.decode('utf-8')}"
             request = Request(
                 url,
                 data=data,
-                method=method.upper(),
+                method=normalized_method,
                 headers={
                     "User-Agent": "trade-signal-app/0.1",
                     "X-MBX-APIKEY": self._api_key,
@@ -142,6 +153,11 @@ class BinanceSpotGateway:
                 if detail:
                     message = f"{message}，{detail}"
                 retryable = exc.code == 429 or exc.code >= 500
+                if retryable and non_idempotent:
+                    raise BinanceOrderStatusUnknown(
+                        f"{message}，请求结果未知，必须按客户端订单号对账后再决定是否重试。",
+                        client_order_id=client_order_id,
+                    ) from exc
                 if retryable and attempt < 2:
                     last_error = BinanceSignedAPIError(message, authentication_failure=False)
                     time.sleep(0.2 * (attempt + 1))
@@ -149,6 +165,11 @@ class BinanceSpotGateway:
                 raise BinanceSignedAPIError(message, authentication_failure=not retryable) from exc
             except (HTTPException, IncompleteRead, TimeoutError, URLError, OSError, json.JSONDecodeError) as exc:
                 last_error = exc
+                if non_idempotent:
+                    raise BinanceOrderStatusUnknown(
+                        f"Binance SIGNED 下单/撤单请求结果未知：{exc}，必须先查询订单状态。",
+                        client_order_id=client_order_id,
+                    ) from exc
                 if attempt < 2:
                     time.sleep(0.2 * (attempt + 1))
                     continue
@@ -162,6 +183,9 @@ class BinanceSpotGateway:
 
     def _signed_post_json(self, path: str, params: dict[str, object] | None = None) -> object:
         return self._signed_request_json("POST", path, params)
+
+    def _signed_delete_json(self, path: str, params: dict[str, object] | None = None) -> object:
+        return self._signed_request_json("DELETE", path, params)
 
     def exchange_info(self) -> dict:
         cache_key = "exchange_info"
@@ -264,16 +288,18 @@ class BinanceSpotGateway:
         cached = self._cache_get("ticker24hr")
         return cached if isinstance(cached, list) else None
 
-    def account(self, omit_zero_balances: bool = True) -> dict:
+    def account(self, omit_zero_balances: bool = True, *, use_cache: bool = False) -> dict:
         cache_key = f"account:{int(omit_zero_balances)}"
-        cached = self._cache_get(cache_key)
+        cached = self._cache_get(cache_key) if use_cache else None
         if cached is not None:
             return cached  # type: ignore[return-value]
         data = self._signed_get_json(
             "/api/v3/account",
             {"omitZeroBalances": str(omit_zero_balances).lower()},
         )
-        return self._cache_set(cache_key, data)  # type: ignore[return-value]
+        if use_cache:
+            return self._cache_set(cache_key, data)  # type: ignore[return-value]
+        return data  # type: ignore[return-value]
 
     def asset_balance(self, asset: str) -> dict[str, float | str]:
         normalized = asset.upper().strip()
@@ -308,7 +334,7 @@ class BinanceSpotGateway:
                 "quote_available": 0.0,
             }
         try:
-            account = self.account(omit_zero_balances=True)
+            account = self.account(omit_zero_balances=True, use_cache=False)
         except BinanceSignedAPIError as exc:
             return {
                 "exchange": "BINANCE",
@@ -399,6 +425,64 @@ class BinanceSpotGateway:
             "side": "SELL",
             "type": "MARKET",
             "quantity": f"{quantity:.8f}".rstrip("0").rstrip("."),
+            "newOrderRespType": "FULL",
+            "newClientOrderId": client_order_id,
+        }
+        path = "/api/v3/order/test" if test else "/api/v3/order"
+        return self._signed_post_json(path, params)  # type: ignore[return-value]
+
+    def query_order(
+        self,
+        *,
+        symbol: str,
+        order_id: int | str | None = None,
+        client_order_id: str | None = None,
+    ) -> dict:
+        if order_id is None and not client_order_id:
+            raise ValueError("查询订单必须提供 order_id 或 client_order_id。")
+        return self._signed_get_json(
+            "/api/v3/order",
+            {
+                "symbol": symbol.upper(),
+                "orderId": order_id,
+                "origClientOrderId": client_order_id,
+            },
+        )  # type: ignore[return-value]
+
+    def cancel_order(
+        self,
+        *,
+        symbol: str,
+        order_id: int | str | None = None,
+        client_order_id: str | None = None,
+    ) -> dict:
+        if order_id is None and not client_order_id:
+            raise ValueError("撤销订单必须提供 order_id 或 client_order_id。")
+        return self._signed_delete_json(
+            "/api/v3/order",
+            {
+                "symbol": symbol.upper(),
+                "orderId": order_id,
+                "origClientOrderId": client_order_id,
+                "newClientOrderId": None,
+            },
+        )  # type: ignore[return-value]
+
+    def order_stop_loss_sell(
+        self,
+        *,
+        symbol: str,
+        quantity: float,
+        stop_price: float,
+        test: bool = False,
+        client_order_id: str | None = None,
+    ) -> dict:
+        params = {
+            "symbol": symbol.upper(),
+            "side": "SELL",
+            "type": "STOP_LOSS",
+            "quantity": f"{quantity:.8f}".rstrip("0").rstrip("."),
+            "stopPrice": f"{stop_price:.8f}".rstrip("0").rstrip("."),
             "newOrderRespType": "FULL",
             "newClientOrderId": client_order_id,
         }

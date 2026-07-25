@@ -65,6 +65,14 @@ class ExitRuleConfig:
     take_profit_pct: float = 9.0
     cooldown_bars_after_exit: int = 0
     conservative_intrabar: bool = True
+    structure_exits_enabled: bool = True
+    support_stop_buffer_pct: float = 0.6
+    resistance_take_profit_buffer_pct: float = 0.4
+    profit_protection_enabled: bool = True
+    profit_protection_trigger_pct: float = 3.0
+    profit_protection_lock_pct: float = 0.5
+    trailing_stop_pct: float = 2.0
+    trend_hold_enabled: bool = False
 
 
 @dataclass(frozen=True)

@@ -337,7 +337,7 @@ class TradingTests(unittest.TestCase):
             scanner = FakeScanner([_signal(price=100.0)], gateway=gateway)
             trader = AutoTrader(scanner=scanner, state_store=store)
 
-            report = trader.run_once(AutoTradeDefaults(enabled=True, mode="paper", quote_order_qty=50.0, score_threshold=75.0))
+            report = trader.run_once(AutoTradeDefaults(enabled=True, mode="paper", quote_order_qty=50.0, score_threshold=75.0, paper_costs_enabled=False))
 
         self.assertEqual(len(report.open_positions), 1)
         self.assertAlmostEqual(report.open_positions[0].entry_price, 125.0)
@@ -362,7 +362,7 @@ class TradingTests(unittest.TestCase):
             trader = AutoTrader(scanner=scanner, state_store=store)
             trader.set_execution_gateway(execution_gateway)
 
-            report = trader.run_once(AutoTradeDefaults(enabled=True, mode="paper", quote_order_qty=65.0, score_threshold=75.0))
+            report = trader.run_once(AutoTradeDefaults(enabled=True, mode="paper", quote_order_qty=65.0, score_threshold=75.0, paper_costs_enabled=False))
 
         self.assertEqual(len(report.open_positions), 1)
         self.assertAlmostEqual(report.open_positions[0].entry_price, 130.0)
@@ -383,6 +383,7 @@ class TradingTests(unittest.TestCase):
                     score_threshold=75.0,
                     take_profit_pct=2.0,
                     structure_filter_enabled=False,
+                    paper_costs_enabled=False,
                 )
             )
 
@@ -395,6 +396,7 @@ class TradingTests(unittest.TestCase):
                     leverage=5.0,
                     score_threshold=99.0,
                     take_profit_pct=2.0,
+                    paper_costs_enabled=False,
                 )
             )
 
@@ -940,6 +942,7 @@ class TradingTests(unittest.TestCase):
                     score_threshold=75.0,
                     stop_loss_pct=4.0,
                     take_profit_pct=9.0,
+                    paper_costs_enabled=False,
                 )
             )
 
@@ -1035,7 +1038,7 @@ class TradingTests(unittest.TestCase):
             notifier = FakeTradeNotifier()
             trader = AutoTrader(scanner=scanner, state_store=store, trade_notifier=notifier)
 
-            report = trader.run_once(AutoTradeDefaults(enabled=True, mode="paper", score_threshold=99.0))
+            report = trader.run_once(AutoTradeDefaults(enabled=True, mode="paper", score_threshold=99.0, paper_costs_enabled=False))
             stored_events = store.load_events()
 
         self.assertEqual(report.open_positions, [])
@@ -1075,6 +1078,7 @@ class TradingTests(unittest.TestCase):
                     profit_protection_trigger_pct=3.0,
                     profit_protection_lock_pct=0.5,
                     trailing_stop_pct=2.0,
+                    paper_costs_enabled=False,
                 )
             )
             protected_position = store.load()[0]
@@ -1088,6 +1092,7 @@ class TradingTests(unittest.TestCase):
                     profit_protection_trigger_pct=3.0,
                     profit_protection_lock_pct=0.5,
                     trailing_stop_pct=2.0,
+                    paper_costs_enabled=False,
                 )
             )
 
@@ -1400,6 +1405,327 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(report.open_positions[0].quantity, position.quantity)
         self.assertEqual(report.events[0].status, "balance_locked")
         self.assertEqual(gateway.sell_calls, [])
+
+    def test_paper_costs_record_gross_fees_and_net_pnl(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            AutoTrader(scanner=FakeScanner([_signal(price=100.0)]), state_store=store).run_once(
+                AutoTradeDefaults(
+                    enabled=True,
+                    mode="paper",
+                    quote_order_qty=100.0,
+                    paper_costs_enabled=True,
+                    structure_filter_enabled=False,
+                )
+            )
+            report = AutoTrader(scanner=FakeScanner([_signal(price=110.0, score=1.0)]), state_store=store).run_once(
+                AutoTradeDefaults(
+                    enabled=True,
+                    mode="paper",
+                    quote_order_qty=100.0,
+                    max_total_quote_exposure=100.0,
+                    score_threshold=99.0,
+                    paper_costs_enabled=True,
+                )
+            )
+
+        sell = report.events[0]
+        self.assertEqual(sell.status, "paper_filled")
+        self.assertGreater(sell.gross_pnl or 0.0, sell.realized_pnl or 0.0)
+        self.assertGreater(sell.fees_quote, 0.0)
+        self.assertAlmostEqual((sell.gross_pnl or 0.0) - sell.fees_quote, sell.realized_pnl or 0.0)
+
+    def test_risk_sizing_caps_notional_by_equity_and_stop_distance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            report = AutoTrader(scanner=FakeScanner([_signal(price=100.0)]), state_store=store).run_once(
+                AutoTradeDefaults(
+                    enabled=True,
+                    mode="paper",
+                    quote_order_qty=1_000.0,
+                    max_total_quote_exposure=1_000.0,
+                    paper_account_equity=100.0,
+                    risk_per_trade_pct=1.0,
+                    stop_loss_pct=4.0,
+                    paper_costs_enabled=False,
+                    structure_filter_enabled=False,
+                )
+            )
+
+        self.assertAlmostEqual(report.open_positions[0].margin_notional or 0.0, 25.0)
+        self.assertAlmostEqual(report.open_positions[0].quantity, 0.25)
+
+    def test_daily_consecutive_loss_circuit_blocks_new_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            store.append_events(
+                [
+                    TradingEvent(
+                        action="SELL",
+                        symbol=f"LOSS{index}USDT",
+                        mode="paper",
+                        status="paper_filled",
+                        message="loss",
+                        realized_pnl=-1.0,
+                        created_at=now_app_time(),
+                    )
+                    for index in range(3)
+                ]
+            )
+            report = AutoTrader(scanner=FakeScanner([_signal(price=100.0)]), state_store=store).run_once(
+                AutoTradeDefaults(
+                    enabled=True,
+                    mode="paper",
+                    max_consecutive_losses=3,
+                    max_daily_loss_pct=0.0,
+                    max_account_drawdown_pct=0.0,
+                )
+            )
+
+        self.assertEqual(report.open_positions, [])
+        self.assertEqual(report.events[0].status, "portfolio_risk_blocked")
+
+    def test_pending_live_buy_is_recovered_without_resubmission(self) -> None:
+        class ReconcileGateway(FakeGateway):
+            def __init__(self) -> None:
+                super().__init__()
+                self.query_calls = []
+
+            def query_order(self, **kwargs):
+                self.query_calls.append(kwargs)
+                return {
+                    "orderId": 999,
+                    "clientOrderId": kwargs["client_order_id"],
+                    "status": "FILLED",
+                    "executedQty": "0.5",
+                    "cummulativeQuoteQty": "50",
+                    "fills": [],
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            provisional = TradingPosition(
+                symbol="BTCUSDT",
+                quantity=0.5,
+                entry_price=100.0,
+                quote_notional=50.0,
+                score=89.0,
+                grade="A",
+                opened_at=now_app_time(),
+                stop_price=96.0,
+                take_profit_price=109.0,
+                mode="live",
+                client_order_id="pending-buy-1",
+                position_id="pending-buy-1",
+            )
+            store.append_events(
+                [
+                    TradingEvent(
+                        action="BUY",
+                        symbol="BTCUSDT",
+                        mode="live",
+                        status="status_unknown",
+                        message="unknown",
+                        price=100.0,
+                        quantity=0.5,
+                        quote_notional=50.0,
+                        position_id="pending-buy-1",
+                        client_order_id="pending-buy-1",
+                        response={"provisional_position": TradingStateStore._position_to_dict(provisional)},
+                    )
+                ]
+            )
+            gateway = ReconcileGateway()
+            trader = AutoTrader(scanner=FakeScanner([_signal(score=1.0)], gateway=gateway), state_store=store)
+            with patch.dict("os.environ", {"AI_TRADE_LIVE_CONFIRM": LIVE_CONFIRM_VALUE}):
+                report = trader.run_once(
+                    AutoTradeDefaults(enabled=True, mode="live", order_test_only=False, score_threshold=99.0)
+                )
+
+        self.assertEqual(len(report.open_positions), 1)
+        self.assertEqual(report.events[0].status, "reconciled_filled")
+        self.assertEqual(gateway.buy_calls, [])
+        self.assertEqual(gateway.query_calls[0]["client_order_id"], "pending-buy-1")
+
+    def test_partial_live_buy_is_canceled_before_position_is_opened(self) -> None:
+        class PartialBuyGateway(FakeGateway):
+            def __init__(self) -> None:
+                super().__init__(
+                    buy_response={
+                        "orderId": 321,
+                        "clientOrderId": "partial-buy",
+                        "status": "PARTIALLY_FILLED",
+                        "executedQty": "0.2",
+                        "cummulativeQuoteQty": "20",
+                        "fills": [],
+                    }
+                )
+                self.cancel_calls = []
+
+            def cancel_order(self, **kwargs):
+                self.cancel_calls.append(kwargs)
+                return {
+                    **self.buy_response,
+                    "status": "CANCELED",
+                }
+
+            def query_order(self, **kwargs):
+                return {
+                    **self.buy_response,
+                    "status": "CANCELED",
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            gateway = PartialBuyGateway()
+            trader = AutoTrader(
+                scanner=FakeScanner([_signal()], gateway=gateway),
+                state_store=TradingStateStore(Path(temp_dir) / "state.json"),
+            )
+            with patch.dict("os.environ", {"AI_TRADE_LIVE_CONFIRM": LIVE_CONFIRM_VALUE}):
+                report = trader.run_once(
+                    AutoTradeDefaults(enabled=True, mode="live", order_test_only=False)
+                )
+
+        self.assertEqual(len(gateway.cancel_calls), 1)
+        self.assertEqual(report.events[0].status, "partially_filled")
+        self.assertAlmostEqual(report.open_positions[0].quantity, 0.2)
+
+    def test_risk_sized_entry_can_use_remaining_exposure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            store.save(
+                [
+                    TradingPosition(
+                        symbol="ETHUSDT",
+                        quantity=9.0,
+                        entry_price=100.0,
+                        quote_notional=900.0,
+                        score=80.0,
+                        grade="A",
+                        opened_at=now_app_time(),
+                        stop_price=96.0,
+                        take_profit_price=109.0,
+                        margin_notional=900.0,
+                    )
+                ]
+            )
+            report = AutoTrader(scanner=FakeScanner([_signal()]), state_store=store).run_once(
+                AutoTradeDefaults(
+                    enabled=True,
+                    mode="paper",
+                    quote_order_qty=1_000.0,
+                    max_total_quote_exposure=1_000.0,
+                    paper_account_equity=100.0,
+                    risk_per_trade_pct=1.0,
+                    stop_loss_pct=4.0,
+                    paper_costs_enabled=False,
+                    structure_filter_enabled=False,
+                )
+            )
+
+        self.assertEqual(len(report.open_positions), 2)
+        self.assertAlmostEqual(report.open_positions[-1].margin_notional or 0.0, 25.0)
+
+    def test_exchange_stop_fill_reconciles_and_closes_position(self) -> None:
+        class ProtectionGateway(FakeGateway):
+            def query_order(self, **kwargs):
+                return {
+                    "orderId": 888,
+                    "clientOrderId": kwargs["client_order_id"],
+                    "status": "FILLED",
+                    "executedQty": "0.5",
+                    "cummulativeQuoteQty": "48",
+                    "fills": [],
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            store.save(
+                [
+                    TradingPosition(
+                        symbol="BTCUSDT",
+                        quantity=0.5,
+                        entry_price=100.0,
+                        quote_notional=50.0,
+                        score=82.0,
+                        grade="A",
+                        opened_at=now_app_time(),
+                        stop_price=96.0,
+                        take_profit_price=109.0,
+                        mode="live",
+                        position_id="position-1",
+                        protection_order_id="888",
+                        protection_client_order_id="protect-1",
+                        protection_stop_price=96.0,
+                        protection_status="NEW",
+                    )
+                ]
+            )
+            gateway = ProtectionGateway()
+            trader = AutoTrader(scanner=FakeScanner([_signal(score=1.0, price=97.0)], gateway=gateway), state_store=store)
+            with patch.dict("os.environ", {"AI_TRADE_LIVE_CONFIRM": LIVE_CONFIRM_VALUE}):
+                report = trader.run_once(
+                    AutoTradeDefaults(enabled=True, mode="live", order_test_only=False, score_threshold=99.0)
+                )
+
+        self.assertEqual(report.open_positions, [])
+        self.assertEqual(report.events[0].status, "reconciled_filled")
+        self.assertEqual(report.events[0].exit_reason, "exchange_stop_loss")
+        self.assertAlmostEqual(report.events[0].realized_pnl or 0.0, -2.0)
+        self.assertEqual(gateway.sell_calls, [])
+
+    def test_exchange_stop_partial_fill_reduces_position_once(self) -> None:
+        class PartialProtectionGateway(FakeGateway):
+            def query_order(self, **kwargs):
+                return {
+                    "orderId": 888,
+                    "clientOrderId": kwargs["client_order_id"],
+                    "status": "PARTIALLY_FILLED",
+                    "executedQty": "0.2",
+                    "cummulativeQuoteQty": "19.2",
+                    "stopPrice": "96",
+                    "fills": [],
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TradingStateStore(Path(temp_dir) / "state.json")
+            store.save(
+                [
+                    TradingPosition(
+                        symbol="BTCUSDT",
+                        quantity=0.5,
+                        entry_price=100.0,
+                        quote_notional=50.0,
+                        score=82.0,
+                        grade="A",
+                        opened_at=now_app_time(),
+                        stop_price=96.0,
+                        take_profit_price=109.0,
+                        mode="live",
+                        position_id="position-1",
+                        protection_order_id="888",
+                        protection_client_order_id="protect-1",
+                        protection_stop_price=96.0,
+                        protection_status="NEW",
+                    )
+                ]
+            )
+            trader = AutoTrader(
+                scanner=FakeScanner([_signal(score=1.0, price=97.0)], gateway=PartialProtectionGateway()),
+                state_store=store,
+            )
+            with patch.dict("os.environ", {"AI_TRADE_LIVE_CONFIRM": LIVE_CONFIRM_VALUE}):
+                first = trader.run_once(
+                    AutoTradeDefaults(enabled=True, mode="live", order_test_only=False, score_threshold=99.0)
+                )
+                first_remaining_quantity = first.open_positions[0].quantity
+                second = trader.run_once(
+                    AutoTradeDefaults(enabled=True, mode="live", order_test_only=False, score_threshold=99.0)
+                )
+
+        self.assertEqual(first.events[0].status, "partially_filled")
+        self.assertAlmostEqual(first_remaining_quantity, 0.3)
+        self.assertAlmostEqual(second.open_positions[0].quantity, 0.3)
 
 
 if __name__ == "__main__":

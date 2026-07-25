@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import argparse
 import json
 import os
-from threading import Event, RLock, Thread
+from threading import Event, Lock, RLock, Thread
 from time import monotonic
 from urllib.parse import parse_qs, urlencode, urlparse
 from uuid import uuid4
@@ -67,6 +67,7 @@ from .views import normalize_language, render_backtest_page, render_btc_signal_p
 RUNTIME_CONFIG_PATH = BASE_DIR / "data" / "runtime_config.json"
 TRADING_STATE_PATH = BASE_DIR / "data" / "trading_state.json"
 LOCAL_DATABASE_PATH = BASE_DIR / "data" / "ai_trade.sqlite3"
+AUTO_TRADE_LOOP_STATE_PATH = BASE_DIR / "data" / "auto_trade_loop.json"
 COMMUNITY_INTELLIGENCE_CACHE_PATH = BASE_DIR / "data" / "community_intelligence_cache.json"
 TRADINGVIEW_CACHE_DIR = BASE_DIR / "data" / "tradingview_klines"
 APP_STATE = AppState(SETTINGS, RUNTIME_CONFIG_PATH)
@@ -109,6 +110,7 @@ TRADING_STATUS_FILLED_EVENT_LIMIT = 5000
 TRADING_STATUS_DIAGNOSTIC_EVENT_LIMIT = 500
 REALTIME_MARKET_MAX_SYMBOLS = 40
 _PAPER_AUTO_LOCK = RLock()
+_TRADING_EXECUTION_LOCK = Lock()
 _CARRY_PAPER_LOCK = RLock()
 _PAPER_AUTO_STOP_EVENT: Event | None = None
 _PAPER_AUTO_THREAD: Thread | None = None
@@ -688,12 +690,27 @@ def _build_btc_signal_summary(
     include_backtests: bool = True,
 ) -> dict[str, object]:
     runtime_config, scanner = APP_STATE.snapshot()
+    gateway = getattr(scanner, "gateway", None)
+    recent_timeframes: dict[str, list[object]] = {}
+    klines = getattr(gateway, "klines", None)
+    if callable(klines):
+        for interval, key in (("4h", "primary"), ("1d", "daily"), ("1h", "entry")):
+            try:
+                recent_timeframes[key] = klines(BTC_SYMBOL, interval, 300)
+            except Exception:  # noqa: BLE001
+                recent_timeframes[key] = []
+    recent_kwargs = {
+        "recent_primary_candles": recent_timeframes.get("primary"),
+        "recent_daily_candles": recent_timeframes.get("daily"),
+        "recent_entry_candles": recent_timeframes.get("entry"),
+    } if recent_timeframes else {}
     return build_btc_signal_summary(
         cache_root=TRADINGVIEW_CACHE_DIR,
         exchange=runtime_config.tradingview_exchange or "BINANCE",
         generated_at=now,
         include_backtests=include_backtests,
         market_price=_live_price_for_symbol(scanner, BTC_SYMBOL),
+        **recent_kwargs,
     )
 
 
@@ -2242,7 +2259,7 @@ def _live_readiness_block_event(config: AutoTradeDefaults) -> TradingEvent | Non
     )
 
 
-def _run_trading_once(*, force_paper: bool = False) -> dict[str, object]:
+def _run_trading_once_unlocked(*, force_paper: bool = False) -> dict[str, object]:
     runtime_config, scanner = APP_STATE.snapshot()
     autotrade_config = runtime_config.autotrade_defaults
     if force_paper:
@@ -2312,6 +2329,65 @@ def _run_trading_once(*, force_paper: bool = False) -> dict[str, object]:
     )
     latest_prices = _latest_prices_for_open_positions(report.open_positions, scanner)
     return _serialize_trading_report(report, latest_prices=latest_prices)
+
+
+def _run_trading_once(*, force_paper: bool = False) -> dict[str, object]:
+    if not _TRADING_EXECUTION_LOCK.acquire(blocking=False):
+        runtime_config, _ = APP_STATE.snapshot()
+        positions = _trading_store().load()
+        mode = "paper" if force_paper else "+".join(_active_autotrade_modes(runtime_config.autotrade_defaults)) or runtime_config.autotrade_defaults.mode
+        return _serialize_trading_report(
+            TradingRunReport(
+                enabled=runtime_config.autotrade_defaults.enabled,
+                mode=mode,
+                scanned_symbols=0,
+                returned_signals=0,
+                open_positions=positions,
+                events=[
+                    TradingEvent(
+                        action="SKIP",
+                        symbol="*",
+                        mode=mode,
+                        status="trading_run_in_progress",
+                        message="已有交易循环正在执行，本次请求已跳过，避免重复下单。",
+                    )
+                ],
+            )
+        )
+    try:
+        return _run_trading_once_unlocked(force_paper=force_paper)
+    finally:
+        _TRADING_EXECUTION_LOCK.release()
+
+
+def _persist_auto_loop_state(*, active: bool, interval_seconds: int, force_paper: bool) -> None:
+    AUTO_TRADE_LOOP_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "active": active,
+        "interval_seconds": max(PAPER_AUTO_MIN_INTERVAL_SECONDS, int(interval_seconds)),
+        "force_paper": bool(force_paper),
+        "updated_at": now_app_time().isoformat(),
+    }
+    temporary_path = AUTO_TRADE_LOOP_STATE_PATH.with_suffix(".json.tmp")
+    temporary_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary_path.replace(AUTO_TRADE_LOOP_STATE_PATH)
+
+
+def _restore_auto_loop_state() -> None:
+    if not AUTO_TRADE_LOOP_STATE_PATH.exists():
+        return
+    try:
+        payload = json.loads(AUTO_TRADE_LOOP_STATE_PATH.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or not bool(payload.get("active")):
+            return
+        _start_paper_auto_trading(
+            int(payload.get("interval_seconds") or PAPER_AUTO_DEFAULT_INTERVAL_SECONDS),
+            force_paper=bool(payload.get("force_paper", True)),
+            run_immediately=False,
+        )
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        print(f"Auto trade loop state restore failed: {exc}", flush=True)
 
 
 def _paper_auto_status_payload() -> dict[str, object]:
@@ -2423,6 +2499,7 @@ def _start_paper_auto_trading(
             daemon=True,
         )
         _PAPER_AUTO_THREAD.start()
+        _persist_auto_loop_state(active=True, interval_seconds=interval_seconds, force_paper=force_paper)
         return _paper_auto_status_payload()
 
 
@@ -2442,7 +2519,13 @@ def _stop_paper_auto_trading() -> dict[str, object]:
                     "stopped_at": now_app_time().isoformat(),
                 }
             )
-        return _paper_auto_status_payload()
+        status = _paper_auto_status_payload()
+    _persist_auto_loop_state(
+        active=False,
+        interval_seconds=int(status.get("interval_seconds") or PAPER_AUTO_DEFAULT_INTERVAL_SECONDS),
+        force_paper=bool(status.get("force_paper", True)),
+    )
+    return status
 
 
 def _serialize_intelligence_snapshot(snapshot: IntelligenceSnapshot) -> dict[str, object]:
@@ -4872,6 +4955,7 @@ def run(*, host: str | None = None, port: int | None = None) -> None:
     server = ThreadingHTTPServer((resolved_host, resolved_port), RequestHandler)
     _start_feishu_daily_report_scheduler()
     _start_community_intelligence_scheduler()
+    _restore_auto_loop_state()
     print(f"Serving on http://{resolved_host}:{resolved_port}", flush=True)
     try:
         server.serve_forever()

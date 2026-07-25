@@ -719,6 +719,14 @@ def render_settings_page(
           <label><span>Quote Order Qty</span><input type="number" step="0.01" min="0.01" name="autotrade_quote_order_qty" value="{float(params['autotrade_quote_order_qty']):.2f}" /></label>
           <label><span>Leverage</span><input type="number" step="0.1" min="1" max="20" name="autotrade_leverage" value="{float(params.get('autotrade_leverage', 1.0)):.1f}" /></label>
           <label><span>Risk Per Trade %</span><input type="number" step="0.1" min="0.1" max="100" name="autotrade_risk_per_trade_pct" value="{float(params.get('autotrade_risk_per_trade_pct', 4.0)):.1f}" /></label>
+          <label class="inline-check"><input type="hidden" name="autotrade_risk_sizing_enabled" value="0" /><input type="checkbox" name="autotrade_risk_sizing_enabled" value="1" {"checked" if params.get("autotrade_risk_sizing_enabled", True) else ""} /><span>启用按净值与止损距离定仓</span></label>
+          <label><span>模拟账户初始净值</span><input type="number" step="0.01" min="0.01" name="autotrade_paper_account_equity" value="{float(params.get('autotrade_paper_account_equity', 1000.0)):.2f}" /></label>
+          <label><span>单日最大亏损 %</span><input type="number" step="0.1" min="0" max="100" name="autotrade_max_daily_loss_pct" value="{float(params.get('autotrade_max_daily_loss_pct', 3.0)):.1f}" /></label>
+          <label><span>最大连续亏损笔数</span><input type="number" min="0" name="autotrade_max_consecutive_losses" value="{int(params.get('autotrade_max_consecutive_losses', 3))}" /></label>
+          <label><span>账户最大回撤 %</span><input type="number" step="0.1" min="0" max="100" name="autotrade_max_account_drawdown_pct" value="{float(params.get('autotrade_max_account_drawdown_pct', 10.0)):.1f}" /></label>
+          <label class="inline-check"><input type="hidden" name="autotrade_paper_costs_enabled" value="0" /><input type="checkbox" name="autotrade_paper_costs_enabled" value="1" {"checked" if params.get("autotrade_paper_costs_enabled", True) else ""} /><span>模拟成交计入手续费与滑点</span></label>
+          <label><span>模拟手续费 bps</span><input type="number" step="0.1" min="0" name="autotrade_paper_fee_bps" value="{float(params.get('autotrade_paper_fee_bps', 10.0)):.1f}" /></label>
+          <label><span>模拟滑点 bps</span><input type="number" step="0.1" min="0" name="autotrade_paper_slippage_bps" value="{float(params.get('autotrade_paper_slippage_bps', 5.0)):.1f}" /></label>
           <label><span>Exit Profile</span><select name="autotrade_exit_profile">{_option_with_label("balanced", "balanced", str(params.get("autotrade_exit_profile", "balanced")))}{_option_with_label("leveraged_conservative", "leveraged conservative", str(params.get("autotrade_exit_profile", "balanced")))}{_option_with_label("trend_following", "trend following", str(params.get("autotrade_exit_profile", "balanced")))}</select></label>
           <label><span>Max Open Positions</span><input type="number" min="1" name="autotrade_max_open_positions" value="{int(params['autotrade_max_open_positions'])}" /></label>
           <label><span>Max Total Exposure</span><input type="number" step="0.01" min="0.01" name="autotrade_max_total_quote_exposure" value="{float(params['autotrade_max_total_quote_exposure']):.2f}" /></label>
@@ -774,6 +782,7 @@ def render_settings_page(
           <label><span>Low Liquidity Min Score</span><input type="number" min="0" max="100" step="0.1" name="autotrade_emergency_low_liquidity_min_score" value="{float(params.get('autotrade_emergency_low_liquidity_min_score', 85.0)):.1f}" /></label>
           <label><span>Cooldown Minutes</span><input type="number" min="0" name="autotrade_cooldown_minutes" value="{int(params['autotrade_cooldown_minutes'])}" /></label>
           <label class="inline-check"><input type="hidden" name="autotrade_order_test_only" value="0" /><input type="checkbox" name="autotrade_order_test_only" value="1" {"checked" if params["autotrade_order_test_only"] else ""} /><span>Use exchange order precheck/test</span></label>
+          <label class="inline-check"><input type="hidden" name="autotrade_exchange_protection_enabled" value="0" /><input type="checkbox" name="autotrade_exchange_protection_enabled" value="1" {"checked" if params.get("autotrade_exchange_protection_enabled") else ""} /><span>启用 Binance 交易所原生止损保护单</span></label>
           </div>
           </div>
           <div class="settings-group">

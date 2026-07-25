@@ -145,6 +145,12 @@ def _validate_runtime_config(config: RuntimeConfig) -> None:
     _validate_range(autotrade.quote_order_qty, "Auto Trade Quote Order Qty", minimum=0.01)
     _validate_range(autotrade.leverage, "Auto Trade Leverage", minimum=1, maximum=20)
     _validate_range(autotrade.risk_per_trade_pct, "Auto Trade Risk Per Trade", minimum=0.1, maximum=100)
+    _validate_range(autotrade.paper_account_equity, "Paper Account Equity", minimum=0.01)
+    _validate_range(autotrade.max_daily_loss_pct, "Auto Trade Max Daily Loss", minimum=0, maximum=100)
+    _validate_range(autotrade.max_consecutive_losses, "Auto Trade Max Consecutive Losses", minimum=0)
+    _validate_range(autotrade.max_account_drawdown_pct, "Auto Trade Max Account Drawdown", minimum=0, maximum=100)
+    _validate_range(autotrade.paper_fee_bps, "Paper Fee Bps", minimum=0)
+    _validate_range(autotrade.paper_slippage_bps, "Paper Slippage Bps", minimum=0)
     _validate_range(autotrade.max_open_positions, "Auto Trade Max Open Positions", minimum=1)
     _validate_range(autotrade.max_total_quote_exposure, "Auto Trade Max Exposure", minimum=0.01)
     _validate_range(autotrade.score_threshold, "Auto Trade Score Threshold", minimum=0, maximum=100)
@@ -392,6 +398,14 @@ def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "autotrade_quote_order_qty": autotrade.quote_order_qty,
         "autotrade_leverage": autotrade.leverage,
         "autotrade_risk_per_trade_pct": autotrade.risk_per_trade_pct,
+        "autotrade_risk_sizing_enabled": autotrade.risk_sizing_enabled,
+        "autotrade_paper_account_equity": autotrade.paper_account_equity,
+        "autotrade_max_daily_loss_pct": autotrade.max_daily_loss_pct,
+        "autotrade_max_consecutive_losses": autotrade.max_consecutive_losses,
+        "autotrade_max_account_drawdown_pct": autotrade.max_account_drawdown_pct,
+        "autotrade_paper_costs_enabled": autotrade.paper_costs_enabled,
+        "autotrade_paper_fee_bps": autotrade.paper_fee_bps,
+        "autotrade_paper_slippage_bps": autotrade.paper_slippage_bps,
         "autotrade_exit_profile": autotrade.exit_profile,
         "autotrade_max_open_positions": autotrade.max_open_positions,
         "autotrade_max_total_quote_exposure": autotrade.max_total_quote_exposure,
@@ -442,6 +456,7 @@ def _settings_params_from_config(config: RuntimeConfig) -> dict[str, object]:
         "autotrade_emergency_low_liquidity_min_score": autotrade.emergency_low_liquidity_min_score,
         "autotrade_cooldown_minutes": autotrade.cooldown_minutes,
         "autotrade_order_test_only": autotrade.order_test_only,
+        "autotrade_exchange_protection_enabled": autotrade.exchange_protection_enabled,
         "intelligence_enabled": intelligence.enabled,
         "intelligence_llm_enabled": intelligence.llm_enabled,
         "intelligence_llm_provider": intelligence.llm_provider,
@@ -751,6 +766,14 @@ def _build_runtime_config(form: dict[str, list[str]], *, current_config: Runtime
             quote_order_qty=_parse_float_value(_get_first(form, "autotrade_quote_order_qty", str(current_config.autotrade_defaults.quote_order_qty)), "Auto Trade Quote Order Qty"),
             leverage=_parse_float_value(_get_first(form, "autotrade_leverage", str(current_config.autotrade_defaults.leverage)), "Auto Trade Leverage"),
             risk_per_trade_pct=_parse_float_value(_get_first(form, "autotrade_risk_per_trade_pct", str(current_config.autotrade_defaults.risk_per_trade_pct)), "Auto Trade Risk Per Trade"),
+            risk_sizing_enabled=_runtime_bool(form, "autotrade_risk_sizing_enabled", current_config.autotrade_defaults.risk_sizing_enabled),
+            paper_account_equity=_parse_float_value(_get_first(form, "autotrade_paper_account_equity", str(current_config.autotrade_defaults.paper_account_equity)), "Paper Account Equity"),
+            max_daily_loss_pct=_parse_float_value(_get_first(form, "autotrade_max_daily_loss_pct", str(current_config.autotrade_defaults.max_daily_loss_pct)), "Auto Trade Max Daily Loss"),
+            max_consecutive_losses=_parse_int_value(_get_first(form, "autotrade_max_consecutive_losses", str(current_config.autotrade_defaults.max_consecutive_losses)), "Auto Trade Max Consecutive Losses"),
+            max_account_drawdown_pct=_parse_float_value(_get_first(form, "autotrade_max_account_drawdown_pct", str(current_config.autotrade_defaults.max_account_drawdown_pct)), "Auto Trade Max Account Drawdown"),
+            paper_costs_enabled=_runtime_bool(form, "autotrade_paper_costs_enabled", current_config.autotrade_defaults.paper_costs_enabled),
+            paper_fee_bps=_parse_float_value(_get_first(form, "autotrade_paper_fee_bps", str(current_config.autotrade_defaults.paper_fee_bps)), "Paper Fee Bps"),
+            paper_slippage_bps=_parse_float_value(_get_first(form, "autotrade_paper_slippage_bps", str(current_config.autotrade_defaults.paper_slippage_bps)), "Paper Slippage Bps"),
             exit_profile=_get_first(form, "autotrade_exit_profile", current_config.autotrade_defaults.exit_profile).strip() or "balanced",
             max_open_positions=_parse_int_value(_get_first(form, "autotrade_max_open_positions", str(current_config.autotrade_defaults.max_open_positions)), "Auto Trade Max Open Positions"),
             max_total_quote_exposure=_parse_float_value(_get_first(form, "autotrade_max_total_quote_exposure", str(current_config.autotrade_defaults.max_total_quote_exposure)), "Auto Trade Max Exposure"),
@@ -891,6 +914,7 @@ def _build_runtime_config(form: dict[str, list[str]], *, current_config: Runtime
             emergency_low_liquidity_min_score=_parse_float_value(_get_first(form, "autotrade_emergency_low_liquidity_min_score", str(current_config.autotrade_defaults.emergency_low_liquidity_min_score)), "Auto Trade Emergency Low Liquidity Score"),
             cooldown_minutes=_parse_int_value(_get_first(form, "autotrade_cooldown_minutes", str(current_config.autotrade_defaults.cooldown_minutes)), "Auto Trade Cooldown"),
             order_test_only=_runtime_bool(form, "autotrade_order_test_only", current_config.autotrade_defaults.order_test_only),
+            exchange_protection_enabled=_runtime_bool(form, "autotrade_exchange_protection_enabled", current_config.autotrade_defaults.exchange_protection_enabled),
         ),
         carry_paper_defaults=CarryPaperDefaults(
             enabled=_runtime_bool(form, "carry_paper_enabled", current_config.carry_paper_defaults.enabled),

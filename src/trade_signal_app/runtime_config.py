@@ -246,6 +246,14 @@ class AutoTradeDefaults:
     quote_order_qty: float = 25.0
     leverage: float = 1.0
     risk_per_trade_pct: float = 4.0
+    risk_sizing_enabled: bool = True
+    paper_account_equity: float = 1_000.0
+    max_daily_loss_pct: float = 3.0
+    max_consecutive_losses: int = 3
+    max_account_drawdown_pct: float = 10.0
+    paper_costs_enabled: bool = True
+    paper_fee_bps: float = 10.0
+    paper_slippage_bps: float = 5.0
     exit_profile: str = "balanced"
     max_open_positions: int = 3
     max_total_quote_exposure: float = 100.0
@@ -296,6 +304,7 @@ class AutoTradeDefaults:
     emergency_low_liquidity_min_score: float = 85.0
     cooldown_minutes: int = 240
     order_test_only: bool = True
+    exchange_protection_enabled: bool = False
 
 
 @dataclass

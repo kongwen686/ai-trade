@@ -9,7 +9,7 @@ from threading import RLock
 
 from .time_utils import now_app_time
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 SQLITE_BUSY_TIMEOUT_MS = 10_000
 _INITIALIZE_LOCK = RLock()
 _INITIALIZED_PATHS: set[Path] = set()
@@ -119,6 +119,72 @@ class LocalDataStore:
 
                 CREATE INDEX IF NOT EXISTS idx_trading_positions_symbol
                   ON trading_positions(symbol);
+
+                CREATE TABLE IF NOT EXISTS trading_orders (
+                  order_uid TEXT PRIMARY KEY,
+                  event_uid TEXT NOT NULL,
+                  position_uid TEXT NOT NULL DEFAULT '',
+                  exchange TEXT NOT NULL,
+                  mode TEXT NOT NULL,
+                  symbol TEXT NOT NULL,
+                  side TEXT NOT NULL,
+                  order_type TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  client_order_id TEXT NOT NULL DEFAULT '',
+                  exchange_order_id TEXT NOT NULL DEFAULT '',
+                  requested_quantity REAL,
+                  executed_quantity REAL,
+                  quote_quantity REAL,
+                  average_price REAL,
+                  fee_quote REAL NOT NULL DEFAULT 0,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  payload_json TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_trading_orders_symbol_created
+                  ON trading_orders(symbol, created_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_trading_orders_client_id
+                  ON trading_orders(exchange, client_order_id)
+                  WHERE client_order_id <> '';
+
+                CREATE TABLE IF NOT EXISTS trading_fills (
+                  fill_uid TEXT PRIMARY KEY,
+                  order_uid TEXT NOT NULL,
+                  exchange_trade_id TEXT NOT NULL DEFAULT '',
+                  price REAL NOT NULL,
+                  quantity REAL NOT NULL,
+                  quote_quantity REAL NOT NULL,
+                  commission REAL NOT NULL DEFAULT 0,
+                  commission_asset TEXT NOT NULL DEFAULT '',
+                  commission_quote REAL NOT NULL DEFAULT 0,
+                  filled_at TEXT NOT NULL,
+                  payload_json TEXT NOT NULL,
+                  FOREIGN KEY(order_uid) REFERENCES trading_orders(order_uid) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_trading_fills_order
+                  ON trading_fills(order_uid);
+
+                CREATE TABLE IF NOT EXISTS closed_trades (
+                  trade_uid TEXT PRIMARY KEY,
+                  position_uid TEXT NOT NULL DEFAULT '',
+                  symbol TEXT NOT NULL,
+                  mode TEXT NOT NULL,
+                  exchange TEXT NOT NULL,
+                  exit_order_uid TEXT NOT NULL,
+                  exit_reason TEXT NOT NULL DEFAULT '',
+                  gross_pnl REAL,
+                  fees_quote REAL NOT NULL DEFAULT 0,
+                  net_pnl REAL,
+                  net_pnl_pct REAL,
+                  closed_at TEXT NOT NULL,
+                  payload_json TEXT NOT NULL,
+                  FOREIGN KEY(exit_order_uid) REFERENCES trading_orders(order_uid) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_closed_trades_mode_closed
+                  ON closed_trades(mode, closed_at);
 
                 CREATE TABLE IF NOT EXISTS backtest_runs (
                   run_uid TEXT PRIMARY KEY,
@@ -264,6 +330,173 @@ class LocalDataStore:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
+            )
+        self._upsert_execution_ledger(payloads)
+
+    def _upsert_execution_ledger(self, payloads: list[dict[str, object]]) -> None:
+        trade_payloads = [
+            payload
+            for payload in payloads
+            if str(payload.get("action") or "").upper() in {"BUY", "SELL"}
+        ]
+        if not trade_payloads:
+            return
+        updated_at = now_app_time().isoformat()
+        order_rows: list[tuple[object, ...]] = []
+        fill_rows: list[tuple[object, ...]] = []
+        closed_rows: list[tuple[object, ...]] = []
+        for payload in trade_payloads:
+            action = str(payload.get("action") or "").upper()
+            response = payload.get("response") if isinstance(payload.get("response"), dict) else {}
+            created_at = str(payload.get("created_at") or updated_at)
+            event_identity = {
+                "action": payload.get("action"),
+                "symbol": payload.get("symbol"),
+                "mode": payload.get("mode"),
+                "status": payload.get("status"),
+                "created_at": payload.get("created_at"),
+                "price": payload.get("price"),
+                "quantity": payload.get("quantity"),
+                "realized_pnl": payload.get("realized_pnl"),
+                "message": payload.get("message"),
+                "exchange": payload.get("exchange"),
+            }
+            event_uid = _hash_payload(event_identity)
+            client_order_id = str(
+                payload.get("client_order_id")
+                or response.get("clientOrderId")
+                or response.get("origClientOrderId")
+                or ""
+            )
+            exchange_order_id = str(payload.get("exchange_order_id") or response.get("orderId") or "")
+            order_uid = _hash_payload(
+                {
+                    "exchange": str(payload.get("exchange") or "BINANCE").upper(),
+                    "client_order_id": client_order_id,
+                    "exchange_order_id": exchange_order_id,
+                    "event_uid": "" if client_order_id or exchange_order_id else event_uid,
+                }
+            )
+            position_uid = str(
+                payload.get("position_id")
+                or response.get("position_client_order_id")
+                or (client_order_id if action == "BUY" else "")
+            )
+            executed_quantity = _float_or_none(response.get("executedQty"))
+            if executed_quantity is None and str(payload.get("status") or "") in {"filled", "paper_filled", "partially_filled"}:
+                executed_quantity = _float_or_none(payload.get("quantity"))
+            quote_quantity = _float_or_none(response.get("cummulativeQuoteQty"))
+            if quote_quantity is None:
+                quote_quantity = _float_or_none(payload.get("quote_notional"))
+            average_price = _float_or_none(payload.get("price"))
+            if executed_quantity and quote_quantity:
+                average_price = quote_quantity / executed_quantity
+            fees_quote = float(payload.get("fees_quote") or response.get("fees_quote") or 0.0)
+            order_rows.append(
+                (
+                    order_uid,
+                    event_uid,
+                    position_uid,
+                    str(payload.get("exchange") or "BINANCE").upper(),
+                    str(payload.get("mode") or "paper"),
+                    str(payload.get("symbol") or "").upper(),
+                    action,
+                    str(response.get("type") or ("PAPER_MARKET" if str(payload.get("mode")) == "paper" else "MARKET")),
+                    str(payload.get("status") or ""),
+                    client_order_id,
+                    exchange_order_id,
+                    _float_or_none(payload.get("quantity")),
+                    executed_quantity,
+                    quote_quantity,
+                    average_price,
+                    fees_quote,
+                    created_at,
+                    updated_at,
+                    _json_dumps(payload),
+                )
+            )
+            fills = response.get("fills") if isinstance(response.get("fills"), list) else []
+            for index, fill in enumerate(fills):
+                if not isinstance(fill, dict):
+                    continue
+                fill_price = float(fill.get("price") or 0.0)
+                fill_quantity = float(fill.get("qty") or 0.0)
+                commission = float(fill.get("commission") or 0.0)
+                commission_asset = str(fill.get("commissionAsset") or "").upper()
+                commission_quote = float(fill.get("commissionQuote") or 0.0)
+                fill_identity = str(fill.get("tradeId") or fill.get("id") or index)
+                fill_rows.append(
+                    (
+                        _hash_payload({"order_uid": order_uid, "fill": fill_identity}),
+                        order_uid,
+                        str(fill.get("tradeId") or fill.get("id") or ""),
+                        fill_price,
+                        fill_quantity,
+                        fill_price * fill_quantity,
+                        commission,
+                        commission_asset,
+                        commission_quote,
+                        created_at,
+                        _json_dumps(fill),
+                    )
+                )
+            if action == "SELL" and str(payload.get("status") or "") in {"filled", "paper_filled", "partially_filled"}:
+                closed_rows.append(
+                    (
+                        _hash_payload({"exit_order_uid": order_uid, "position_uid": position_uid}),
+                        position_uid,
+                        str(payload.get("symbol") or "").upper(),
+                        str(payload.get("mode") or "paper"),
+                        str(payload.get("exchange") or "BINANCE").upper(),
+                        order_uid,
+                        str(payload.get("exit_reason") or ""),
+                        _float_or_none(payload.get("gross_pnl")),
+                        fees_quote,
+                        _float_or_none(payload.get("realized_pnl")),
+                        _float_or_none(payload.get("realized_pnl_pct")),
+                        created_at,
+                        _json_dumps(payload),
+                    )
+                )
+        with self._connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO trading_orders (
+                  order_uid, event_uid, position_uid, exchange, mode, symbol, side,
+                  order_type, status, client_order_id, exchange_order_id,
+                  requested_quantity, executed_quantity, quote_quantity, average_price,
+                  fee_quote, created_at, updated_at, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(order_uid) DO UPDATE SET
+                  status = excluded.status,
+                  executed_quantity = excluded.executed_quantity,
+                  quote_quantity = excluded.quote_quantity,
+                  average_price = excluded.average_price,
+                  fee_quote = excluded.fee_quote,
+                  updated_at = excluded.updated_at,
+                  payload_json = excluded.payload_json
+                """,
+                order_rows,
+            )
+            connection.executemany(
+                """
+                INSERT OR REPLACE INTO trading_fills (
+                  fill_uid, order_uid, exchange_trade_id, price, quantity,
+                  quote_quantity, commission, commission_asset, commission_quote,
+                  filled_at, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                fill_rows,
+            )
+            connection.executemany(
+                """
+                INSERT OR REPLACE INTO closed_trades (
+                  trade_uid, position_uid, symbol, mode, exchange, exit_order_uid,
+                  exit_reason, gross_pnl, fees_quote, net_pnl, net_pnl_pct,
+                  closed_at, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                closed_rows,
             )
 
     def load_trading_event_payloads(self) -> list[dict[str, object]]:
@@ -619,6 +852,9 @@ class LocalDataStore:
             counts = {
                 "trading_events": connection.execute("SELECT COUNT(*) FROM trading_events").fetchone()[0],
                 "trading_positions": connection.execute("SELECT COUNT(*) FROM trading_positions").fetchone()[0],
+                "trading_orders": connection.execute("SELECT COUNT(*) FROM trading_orders").fetchone()[0],
+                "trading_fills": connection.execute("SELECT COUNT(*) FROM trading_fills").fetchone()[0],
+                "closed_trades": connection.execute("SELECT COUNT(*) FROM closed_trades").fetchone()[0],
                 "backtest_runs": connection.execute("SELECT COUNT(*) FROM backtest_runs").fetchone()[0],
                 "metric_snapshots": connection.execute("SELECT COUNT(*) FROM metric_snapshots").fetchone()[0],
                 "notification_deliveries": connection.execute("SELECT COUNT(*) FROM notification_deliveries").fetchone()[0],

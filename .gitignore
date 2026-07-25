@@ -1,8 +1,10 @@
 __pycache__/
 *.py[cod]
+.DS_Store
 .venv/
 data/runtime_config.json
 data/trading_state.json
+data/auto_trade_loop.json
 data/community_intelligence_cache.json
 data/*.corrupt-*
 data/*.sqlite3*

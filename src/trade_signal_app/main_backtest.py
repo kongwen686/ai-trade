@@ -9,6 +9,7 @@ from pathlib import Path
 import csv
 import io
 import json
+import math
 from threading import RLock
 from time import perf_counter
 from urllib.parse import urlencode
@@ -199,7 +200,13 @@ def _backtest_payload(
         "max_holding_bars": _parse_query_int(query, "max_holding_bars", base_params["max_holding_bars"], "Max Holding Bars"),
         "fee_bps": _parse_query_float(query, "fee_bps", base_params["fee_bps"], "Fee bps"),
         "fee_model": _get_first(query, "fee_model", str(base_params["fee_model"])),
-        "fee_source": _get_first(query, "fee_source", str(base_params["fee_source"])),
+        # Old/shared backtest URLs may not carry fee_source. Keep those requests offline and
+        # reproducible instead of silently inheriting an account-backed runtime preference.
+        "fee_source": _get_first(
+            query,
+            "fee_source",
+            "manual" if query else str(base_params["fee_source"]),
+        ),
         "maker_fee_bps": _parse_query_float(query, "maker_fee_bps", base_params["maker_fee_bps"], "Maker Fee"),
         "taker_fee_bps": _parse_query_float(query, "taker_fee_bps", base_params["taker_fee_bps"], "Taker Fee"),
         "entry_fee_role": _get_first(query, "entry_fee_role", str(base_params["entry_fee_role"])),
@@ -296,6 +303,8 @@ def _backtest_payload(
         block_extreme_volatility=bool(params["block_extreme_volatility"]),
         max_entry_volatility_percentile=float(params["max_entry_volatility_percentile"]),
         max_entry_volatility_ratio=float(params["max_entry_volatility_ratio"]),
+        stop_loss_pct=float(params["stop_loss_pct"]),
+        take_profit_pct=float(params["take_profit_pct"]),
     )
     exit_config = ExitRuleConfig(
         max_holding_bars=int(params["max_holding_bars"]),
@@ -585,7 +594,36 @@ def _run_backtest_stability_checks(
                 }
             )
         for index, window in enumerate(walk_forward_windows, start=1):
+            train_candles = candles[window["train_start"] : window["train_end"]]
             validation_candles = candles[window["validation_start"] : window["validation_end"]]
+            training_candidates = []
+            for score_threshold in sorted({max(0.0, base_score - 4.0), base_score, min(100.0, base_score + 4.0)}):
+                training_item = _run_single_stability_check(
+                    symbol=symbol,
+                    interval=interval,
+                    check_name=f"walk_forward_train_{index}",
+                    candles=train_candles,
+                    params=params,
+                    holding_periods=holding_periods,
+                    entry_config=replace(entry_config, min_score=score_threshold),
+                    exit_config=exit_config,
+                    execution_config=execution_config,
+                    sample_start_time=None,
+                    analysis_cache=None,
+                )
+                training_item["score_threshold"] = score_threshold
+                training_candidates.append(training_item)
+            successful_training = [item for item in training_candidates if item.get("status") == "ok"]
+            selected = max(
+                successful_training,
+                key=lambda item: (
+                    float(item.get("risk_adjusted_return") or -math.inf),
+                    float(item.get("final_equity") or 0.0),
+                    int(item.get("signal_count") or 0),
+                ),
+                default=None,
+            )
+            selected_score = float(selected.get("score_threshold") if selected else base_score)
             item = _run_single_stability_check(
                 symbol=symbol,
                 interval=interval,
@@ -593,13 +631,31 @@ def _run_backtest_stability_checks(
                 candles=validation_candles,
                 params=params,
                 holding_periods=holding_periods,
-                entry_config=entry_config,
+                entry_config=replace(entry_config, min_score=selected_score),
                 exit_config=exit_config,
                 execution_config=execution_config,
-                sample_start_time=sample_start_time,
+                sample_start_time=None,
                 analysis_cache=None,
             )
-            item.update(window)
+            item.update(
+                {
+                    **window,
+                    "selected_score_threshold": selected_score,
+                    "training_status": "ok" if selected is not None else "error",
+                    "training_final_equity": float(selected.get("final_equity") or 1.0) if selected else 1.0,
+                    "training_risk_adjusted_return": float(selected.get("risk_adjusted_return") or 0.0) if selected else 0.0,
+                    "training_candidates": [
+                        {
+                            "score_threshold": candidate.get("score_threshold"),
+                            "status": candidate.get("status"),
+                            "final_equity": candidate.get("final_equity"),
+                            "risk_adjusted_return": candidate.get("risk_adjusted_return"),
+                            "signal_count": candidate.get("signal_count"),
+                        }
+                        for candidate in training_candidates
+                    ],
+                }
+            )
             checks.append(item)
     return checks
 
@@ -683,6 +739,21 @@ def _run_single_stability_check(
             sample_start_time=sample_start_time,
             analysis_cache=analysis_cache,
         )
+        final_equity = report.equity_curve[-1].equity if report.equity_curve else 1.0
+        max_drawdown_pct = min((point.drawdown_pct for point in report.equity_curve), default=0.0)
+        return_pct = (final_equity - 1.0) * 100
+        trade_returns = [float(event.realized_return_pct) for event in report.events]
+        mean_return = sum(trade_returns) / len(trade_returns) if trade_returns else 0.0
+        return_variance = (
+            sum((value - mean_return) ** 2 for value in trade_returns) / len(trade_returns)
+            if trade_returns
+            else 0.0
+        )
+        return_std = math.sqrt(max(0.0, return_variance))
+        trade_sharpe = (mean_return / return_std) * math.sqrt(len(trade_returns)) if return_std > 1e-12 else 0.0
+        wins = sum(value > 0 for value in trade_returns)
+        win_rate = wins / len(trade_returns) if trade_returns else 0.0
+        wilson_low, wilson_high = _wilson_interval(wins, len(trade_returns))
         return {
             "symbol": symbol,
             "interval": interval,
@@ -691,10 +762,16 @@ def _run_single_stability_check(
             "score_threshold": entry_config.min_score,
             "slippage_bps": execution_config.slippage_bps,
             "candle_count": len(candles),
-            "final_equity": report.equity_curve[-1].equity if report.equity_curve else 1.0,
-            "max_drawdown_pct": min((point.drawdown_pct for point in report.equity_curve), default=0.0),
+            "final_equity": final_equity,
+            "max_drawdown_pct": max_drawdown_pct,
             "signal_count": report.signal_count,
             "profit_factor": report.trade_stat.profit_factor if report.trade_stat is not None else 0.0,
+            "return_pct": round(return_pct, 4),
+            "risk_adjusted_return": round(return_pct / max(abs(max_drawdown_pct), 1.0), 4),
+            "trade_sharpe": round(trade_sharpe, 4),
+            "win_rate_pct": round(win_rate * 100, 2),
+            "win_rate_wilson_low_pct": round(wilson_low * 100, 2),
+            "win_rate_wilson_high_pct": round(wilson_high * 100, 2),
         }
     except Exception as exc:  # noqa: BLE001
         return {
@@ -704,6 +781,16 @@ def _run_single_stability_check(
             "status": "error",
             "message": str(exc),
         }
+
+
+def _wilson_interval(wins: int, total: int, *, z: float = 1.96) -> tuple[float, float]:
+    if total <= 0:
+        return 0.0, 0.0
+    proportion = wins / total
+    denominator = 1 + (z * z / total)
+    center = proportion + (z * z / (2 * total))
+    margin = z * math.sqrt((proportion * (1 - proportion) / total) + (z * z / (4 * total * total)))
+    return max(0.0, (center - margin) / denominator), min(1.0, (center + margin) / denominator)
 
 
 def _walk_forward_validation_windows(

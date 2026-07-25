@@ -577,12 +577,16 @@ class SignalScanner:
         )
 
         ready: list[tuple] = []
+        indicator_cutoff = now_app_time()
         for ticker in selected:
             candles = kline_map.get(ticker.symbol)
             if not candles:
                 continue
+            closed_candles = [candle for candle in candles if candle.close_time <= indicator_cutoff]
+            if not closed_candles:
+                continue
             try:
-                indicators = build_indicator_snapshot(candles)
+                indicators = build_indicator_snapshot(closed_candles)
             except ValueError:
                 continue
             ready.append((ticker, indicators, self.community_provider.get(ticker.symbol), liquidity_status[ticker.symbol]))

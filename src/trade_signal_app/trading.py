@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 
+from .binance_client import BinanceOrderStatusUnknown
 from .entry_filters import (
     anti_chase_reason_from_config,
     structure_adjusted_exit_prices,
@@ -23,7 +24,8 @@ from .volatility import volatility_entry_reason
 LIVE_CONFIRM_VALUE = "I_UNDERSTAND_REAL_ORDERS"
 MIN_EMERGENCY_ALERT_COOLDOWN_MINUTES = 30
 EMERGENCY_DRAWDOWN_STATUS = "emergency_drawdown"
-FILLED_TRADE_STATUSES = {"filled", "paper_filled"}
+FILLED_TRADE_STATUSES = {"filled", "paper_filled", "partially_filled", "reconciled_filled"}
+INFLIGHT_TRADE_STATUSES = {"order_pending", "status_unknown"}
 EXTERNAL_POSITION_CLOSED_STATUS = "external_closed"
 TRADE_EVENT_ACTIONS = {"BUY", "SELL"}
 TRADING_EVENT_RETENTION_LIMIT = 5000
@@ -48,6 +50,16 @@ class TradingPosition:
     highest_price: float | None = None
     leverage: float = 1.0
     margin_notional: float | None = None
+    position_id: str = ""
+    entry_order_id: str = ""
+    entry_fee_quote: float = 0.0
+    protection_order_id: str = ""
+    protection_client_order_id: str = ""
+    protection_stop_price: float | None = None
+    protection_status: str = ""
+    protection_executed_quantity: float = 0.0
+    pending_exit_order_id: str = ""
+    pending_exit_client_order_id: str = ""
 
 
 @dataclass
@@ -63,10 +75,15 @@ class TradingEvent:
     quote_notional: float | None = None
     realized_pnl: float | None = None
     realized_pnl_pct: float | None = None
+    gross_pnl: float | None = None
+    fees_quote: float = 0.0
     exit_reason: str = ""
     created_at: datetime = field(default_factory=now_app_time)
     response: dict[str, object] | None = None
     exchange: str = "BINANCE"
+    position_id: str = ""
+    client_order_id: str = ""
+    exchange_order_id: str = ""
 
 
 @dataclass
@@ -205,7 +222,9 @@ class TradingStateStore:
             "positions": [self._position_to_dict(position) for position in positions],
             "events": [self._event_to_dict(event) for event in events],
         }
-        self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary_path = self.path.with_suffix(f"{self.path.suffix}.tmp")
+        temporary_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary_path.replace(self.path)
 
     def _sync_database(self, positions: list[TradingPosition], events: list[TradingEvent]) -> None:
         try:
@@ -260,6 +279,20 @@ class TradingStateStore:
             highest_price=float(highest_price) if highest_price is not None else entry_price,
             leverage=max(1.0, float(payload.get("leverage") or 1.0)),
             margin_notional=float(payload["margin_notional"]) if payload.get("margin_notional") is not None else None,
+            position_id=str(payload.get("position_id") or payload.get("client_order_id") or ""),
+            entry_order_id=str(payload.get("entry_order_id") or ""),
+            entry_fee_quote=float(payload.get("entry_fee_quote") or 0.0),
+            protection_order_id=str(payload.get("protection_order_id") or ""),
+            protection_client_order_id=str(payload.get("protection_client_order_id") or ""),
+            protection_stop_price=(
+                float(payload["protection_stop_price"])
+                if payload.get("protection_stop_price") is not None
+                else None
+            ),
+            protection_status=str(payload.get("protection_status") or ""),
+            protection_executed_quantity=float(payload.get("protection_executed_quantity") or 0.0),
+            pending_exit_order_id=str(payload.get("pending_exit_order_id") or ""),
+            pending_exit_client_order_id=str(payload.get("pending_exit_client_order_id") or ""),
         )
 
     @staticmethod
@@ -283,10 +316,15 @@ class TradingStateStore:
             quote_notional=float(payload["quote_notional"]) if payload.get("quote_notional") is not None else None,
             realized_pnl=float(payload["realized_pnl"]) if payload.get("realized_pnl") is not None else None,
             realized_pnl_pct=float(payload["realized_pnl_pct"]) if payload.get("realized_pnl_pct") is not None else None,
+            gross_pnl=float(payload["gross_pnl"]) if payload.get("gross_pnl") is not None else None,
+            fees_quote=float(payload.get("fees_quote") or 0.0),
             exit_reason=str(payload.get("exit_reason", "")),
             created_at=to_app_time(datetime.fromisoformat(str(created_at))) if created_at else now_app_time(),
             response=payload.get("response") if isinstance(payload.get("response"), dict) else None,
             exchange=str(payload.get("exchange", "BINANCE")).upper(),
+            position_id=str(payload.get("position_id") or ""),
+            client_order_id=str(payload.get("client_order_id") or ""),
+            exchange_order_id=str(payload.get("exchange_order_id") or ""),
         )
 
     @staticmethod
@@ -329,6 +367,7 @@ class AutoTrader:
         recent_events = self.state_store.load_events()
         events: list[TradingEvent] = []
         summary, signals = self.scan_result if self.scan_result is not None else self.scanner.scan()
+        positions = self._reconcile_pending_entries(positions, recent_events, config, events)
         now = now_app_time()
         filter_counts = {
             "liquidity": 0,
@@ -406,19 +445,39 @@ class AutoTrader:
             for event in [*recent_events, *events]
             if event.mode == config.mode
             and event.action in TRADE_EVENT_ACTIONS
-            and event.status in FILLED_TRADE_STATUSES
+            and event.status in FILLED_TRADE_STATUSES | INFLIGHT_TRADE_STATUSES
             and event.symbol != "*"
             and event.created_at > cooldown_after
         }
         entry_config = entry_rule_config_from_runtime(config)
+        portfolio_risk_block = self._portfolio_risk_block_reason(config, recent_events)
+        if portfolio_risk_block:
+            events.append(
+                TradingEvent(
+                    action="SKIP",
+                    symbol="*",
+                    mode=config.mode,
+                    status="portfolio_risk_blocked",
+                    message=portfolio_risk_block,
+                    exchange=config.execution_exchange.upper(),
+                )
+            )
 
-        for signal_index, signal in enumerate(signals):
+        candidate_signals = [] if portfolio_risk_block else signals
+        for signal_index, signal in enumerate(candidate_signals):
             if len(positions) >= config.max_open_positions:
                 filter_counts["position_limit"] = len(signals) - signal_index
                 break
-            if exposure + config.quote_order_qty > config.max_total_quote_exposure:
-                filter_counts["exposure_limit"] = len(signals) - signal_index
-                break
+            indicative_price = self._signal_price(signal)
+            indicative_stop, _ = self._structured_exit_prices(signal, indicative_price, config)
+            indicative_margin_notional = self._risk_sized_margin_notional(
+                config=config,
+                entry_price=indicative_price,
+                stop_price=indicative_stop,
+            )
+            if exposure + indicative_margin_notional > config.max_total_quote_exposure:
+                filter_counts["exposure_limit"] += 1
+                continue
             if signal.symbol in open_symbols:
                 continue
             if signal.symbol in recent_symbols:
@@ -471,8 +530,16 @@ class AutoTrader:
                     )
                 )
                 continue
-            entry_price = self._latest_price_for_symbol(signal.symbol, fallback=self._signal_price(signal))
-
+            entry_price = self._latest_price_for_symbol(signal.symbol, fallback=indicative_price)
+            stop_price, _ = self._structured_exit_prices(signal, entry_price, config)
+            candidate_margin_notional = self._risk_sized_margin_notional(
+                config=config,
+                entry_price=entry_price,
+                stop_price=stop_price,
+            )
+            if exposure + candidate_margin_notional > config.max_total_quote_exposure:
+                filter_counts["exposure_limit"] += 1
+                continue
             position, event = self._open_position(signal, config, entry_price=entry_price)
             event.response = {
                 **(event.response or {}),
@@ -480,7 +547,7 @@ class AutoTrader:
                 "confirmations": entry_decision.reasons[-5:],
             }
             events.append(event)
-            if event.status in {"filled", "paper_filled"}:
+            if event.status in FILLED_TRADE_STATUSES:
                 positions.append(position)
                 self._notify_trade_event(event=event, position=position)
                 open_symbols.add(position.symbol)
@@ -536,6 +603,98 @@ class AutoTrader:
             for event in recent_events
         )
 
+    def _reconcile_pending_entries(
+        self,
+        positions: list[TradingPosition],
+        recent_events: list[TradingEvent],
+        config: AutoTradeDefaults,
+        events: list[TradingEvent],
+    ) -> list[TradingPosition]:
+        if config.mode != "live":
+            return positions
+        latest_by_client_id: dict[str, TradingEvent] = {}
+        for event in sorted(recent_events, key=lambda item: item.created_at):
+            if event.mode == config.mode and event.action == "BUY" and event.client_order_id:
+                latest_by_client_id[event.client_order_id] = event
+        open_symbols = {position.symbol for position in positions}
+        for client_order_id, pending_event in latest_by_client_id.items():
+            if pending_event.status not in INFLIGHT_TRADE_STATUSES or pending_event.symbol in open_symbols:
+                continue
+            response = self._query_order_by_client_id(pending_event.symbol, client_order_id)
+            if response is None:
+                continue
+            response, execution_status = self._settle_entry_response(
+                pending_event.symbol,
+                client_order_id,
+                response,
+            )
+            if execution_status in INFLIGHT_TRADE_STATUSES:
+                continue
+            if execution_status not in FILLED_TRADE_STATUSES:
+                events.append(
+                    TradingEvent(
+                        action="BUY",
+                        symbol=pending_event.symbol,
+                        mode=config.mode,
+                        status="reconciled_rejected",
+                        message="待确认买入订单经交易所对账后未成交。",
+                        price=pending_event.price,
+                        quantity=pending_event.quantity,
+                        quote_notional=pending_event.quote_notional,
+                        response=response,
+                        exchange=pending_event.exchange,
+                        position_id=pending_event.position_id,
+                        client_order_id=client_order_id,
+                        exchange_order_id=str(response.get("orderId") or ""),
+                    )
+                )
+                continue
+            provisional_payload = (
+                pending_event.response.get("provisional_position")
+                if isinstance(pending_event.response, dict)
+                and isinstance(pending_event.response.get("provisional_position"), dict)
+                else None
+            )
+            if provisional_payload is None:
+                continue
+            provisional = TradingStateStore._position_from_dict(provisional_payload)
+            position = self._position_from_order_response(
+                position=provisional,
+                response=response,
+                fallback_price=float(pending_event.price or provisional.entry_price),
+            )
+            protection_error = ""
+            if config.exchange_protection_enabled and config.execution_exchange.lower() == "binance":
+                position, protection_error = self._place_exchange_protection(position, config)
+            event = TradingEvent(
+                action="BUY",
+                symbol=position.symbol,
+                mode=config.mode,
+                status="reconciled_filled",
+                message="待确认买入订单已通过交易所对账恢复为持仓。"
+                + (f" 保护单未建立：{protection_error}" if protection_error else ""),
+                score=position.score,
+                price=position.entry_price,
+                quantity=position.quantity,
+                quote_notional=position.quote_notional,
+                fees_quote=position.entry_fee_quote,
+                response={
+                    **response,
+                    "fees_quote": position.entry_fee_quote,
+                    "position_client_order_id": position.position_id,
+                    "protection_error": protection_error,
+                },
+                exchange=position.exchange,
+                position_id=position.position_id,
+                client_order_id=client_order_id,
+                exchange_order_id=position.entry_order_id,
+            )
+            positions.append(position)
+            open_symbols.add(position.symbol)
+            events.append(event)
+            self._notify_trade_event(event=event, position=position)
+        return positions
+
     def _evaluate_exits(
         self,
         positions: list[TradingPosition],
@@ -555,7 +714,36 @@ class AutoTrader:
             if price is None:
                 remaining.append(position)
                 continue
+            protection_fill = self._exchange_protection_fill_event(position, price)
+            if protection_fill is not None:
+                events.append(protection_fill)
+                self._notify_trade_event(event=protection_fill, position=position)
+                if (
+                    protection_fill.status == "partially_filled"
+                    and protection_fill.quantity is not None
+                    and 0 < protection_fill.quantity < position.quantity
+                ):
+                    remaining.append(
+                        self._remaining_position_after_partial_exit(position, protection_fill.quantity)
+                    )
+                continue
             position = self._apply_profit_protection(position, price, config)
+            protection_error = self._refresh_exchange_protection(position, config)
+            if protection_error:
+                events.append(
+                    TradingEvent(
+                        action="ALERT",
+                        symbol=position.symbol,
+                        mode=position.mode,
+                        status="protection_failed",
+                        message=f"交易所保护单同步失败：{protection_error}",
+                        price=price,
+                        quantity=position.quantity,
+                        quote_notional=position.quote_notional,
+                        exchange=position.exchange,
+                        position_id=position.position_id,
+                    )
+                )
             emergency_event = self._emergency_drawdown_event(position, price, config)
             if emergency_event is not None and self._should_emit_emergency_drawdown_alert(
                 position=position,
@@ -581,8 +769,14 @@ class AutoTrader:
                 continue
             event = self._close_position(position, price, config, exit_reason)
             events.append(event)
-            if event.status in {"filled", "paper_filled"}:
+            if event.status in FILLED_TRADE_STATUSES:
                 self._notify_trade_event(event=event, position=position)
+                if (
+                    event.status == "partially_filled"
+                    and event.quantity is not None
+                    and 0 < event.quantity < position.quantity
+                ):
+                    remaining.append(self._remaining_position_after_partial_exit(position, event.quantity))
                 continue
             if event.status == EXTERNAL_POSITION_CLOSED_STATUS:
                 continue
@@ -929,13 +1123,29 @@ class AutoTrader:
         entry_price: float | None = None,
     ) -> tuple[TradingPosition, TradingEvent]:
         now = now_app_time()
-        price = entry_price if entry_price and entry_price > 0 else signal.ticker.last_price
+        market_price = entry_price if entry_price and entry_price > 0 else signal.ticker.last_price
+        stop_price, take_profit_price = self._structured_exit_prices(signal, market_price, config)
+        margin_notional = self._risk_sized_margin_notional(
+            config=config,
+            entry_price=market_price,
+            stop_price=stop_price,
+        )
         leverage = config.leverage if config.mode == "paper" else 1.0
-        margin_notional = config.quote_order_qty
         position_notional = margin_notional * leverage
-        quantity = position_notional / price
         client_order_id = self._client_order_id("buy", signal.symbol, now)
-        stop_price, take_profit_price = self._structured_exit_prices(signal, price, config)
+        price = market_price
+        if config.mode == "paper" and config.paper_costs_enabled:
+            price = market_price * (1 + config.paper_slippage_bps / 10_000)
+            stop_ratio = stop_price / market_price if market_price > 0 else 1.0
+            take_profit_ratio = take_profit_price / market_price if market_price > 0 else 1.0
+            stop_price = price * stop_ratio
+            take_profit_price = price * take_profit_ratio
+        quantity = position_notional / price
+        entry_fee_quote = (
+            position_notional * config.paper_fee_bps / 10_000
+            if config.mode == "paper" and config.paper_costs_enabled
+            else 0.0
+        )
         position = TradingPosition(
             exchange=config.execution_exchange.upper(),
             symbol=signal.symbol,
@@ -952,6 +1162,8 @@ class AutoTrader:
             highest_price=price,
             leverage=leverage,
             margin_notional=margin_notional,
+            position_id=client_order_id,
+            entry_fee_quote=entry_fee_quote,
         )
         if config.mode == "paper":
             return position, TradingEvent(
@@ -965,15 +1177,43 @@ class AutoTrader:
                 price=price,
                 quantity=quantity,
                 quote_notional=position_notional,
+                fees_quote=entry_fee_quote,
+                position_id=client_order_id,
+                client_order_id=client_order_id,
+                response={
+                    "execution_price": price,
+                    "market_price": market_price,
+                    "slippage_bps": config.paper_slippage_bps if config.paper_costs_enabled else 0.0,
+                    "fees_quote": entry_fee_quote,
+                    "risk_sized_margin_notional": margin_notional,
+                },
             )
 
         try:
             response = self.execution_gateway.order_market_buy(
                 symbol=signal.symbol,
-                quote_order_qty=config.quote_order_qty,
+                quote_order_qty=margin_notional,
                 test=config.order_test_only,
                 client_order_id=client_order_id,
             )
+        except BinanceOrderStatusUnknown as exc:
+            response = self._query_order_by_client_id(signal.symbol, client_order_id)
+            if response is None:
+                return position, TradingEvent(
+                    action="BUY",
+                    symbol=signal.symbol,
+                    mode=config.mode,
+                    status="status_unknown",
+                    message=str(exc),
+                    score=signal.score,
+                    price=market_price,
+                    quantity=quantity,
+                    quote_notional=margin_notional,
+                    exchange=config.execution_exchange.upper(),
+                    position_id=client_order_id,
+                    client_order_id=client_order_id,
+                    response={"provisional_position": TradingStateStore._position_to_dict(position)},
+                )
         except Exception as exc:  # noqa: BLE001
             return position, TradingEvent(
                 action="BUY",
@@ -982,30 +1222,89 @@ class AutoTrader:
                 status="rejected",
                 message=str(exc),
                 score=signal.score,
-                price=price,
+                price=market_price,
                 quantity=quantity,
-                quote_notional=config.quote_order_qty,
+                quote_notional=margin_notional,
                 exchange=config.execution_exchange.upper(),
+                position_id=client_order_id,
+                client_order_id=client_order_id,
             )
         response_payload = response if isinstance(response, dict) else {"raw": response}
-        if not config.order_test_only:
-            position = self._position_from_order_response(
-                position=position,
+        if config.order_test_only:
+            return position, TradingEvent(
+                action="BUY",
+                symbol=signal.symbol,
+                mode=config.mode,
+                status="test_accepted",
+                message=f"{config.execution_exchange.upper()} 市价买入测试请求已接受。",
+                score=signal.score,
+                price=market_price,
+                quantity=quantity,
+                quote_notional=margin_notional,
                 response=response_payload,
-                fallback_price=price,
+                exchange=config.execution_exchange.upper(),
+                position_id=client_order_id,
+                client_order_id=client_order_id,
+                exchange_order_id=str(response_payload.get("orderId") or ""),
             )
+        response_payload, execution_status = self._settle_entry_response(
+            signal.symbol,
+            client_order_id,
+            response_payload,
+        )
+        if execution_status not in {"filled", "partially_filled"}:
+            return position, TradingEvent(
+                action="BUY",
+                symbol=signal.symbol,
+                mode=config.mode,
+                status=execution_status,
+                message=f"{config.execution_exchange.upper()} 买入订单尚未确认成交，已进入对账队列。",
+                score=signal.score,
+                price=market_price,
+                quantity=quantity,
+                quote_notional=margin_notional,
+                response={
+                    **response_payload,
+                    "provisional_position": TradingStateStore._position_to_dict(position),
+                },
+                exchange=config.execution_exchange.upper(),
+                position_id=client_order_id,
+                client_order_id=client_order_id,
+                exchange_order_id=str(response_payload.get("orderId") or ""),
+            )
+        position = self._position_from_order_response(
+            position=position,
+            response=response_payload,
+            fallback_price=market_price,
+        )
+        protection_error = ""
+        if config.exchange_protection_enabled and config.execution_exchange.lower() == "binance":
+            position, protection_error = self._place_exchange_protection(position, config)
+        response_payload = {
+            **response_payload,
+            "fees_quote": position.entry_fee_quote,
+            "position_client_order_id": position.position_id,
+            "protection_error": protection_error,
+        }
         return position, TradingEvent(
             action="BUY",
             symbol=signal.symbol,
             mode=config.mode,
-            status="test_accepted" if config.order_test_only else "filled",
-            message=f"{config.execution_exchange.upper()} 市价买入请求已提交。",
+            status=execution_status,
+            message=(
+                f"{config.execution_exchange.upper()} 市价买入已确认成交。"
+                + (f" 交易所保护单未建立：{protection_error}" if protection_error else "")
+            ),
             score=signal.score,
             price=price,
             quantity=position.quantity,
             quote_notional=position.quote_notional,
             response=response_payload,
             exchange=config.execution_exchange.upper(),
+            fees_quote=position.entry_fee_quote,
+            position_id=position.position_id,
+            client_order_id=client_order_id,
+            exchange_order_id=position.entry_order_id,
         )
 
     def _structured_exit_prices(self, signal: object, price: float, config: AutoTradeDefaults) -> tuple[float, float]:
@@ -1020,6 +1319,99 @@ class AutoTrader:
             resistance_take_profit_buffer_pct=config.resistance_take_profit_buffer_pct,
         )
 
+    def _risk_sized_margin_notional(
+        self,
+        *,
+        config: AutoTradeDefaults,
+        entry_price: float,
+        stop_price: float,
+    ) -> float:
+        if not config.risk_sizing_enabled or entry_price <= 0 or stop_price >= entry_price:
+            return config.quote_order_qty
+        equity = self._account_equity(config)
+        stop_distance_ratio = (entry_price - stop_price) / entry_price
+        if equity <= 0 or stop_distance_ratio <= 0:
+            return config.quote_order_qty
+        risk_budget = equity * config.risk_per_trade_pct / 100
+        risk_sized_notional = risk_budget / stop_distance_ratio
+        return max(0.01, min(config.quote_order_qty, risk_sized_notional))
+
+    def _account_equity(self, config: AutoTradeDefaults) -> float:
+        events = self.state_store.load_events()
+        realized = sum(
+            float(event.realized_pnl or 0.0)
+            for event in events
+            if event.mode == config.mode
+            and event.action == "SELL"
+            and event.status in FILLED_TRADE_STATUSES
+        )
+        if config.mode == "paper":
+            return max(0.0, config.paper_account_equity + realized)
+        account_status = getattr(self.execution_gateway, "account_status", None)
+        if callable(account_status):
+            try:
+                status = account_status()
+                quote_available = float(status.get("quote_available") or 0.0)
+                open_exposure = sum(
+                    self._position_margin_notional(position)
+                    for position in self.state_store.load()
+                    if position.mode == "live"
+                )
+                if quote_available + open_exposure > 0:
+                    return quote_available + open_exposure
+            except Exception:  # noqa: BLE001
+                pass
+        return max(config.max_total_quote_exposure, config.quote_order_qty)
+
+    def _portfolio_risk_block_reason(
+        self,
+        config: AutoTradeDefaults,
+        events: list[TradingEvent],
+    ) -> str:
+        closed = [
+            event
+            for event in events
+            if event.mode == config.mode
+            and event.action == "SELL"
+            and event.status in FILLED_TRADE_STATUSES
+            and event.realized_pnl is not None
+        ]
+        if not closed:
+            return ""
+        closed.sort(key=lambda event: event.created_at)
+        today = now_app_time().date()
+        daily_pnl = sum(float(event.realized_pnl or 0.0) for event in closed if event.created_at.date() == today)
+        equity = max(self._account_equity(config), config.quote_order_qty)
+        if config.max_daily_loss_pct > 0 and daily_pnl <= -(equity * config.max_daily_loss_pct / 100):
+            return (
+                f"当日净亏损 {daily_pnl:.4f} 已达到净值风险上限 "
+                f"{config.max_daily_loss_pct:.2f}%，本日暂停新增仓位。"
+            )
+        consecutive_losses = 0
+        for event in reversed([event for event in closed if event.created_at.date() == today]):
+            if float(event.realized_pnl or 0.0) < 0:
+                consecutive_losses += 1
+            else:
+                break
+        if config.max_consecutive_losses > 0 and consecutive_losses >= config.max_consecutive_losses:
+            return f"已连续亏损 {consecutive_losses} 笔，达到风控上限，暂停新增仓位。"
+        if config.max_account_drawdown_pct > 0:
+            starting_equity = config.paper_account_equity if config.mode == "paper" else max(equity, config.max_total_quote_exposure)
+            curve = starting_equity
+            peak = starting_equity
+            max_drawdown_pct = 0.0
+            for event in closed:
+                curve += float(event.realized_pnl or 0.0)
+                peak = max(peak, curve)
+                if peak > 0:
+                    max_drawdown_pct = max(max_drawdown_pct, (peak - curve) / peak * 100)
+            if max_drawdown_pct >= config.max_account_drawdown_pct:
+                return (
+                    f"账户已实现资金曲线最大回撤 {max_drawdown_pct:.2f}% 达到 "
+                    f"{config.max_account_drawdown_pct:.2f}% 上限，暂停新增仓位。"
+                )
+        return ""
+
     @staticmethod
     def _position_margin_notional(position: TradingPosition) -> float:
         return position.margin_notional if position.margin_notional is not None else position.quote_notional
@@ -1032,10 +1424,16 @@ class AutoTrader:
         exit_reason: str,
     ) -> TradingEvent:
         if position.mode == "paper":
-            exit_notional, realized_pnl, realized_pnl_pct = self._calculate_exit_pnl(
+            execution_price = price
+            exit_fee_quote = 0.0
+            if config.paper_costs_enabled:
+                execution_price = price * (1 - config.paper_slippage_bps / 10_000)
+                exit_fee_quote = position.quantity * execution_price * config.paper_fee_bps / 10_000
+            exit_notional, gross_pnl, realized_pnl, realized_pnl_pct = self._calculate_exit_pnl(
                 position=position,
-                exit_price=price,
+                exit_price=execution_price,
                 executed_quantity=position.quantity,
+                exit_fee_quote=exit_fee_quote,
             )
             return TradingEvent(
                 action="SELL",
@@ -1043,13 +1441,24 @@ class AutoTrader:
                 mode=position.mode,
                 status="paper_filled",
                 message=f"模拟卖出已记录：{exit_reason}。",
-                price=price,
+                price=execution_price,
                 quantity=position.quantity,
                 quote_notional=exit_notional,
+                gross_pnl=gross_pnl,
+                fees_quote=position.entry_fee_quote + exit_fee_quote,
                 realized_pnl=realized_pnl,
                 realized_pnl_pct=realized_pnl_pct,
                 exit_reason=exit_reason,
                 exchange=position.exchange,
+                position_id=position.position_id or position.client_order_id,
+                client_order_id=self._client_order_id("paper-sell", position.symbol, now_app_time()),
+                response={
+                    "market_price": price,
+                    "execution_price": execution_price,
+                    "slippage_bps": config.paper_slippage_bps if config.paper_costs_enabled else 0.0,
+                    "fees_quote": position.entry_fee_quote + exit_fee_quote,
+                    "position_client_order_id": position.position_id or position.client_order_id,
+                },
             )
         if config.mode != "live":
             return TradingEvent(
@@ -1090,18 +1499,92 @@ class AutoTrader:
                 exit_reason=exit_reason,
                 exchange=position.exchange,
             )
+        pending_response = self._pending_exit_response(position)
+        if position.pending_exit_client_order_id and pending_response is None:
+            return TradingEvent(
+                action="SELL",
+                symbol=position.symbol,
+                mode=config.mode,
+                status="status_unknown",
+                message="已有卖出订单尚未完成交易所对账，避免重复提交。",
+                price=price,
+                quantity=position.quantity,
+                quote_notional=position.quantity * price,
+                exit_reason=exit_reason,
+                exchange=position.exchange,
+                position_id=position.position_id,
+                client_order_id=position.pending_exit_client_order_id,
+                exchange_order_id=position.pending_exit_order_id,
+            )
+        if pending_response is not None:
+            pending_status = self._order_execution_status(pending_response)
+            if pending_status in INFLIGHT_TRADE_STATUSES:
+                return TradingEvent(
+                    action="SELL",
+                    symbol=position.symbol,
+                    mode=config.mode,
+                    status=pending_status,
+                    message="已有卖出订单尚未确认，等待交易所对账，不重复提交。",
+                    price=price,
+                    quantity=position.quantity,
+                    quote_notional=position.quantity * price,
+                    exit_reason=exit_reason,
+                    response={**pending_response, "position_client_order_id": position.position_id},
+                    exchange=position.exchange,
+                    position_id=position.position_id,
+                    client_order_id=position.pending_exit_client_order_id,
+                    exchange_order_id=position.pending_exit_order_id,
+                )
+            if pending_status in FILLED_TRADE_STATUSES:
+                return self._live_exit_event_from_response(position, price, exit_reason, pending_response)
+            position.pending_exit_order_id = ""
+            position.pending_exit_client_order_id = ""
+        protection_canceled, protection_error = self._cancel_exchange_protection(position)
+        if not protection_canceled:
+            return TradingEvent(
+                action="SELL",
+                symbol=position.symbol,
+                mode=config.mode,
+                status="protection_cancel_pending",
+                message=f"交易所保护单尚未确认撤销，避免重复卖出：{protection_error}",
+                price=price,
+                quantity=position.quantity,
+                quote_notional=position.quantity * price,
+                exit_reason=exit_reason,
+                exchange=position.exchange,
+                position_id=position.position_id,
+            )
         reconciled_quantity = self._reconciled_live_sell_quantity(position, price)
         if isinstance(reconciled_quantity, TradingEvent):
             reconciled_quantity.exit_reason = exit_reason
             return reconciled_quantity
         sell_quantity = reconciled_quantity or self._floor_quantity_for_symbol(position.symbol, position.quantity)
+        exit_client_order_id = self._client_order_id("sell", position.symbol, now_app_time())
         try:
             response = self.execution_gateway.order_market_sell(
                 symbol=position.symbol,
                 quantity=sell_quantity,
                 test=config.order_test_only,
-                client_order_id=self._client_order_id("sell", position.symbol, now_app_time()),
+                client_order_id=exit_client_order_id,
             )
+        except BinanceOrderStatusUnknown as exc:
+            response = self._query_order_by_client_id(position.symbol, exit_client_order_id)
+            if response is None:
+                position.pending_exit_client_order_id = exit_client_order_id
+                return TradingEvent(
+                    action="SELL",
+                    symbol=position.symbol,
+                    mode=config.mode,
+                    status="status_unknown",
+                    message=str(exc),
+                    price=price,
+                    quantity=sell_quantity,
+                    quote_notional=sell_quantity * price,
+                    exit_reason=exit_reason,
+                    exchange=position.exchange,
+                    position_id=position.position_id,
+                    client_order_id=exit_client_order_id,
+                )
         except Exception as exc:  # noqa: BLE001
             return TradingEvent(
                 action="SELL",
@@ -1114,30 +1597,107 @@ class AutoTrader:
                 quote_notional=sell_quantity * price,
                 exit_reason=exit_reason,
                 exchange=position.exchange,
+                position_id=position.position_id,
+                client_order_id=exit_client_order_id,
             )
         response_payload = response if isinstance(response, dict) else {"raw": response}
-        executed_quantity = float(response_payload.get("executedQty") or position.quantity)
-        exit_notional = float(response_payload.get("cummulativeQuoteQty") or executed_quantity * price)
-        _, realized_pnl, realized_pnl_pct = self._calculate_exit_pnl(
+        if config.order_test_only:
+            return TradingEvent(
+                action="SELL",
+                symbol=position.symbol,
+                mode=config.mode,
+                status="test_accepted",
+                message=f"{position.exchange.upper()} 市价卖出测试请求已接受：{exit_reason}。",
+                price=price,
+                quantity=sell_quantity,
+                quote_notional=sell_quantity * price,
+                exit_reason=exit_reason,
+                response=response_payload,
+                exchange=position.exchange,
+                position_id=position.position_id,
+                client_order_id=exit_client_order_id,
+                exchange_order_id=str(response_payload.get("orderId") or ""),
+            )
+        execution_status = self._order_execution_status(response_payload)
+        if execution_status in INFLIGHT_TRADE_STATUSES:
+            position.pending_exit_order_id = str(response_payload.get("orderId") or "")
+            position.pending_exit_client_order_id = exit_client_order_id
+            return TradingEvent(
+                action="SELL",
+                symbol=position.symbol,
+                mode=config.mode,
+                status=execution_status,
+                message=f"{position.exchange.upper()} 卖出订单尚未确认成交，等待对账。",
+                price=price,
+                quantity=sell_quantity,
+                quote_notional=sell_quantity * price,
+                exit_reason=exit_reason,
+                response={**response_payload, "position_client_order_id": position.position_id},
+                exchange=position.exchange,
+                position_id=position.position_id,
+                client_order_id=exit_client_order_id,
+                exchange_order_id=position.pending_exit_order_id,
+            )
+        return self._live_exit_event_from_response(
+            position,
+            price,
+            exit_reason,
+            response_payload,
+            client_order_id=exit_client_order_id,
+            status=execution_status,
+        )
+
+    def _pending_exit_response(self, position: TradingPosition) -> dict[str, object] | None:
+        if not position.pending_exit_client_order_id:
+            return None
+        return self._query_order_by_client_id(position.symbol, position.pending_exit_client_order_id)
+
+    def _live_exit_event_from_response(
+        self,
+        position: TradingPosition,
+        price: float,
+        exit_reason: str,
+        response: dict[str, object],
+        *,
+        client_order_id: str = "",
+        status: str = "filled",
+    ) -> TradingEvent:
+        executed_quantity = float(response.get("executedQty") or position.quantity)
+        exit_notional = float(response.get("cummulativeQuoteQty") or executed_quantity * price)
+        execution_price = exit_notional / executed_quantity if executed_quantity > 0 else price
+        exit_fee_quote, _, unconverted_fees = self._commission_summary(response, position.symbol)
+        _, gross_pnl, realized_pnl, realized_pnl_pct = self._calculate_exit_pnl(
             position=position,
-            exit_price=price,
+            exit_price=execution_price,
             executed_quantity=executed_quantity,
             exit_notional=exit_notional,
+            exit_fee_quote=exit_fee_quote,
         )
+        response_payload = {
+            **response,
+            "fees_quote": position.entry_fee_quote + exit_fee_quote,
+            "unconverted_fees": unconverted_fees,
+            "position_client_order_id": position.position_id,
+        }
         return TradingEvent(
             action="SELL",
             symbol=position.symbol,
-            mode=config.mode,
-            status="test_accepted" if config.order_test_only else "filled",
-            message=f"{position.exchange.upper()} 市价卖出请求已提交：{exit_reason}。",
-            price=price,
+            mode=position.mode,
+            status=status,
+            message=f"{position.exchange.upper()} 市价卖出已确认：{exit_reason}。",
+            price=execution_price,
             quantity=executed_quantity,
             quote_notional=exit_notional,
-            realized_pnl=None if config.order_test_only else realized_pnl,
-            realized_pnl_pct=None if config.order_test_only else realized_pnl_pct,
+            gross_pnl=gross_pnl,
+            fees_quote=position.entry_fee_quote + exit_fee_quote,
+            realized_pnl=realized_pnl,
+            realized_pnl_pct=realized_pnl_pct,
             exit_reason=exit_reason,
             response=response_payload,
             exchange=position.exchange,
+            position_id=position.position_id,
+            client_order_id=client_order_id or str(response.get("clientOrderId") or ""),
+            exchange_order_id=str(response.get("orderId") or ""),
         )
 
     def _reconciled_live_sell_quantity(
@@ -1148,7 +1708,7 @@ class AutoTrader:
         asset_balance = getattr(self.execution_gateway, "asset_balance", None)
         if not callable(asset_balance):
             return None
-        base_asset, step_size, min_quantity, min_notional = self._symbol_trade_rules(position.symbol)
+        base_asset, step_size, min_quantity, min_notional, _ = self._symbol_trade_rules(position.symbol)
         try:
             balance = asset_balance(base_asset)
             free_balance = max(0.0, float(balance.get("free") or 0.0))
@@ -1218,6 +1778,14 @@ class AutoTrader:
             raise ValueError("杠杆倍数不能小于 1。")
         if config.risk_per_trade_pct <= 0:
             raise ValueError("单笔风险比例必须大于 0。")
+        if config.paper_account_equity <= 0:
+            raise ValueError("模拟账户初始净值必须大于 0。")
+        if config.max_daily_loss_pct < 0 or config.max_account_drawdown_pct < 0:
+            raise ValueError("账户亏损和回撤上限不能小于 0。")
+        if config.max_consecutive_losses < 0:
+            raise ValueError("最大连续亏损笔数不能小于 0。")
+        if config.paper_fee_bps < 0 or config.paper_slippage_bps < 0:
+            raise ValueError("模拟手续费和滑点不能小于 0。")
         if config.exit_profile not in {"balanced", "leveraged_conservative", "trend_following"}:
             raise ValueError("退出档位不受支持。")
         if config.stop_loss_pct <= 0 or config.take_profit_pct <= 0:
@@ -1263,18 +1831,231 @@ class AutoTrader:
 
     @staticmethod
     def _client_order_id(side: str, symbol: str, now: datetime) -> str:
-        return f"aitrade-{side}-{symbol.lower()}-{int(now.timestamp())}"
+        suffix = int(now.timestamp() * 1000)
+        return f"aitrade-{side[:7]}-{symbol.lower()[:10]}-{suffix}"[:36]
+
+    def _query_order_by_client_id(self, symbol: str, client_order_id: str) -> dict[str, object] | None:
+        query_order = getattr(self.execution_gateway, "query_order", None)
+        if not callable(query_order) or not client_order_id:
+            return None
+        try:
+            response = query_order(symbol=symbol, client_order_id=client_order_id)
+        except Exception:  # noqa: BLE001
+            return None
+        return response if isinstance(response, dict) else None
+
+    def _settle_entry_response(
+        self,
+        symbol: str,
+        client_order_id: str,
+        response: dict[str, object],
+    ) -> tuple[dict[str, object], str]:
+        """Cancel a still-open partial buy before turning its executed quantity into a position."""
+        if str(response.get("status") or "").upper() != "PARTIALLY_FILLED":
+            return response, self._order_execution_status(response)
+        cancel = getattr(self.execution_gateway, "cancel_order", None)
+        if not callable(cancel):
+            return response, "order_pending"
+        try:
+            canceled = cancel(
+                symbol=symbol,
+                order_id=response.get("orderId"),
+                client_order_id=None if response.get("orderId") is not None else client_order_id,
+            )
+        except Exception:  # noqa: BLE001
+            return response, "order_pending"
+        reconciled = self._query_order_by_client_id(symbol, client_order_id)
+        terminal = reconciled if reconciled is not None else canceled
+        terminal_payload = terminal if isinstance(terminal, dict) else response
+        terminal_status = str(terminal_payload.get("status") or "").upper()
+        if terminal_status not in {"CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED", "FILLED"}:
+            return terminal_payload, "order_pending"
+        return terminal_payload, self._order_execution_status(terminal_payload)
+
+    @staticmethod
+    def _order_execution_status(response: dict[str, object]) -> str:
+        status = str(response.get("status") or "").upper()
+        executed_quantity = float(response.get("executedQty") or 0.0)
+        if status == "FILLED":
+            return "filled"
+        if not status and response.get("orderId") is not None:
+            return "filled"
+        if executed_quantity > 0:
+            return "partially_filled"
+        if status in {"REJECTED", "EXPIRED", "EXPIRED_IN_MATCH", "CANCELED"}:
+            return "rejected"
+        if status in {"NEW", "PENDING_NEW", "PARTIALLY_FILLED"}:
+            return "order_pending"
+        # FULL market responses always include status. This fallback preserves compatibility with
+        # gateways that only return an order id while still refusing an empty response.
+        return "order_pending"
+
+    def _place_exchange_protection(
+        self,
+        position: TradingPosition,
+        config: AutoTradeDefaults,
+    ) -> tuple[TradingPosition, str]:
+        submit = getattr(self.execution_gateway, "order_stop_loss_sell", None)
+        if not callable(submit):
+            return position, "当前执行网关不支持交易所止损单"
+        _, step_size, min_quantity, min_notional, tick_size = self._symbol_trade_rules(position.symbol)
+        quantity = self._floor_quantity(position.quantity, step_size)
+        stop_price = self._floor_quantity(position.stop_price, tick_size)
+        if quantity <= 0 or (min_quantity > 0 and quantity < min_quantity):
+            return position, "保护单数量低于交易所最小数量"
+        if min_notional > 0 and quantity * stop_price < min_notional:
+            return position, "保护单名义金额低于交易所最小金额"
+        client_order_id = self._client_order_id("protect", position.symbol, now_app_time())
+        try:
+            response = submit(
+                symbol=position.symbol,
+                quantity=quantity,
+                stop_price=stop_price,
+                test=config.order_test_only,
+                client_order_id=client_order_id,
+            )
+        except BinanceOrderStatusUnknown:
+            response = self._query_order_by_client_id(position.symbol, client_order_id)
+            if response is None:
+                return position, "保护单提交结果未知，查询订单也失败"
+        except Exception as exc:  # noqa: BLE001
+            return position, str(exc)
+        response_payload = response if isinstance(response, dict) else {}
+        position.protection_order_id = str(response_payload.get("orderId") or "")
+        position.protection_client_order_id = str(response_payload.get("clientOrderId") or client_order_id)
+        position.protection_stop_price = stop_price
+        position.protection_status = str(response_payload.get("status") or "NEW").upper()
+        return position, ""
+
+    def _cancel_exchange_protection(self, position: TradingPosition) -> tuple[bool, str]:
+        if not position.protection_order_id and not position.protection_client_order_id:
+            return True, ""
+        cancel = getattr(self.execution_gateway, "cancel_order", None)
+        if not callable(cancel):
+            return False, "当前执行网关不支持撤销保护单"
+        try:
+            cancel(
+                symbol=position.symbol,
+                order_id=position.protection_order_id or None,
+                client_order_id=None if position.protection_order_id else position.protection_client_order_id,
+            )
+        except BinanceOrderStatusUnknown:
+            response = self._query_order_by_client_id(position.symbol, position.protection_client_order_id)
+            status = str((response or {}).get("status") or "").upper()
+            if status not in {"CANCELED", "EXPIRED", "REJECTED"}:
+                return False, f"保护单撤销结果未知，当前状态 {status or 'UNKNOWN'}"
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)
+        position.protection_order_id = ""
+        position.protection_client_order_id = ""
+        position.protection_stop_price = None
+        position.protection_status = "CANCELED"
+        return True, ""
+
+    def _exchange_protection_fill_event(
+        self,
+        position: TradingPosition,
+        price: float,
+    ) -> TradingEvent | None:
+        if position.mode != "live" or not position.protection_client_order_id:
+            return None
+        response = self._query_order_by_client_id(position.symbol, position.protection_client_order_id)
+        if response is None:
+            return None
+        status = str(response.get("status") or "").upper()
+        position.protection_status = status
+        if status not in {"PARTIALLY_FILLED", "FILLED"}:
+            return None
+        cumulative_quantity = float(response.get("executedQty") or 0.0)
+        executed_quantity = max(0.0, cumulative_quantity - position.protection_executed_quantity)
+        if executed_quantity <= 0:
+            return None
+        cumulative_quote = float(response.get("cummulativeQuoteQty") or 0.0)
+        execution_quote = (
+            cumulative_quote * executed_quantity / cumulative_quantity
+            if cumulative_quantity > 0 and cumulative_quote > 0
+            else executed_quantity * price
+        )
+        position.protection_executed_quantity = cumulative_quantity
+        response = {
+            **response,
+            "executedQty": str(executed_quantity),
+            "cummulativeQuoteQty": str(execution_quote),
+        }
+        return self._live_exit_event_from_response(
+            position,
+            price,
+            "exchange_stop_loss",
+            response,
+            client_order_id=position.protection_client_order_id,
+            status="reconciled_filled" if status == "FILLED" else "partially_filled",
+        )
+
+    def _refresh_exchange_protection(self, position: TradingPosition, config: AutoTradeDefaults) -> str:
+        if (
+            position.mode != "live"
+            or config.order_test_only
+            or not config.exchange_protection_enabled
+            or config.execution_exchange.lower() != "binance"
+        ):
+            return ""
+        if position.protection_client_order_id:
+            response = self._query_order_by_client_id(position.symbol, position.protection_client_order_id)
+            if response is None:
+                return "无法查询现有保护单状态"
+            status = str(response.get("status") or "").upper()
+            position.protection_status = status
+            if status == "FILLED":
+                return ""
+            _, _, _, _, tick_size = self._symbol_trade_rules(position.symbol)
+            desired_stop = self._floor_quantity(position.stop_price, tick_size)
+            current_stop = position.protection_stop_price or float(response.get("stopPrice") or 0.0)
+            if status in {"NEW", "PARTIALLY_FILLED", "PENDING_NEW"} and math.isclose(
+                desired_stop,
+                current_stop,
+                rel_tol=0.0,
+                abs_tol=max(float(tick_size), 1e-12),
+            ):
+                return ""
+            if status in {"NEW", "PARTIALLY_FILLED", "PENDING_NEW"}:
+                canceled, error = self._cancel_exchange_protection(position)
+                if not canceled:
+                    return error
+            else:
+                position.protection_order_id = ""
+                position.protection_client_order_id = ""
+                position.protection_stop_price = None
+        _, error = self._place_exchange_protection(position, config)
+        return error
+
+    @staticmethod
+    def _remaining_position_after_partial_exit(
+        position: TradingPosition,
+        executed_quantity: float,
+    ) -> TradingPosition:
+        original_quantity = position.quantity
+        remaining_quantity = max(0.0, original_quantity - executed_quantity)
+        remaining_ratio = remaining_quantity / original_quantity if original_quantity > 0 else 0.0
+        original_margin = position.margin_notional
+        position.quantity = remaining_quantity
+        position.quote_notional *= remaining_ratio
+        position.margin_notional = original_margin * remaining_ratio if original_margin is not None else position.quote_notional
+        position.entry_fee_quote *= remaining_ratio
+        position.pending_exit_order_id = ""
+        position.pending_exit_client_order_id = ""
+        return position
 
     def _floor_quantity_for_symbol(self, symbol: str, quantity: float) -> float:
-        _, step_size, _, _ = self._symbol_trade_rules(symbol)
+        _, step_size, _, _, _ = self._symbol_trade_rules(symbol)
         return self._floor_quantity(quantity, step_size)
 
-    def _symbol_trade_rules(self, symbol: str) -> tuple[str, str, float, float]:
+    def _symbol_trade_rules(self, symbol: str) -> tuple[str, str, float, float, str]:
         normalized = symbol.upper().strip()
         base_asset = self._base_asset_from_symbol(normalized)
         step_size = "0.00000001"
         min_quantity = 0.0
         min_notional = 0.0
+        tick_size = "0.00000001"
         try:
             exchange_info = self.execution_gateway.exchange_info()
             for item in exchange_info.get("symbols", []):
@@ -1287,10 +2068,12 @@ class AutoTrader:
                         min_quantity = float(filter_item.get("minQty") or 0.0)
                     elif filter_item.get("filterType") in {"MIN_NOTIONAL", "NOTIONAL"}:
                         min_notional = float(filter_item.get("minNotional") or 0.0)
+                    elif filter_item.get("filterType") == "PRICE_FILTER":
+                        tick_size = str(filter_item.get("tickSize") or tick_size)
                 break
         except Exception:  # noqa: BLE001
             pass
-        return base_asset, step_size, min_quantity, min_notional
+        return base_asset, step_size, min_quantity, min_notional, tick_size
 
     @staticmethod
     def _base_asset_from_symbol(symbol: str) -> str:
@@ -1298,6 +2081,40 @@ class AutoTrader:
             if symbol.endswith(quote_asset) and len(symbol) > len(quote_asset):
                 return symbol[: -len(quote_asset)]
         return symbol
+
+    @staticmethod
+    def _quote_asset_from_symbol(symbol: str) -> str:
+        for quote_asset in ("FDUSD", "USDT", "USDC", "BUSD", "BTC", "ETH"):
+            if symbol.endswith(quote_asset) and len(symbol) > len(quote_asset):
+                return quote_asset
+        return ""
+
+    @classmethod
+    def _commission_summary(
+        cls,
+        response: dict[str, object],
+        symbol: str,
+    ) -> tuple[float, float, list[dict[str, object]]]:
+        base_asset = cls._base_asset_from_symbol(symbol)
+        quote_asset = cls._quote_asset_from_symbol(symbol)
+        base_commission = 0.0
+        fee_quote = 0.0
+        unconverted: list[dict[str, object]] = []
+        fills = response.get("fills") if isinstance(response.get("fills"), list) else []
+        for fill in fills:
+            if not isinstance(fill, dict):
+                continue
+            commission = float(fill.get("commission") or 0.0)
+            asset = str(fill.get("commissionAsset") or "").upper()
+            price = float(fill.get("price") or 0.0)
+            if asset == base_asset:
+                base_commission += commission
+                fee_quote += commission * price
+            elif asset == quote_asset:
+                fee_quote += commission
+            elif commission > 0:
+                unconverted.append({"asset": asset, "commission": commission})
+        return fee_quote, base_commission, unconverted
 
     @staticmethod
     def _floor_quantity(quantity: float, step_size: str) -> float:
@@ -1316,7 +2133,8 @@ class AutoTrader:
         exit_price: float,
         executed_quantity: float,
         exit_notional: float | None = None,
-    ) -> tuple[float, float, float]:
+        exit_fee_quote: float = 0.0,
+    ) -> tuple[float, float, float, float]:
         quantity = max(0.0, executed_quantity)
         if exit_notional is None:
             exit_notional = quantity * exit_price
@@ -1326,12 +2144,16 @@ class AutoTrader:
         margin_notional = position.margin_notional or entry_notional
         if position.quantity > 0 and quantity != position.quantity:
             margin_notional = margin_notional * (quantity / position.quantity)
-        realized_pnl = exit_notional - entry_notional
+        entry_fee_quote = position.entry_fee_quote
+        if position.quantity > 0 and quantity != position.quantity:
+            entry_fee_quote *= quantity / position.quantity
+        gross_pnl = exit_notional - entry_notional
+        realized_pnl = gross_pnl - entry_fee_quote - exit_fee_quote
         realized_pnl_pct = (realized_pnl / margin_notional) * 100 if margin_notional else 0.0
-        return exit_notional, realized_pnl, realized_pnl_pct
+        return exit_notional, gross_pnl, realized_pnl, realized_pnl_pct
 
-    @staticmethod
     def _position_from_order_response(
+        self,
         *,
         position: TradingPosition,
         response: dict[str, object],
@@ -1339,10 +2161,12 @@ class AutoTrader:
     ) -> TradingPosition:
         executed_qty = float(response.get("executedQty") or position.quantity)
         quote_notional = float(response.get("cummulativeQuoteQty") or position.quote_notional)
+        entry_fee_quote, base_commission, _ = self._commission_summary(response, position.symbol)
+        sellable_quantity = max(0.0, executed_qty - base_commission)
         entry_price = quote_notional / executed_qty if executed_qty > 0 else fallback_price
         return TradingPosition(
             symbol=position.symbol,
-            quantity=executed_qty,
+            quantity=sellable_quantity,
             entry_price=entry_price,
             quote_notional=quote_notional,
             score=position.score,
@@ -1356,6 +2180,9 @@ class AutoTrader:
             highest_price=entry_price,
             leverage=1.0,
             margin_notional=quote_notional,
+            position_id=position.position_id or position.client_order_id,
+            entry_order_id=str(response.get("orderId") or ""),
+            entry_fee_quote=entry_fee_quote,
         )
 
     @staticmethod

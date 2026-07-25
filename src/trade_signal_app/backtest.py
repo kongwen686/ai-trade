@@ -30,6 +30,7 @@ from .models import (
     TradePerformanceStat,
 )
 from .scoring import build_reasons, build_subscores, composite_score, compute_liquidity_score, grade_from_score
+from .entry_filters import structure_adjusted_exit_prices
 from .strategy import EntryRuleConfig, ExecutionConfig, ExitRuleConfig, evaluate_long_entry, normalize_return_pct
 from .time_utils import now_app_time
 from .tradingview_data import load_tradingview_csv
@@ -265,6 +266,16 @@ def run_backtest_for_series(
                 min_slippage_bps=execution_config.min_slippage_bps,
                 max_slippage_bps=execution_config.max_slippage_bps,
             ),
+            support_level=indicators.support_level,
+            resistance_level=indicators.resistance_level,
+            structure_exits_enabled=exit_config.structure_exits_enabled,
+            support_stop_buffer_pct=exit_config.support_stop_buffer_pct,
+            resistance_take_profit_buffer_pct=exit_config.resistance_take_profit_buffer_pct,
+            profit_protection_enabled=exit_config.profit_protection_enabled,
+            profit_protection_trigger_pct=exit_config.profit_protection_trigger_pct,
+            profit_protection_lock_pct=exit_config.profit_protection_lock_pct,
+            trailing_stop_pct=exit_config.trailing_stop_pct,
+            trend_hold_enabled=exit_config.trend_hold_enabled,
         )
         forward_returns = {
             horizon: percent_return(trade.entry_fill_price, candles[trade.entry_index + horizon].close_price)
@@ -765,12 +776,30 @@ def simulate_long_trade(
     entry_fee_bps: float,
     exit_fee_bps: float,
     slippage_bps: float,
+    support_level: float = 0.0,
+    resistance_level: float = 0.0,
+    structure_exits_enabled: bool = False,
+    support_stop_buffer_pct: float = 0.6,
+    resistance_take_profit_buffer_pct: float = 0.4,
+    profit_protection_enabled: bool = False,
+    profit_protection_trigger_pct: float = 3.0,
+    profit_protection_lock_pct: float = 0.5,
+    trailing_stop_pct: float = 2.0,
+    trend_hold_enabled: bool = False,
     ) -> TradePath:
     entry_index = signal_index + 1
     entry_bar = candles[entry_index]
     entry_price = entry_bar.open_price
-    stop_price = entry_price * (1 - (stop_loss_pct / 100))
-    take_price = entry_price * (1 + (take_profit_pct / 100))
+    stop_price, take_price = structure_adjusted_exit_prices(
+        entry_price=entry_price,
+        stop_loss_pct=stop_loss_pct,
+        take_profit_pct=take_profit_pct,
+        support_level=support_level,
+        resistance_level=resistance_level,
+        enabled=structure_exits_enabled,
+        support_stop_buffer_pct=support_stop_buffer_pct,
+        resistance_take_profit_buffer_pct=resistance_take_profit_buffer_pct,
+    )
     last_index = min(len(candles) - 1, entry_index + max_holding_bars - 1)
     min_low = entry_price
     max_high = entry_price
@@ -800,7 +829,7 @@ def simulate_long_trade(
                 exit_fee_bps=exit_fee_bps,
                 slippage_bps=slippage_bps,
             )
-        if exit_reason == "take_profit":
+        if exit_reason == "take_profit" and not trend_hold_enabled:
             exit_price = take_price
             return create_trade_path(
                 entry_index=entry_index,
@@ -815,6 +844,16 @@ def simulate_long_trade(
                 exit_fee_bps=exit_fee_bps,
                 slippage_bps=slippage_bps,
             )
+        if profit_protection_enabled:
+            close_return_pct = percent_return(entry_price, candle.close_price)
+            if close_return_pct >= profit_protection_trigger_pct:
+                locked_stop = entry_price * (1 + profit_protection_lock_pct / 100)
+                trailing_stop = (
+                    candle.close_price * (1 - trailing_stop_pct / 100)
+                    if trailing_stop_pct > 0
+                    else locked_stop
+                )
+                stop_price = max(stop_price, locked_stop, trailing_stop)
 
     return create_trade_path(
         entry_index=entry_index,
